@@ -1,0 +1,48 @@
+'use strict';
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+contextBridge.exposeInMainWorld('api', {
+  isElectron: true,
+  pickFiles: () => ipcRenderer.invoke('dialog:files'),
+  pickFolder: () => ipcRenderer.invoke('dialog:folder'),
+  scan: (files, dirs) => ipcRenderer.invoke('lib:scan', { files, dirs }),
+  cancelScan: () => ipcRenderer.invoke('scan:cancel'),
+  onScanProgress: (cb) => ipcRenderer.on('scan:progress', (_e, p) => cb(p)),
+  trackDetail: (p) => ipcRenderer.invoke('track:detail', p),
+  trackLyric: (p) => ipcRenderer.invoke('track:lyric', p),
+  trackCover: (p) => ipcRenderer.invoke('track:cover', p),
+  mediaUrl: (p) => ipcRenderer.invoke('media:url', p),
+  /* 网易云：全部返回 { ok, ... } / { ok:false, error:{code,message} } */
+  neSearch: (q, limit) => ipcRenderer.invoke('ne:search', { q, limit }),
+  neSongs: (ids) => ipcRenderer.invoke('ne:songs', ids),
+  nePlaylist: (id) => ipcRenderer.invoke('ne:playlist', id),
+  neAlbum: (id) => ipcRenderer.invoke('ne:album', id),
+  neLink: (v) => ipcRenderer.invoke('ne:link', v),
+  neCover: (url, size) => ipcRenderer.invoke('ne:cover', url, size),
+  neUrl: (id, quality) => ipcRenderer.invoke('ne:url', id, quality),
+  /* 账号：扫码登录（二维码 SVG + 状态轮询），凭证不回传渲染层 */
+  neStatus: () => ipcRenderer.invoke('ne:status'),
+  neQr: () => ipcRenderer.invoke('ne:qr'),
+  neQrPoll: () => ipcRenderer.invoke('ne:qrPoll'),
+  neLogout: () => ipcRenderer.invoke('ne:logout'),
+  /* 账号歌单：我的歌单 + 推荐歌单 + 每日推荐 + 私人FM */
+  neHome: () => ipcRenderer.invoke('ne:home'),
+  neDaily: () => ipcRenderer.invoke('ne:daily'),
+  neFm: (n) => ipcRenderer.invoke('ne:fm', n),
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  setSettings: (s) => ipcRenderer.invoke('settings:set', s),
+  setSettingsSync: (s) => ipcRenderer.send('settings:set-sync', s),
+  getLibrary: () => ipcRenderer.invoke('library:get'),
+  setLibrary: (l) => ipcRenderer.invoke('library:set', l),
+  setLibrarySync: (l) => ipcRenderer.send('library:set-sync', l),
+  winMin: () => ipcRenderer.invoke('win:min'),
+  winMax: () => ipcRenderer.invoke('win:max'),
+  winClose: () => ipcRenderer.invoke('win:close'),
+  winFullscreen: (on) => ipcRenderer.invoke('win:fullscreen', on),
+  isFullscreen: () => ipcRenderer.invoke('win:fullscreen:get'),
+  registerKeys: (list) => ipcRenderer.invoke('keys:register', list),
+  clearKeys: () => ipcRenderer.invoke('keys:clear'),
+  pathOf: (file) => { try { return webUtils.getPathForFile(file); } catch { return ''; } },
+  onGlobalKey: (cb) => ipcRenderer.on('key:global', (_e, id) => cb(id)),
+  onWinState: (cb) => ipcRenderer.on('win:state', (_e, s) => cb(s))
+});

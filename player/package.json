@@ -1,0 +1,91 @@
+{
+  "name": "nckiks-music",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Nckik′s music · 单界面桌面播放器（Windows x64）",
+  "author": "Nckik",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node make-icon.js",
+    "pack": "node make-icon.js && electron-builder --dir --win --x64",
+    "dist": "node make-icon.js && electron-builder --win --x64"
+  },
+  "dependencies": {
+    "music-metadata": "^11.2.1",
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^26.18.0",
+    "jsqr": "^1.4.0"
+  },
+  "build": {
+    "appId": "com.nckik.music",
+    "productName": "Nckik′s music",
+    "copyright": "Copyright © 2026 Nckik",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "netease.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "!demo/**",
+      "!screenshots/**",
+      "!dist/**",
+      "!build/**",
+      "!*.md",
+      "!make-demo.js",
+      "!make-icon.js",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "publish": null,
+    "asarUnpack": [
+      "node_modules/music-metadata/**",
+      "node_modules/strtok3/**",
+      "node_modules/token-types/**",
+      "node_modules/peek-readable/**",
+      "node_modules/uint8array-extras/**",
+      "node_modules/debug/**",
+      "node_modules/ms/**",
+      "node_modules/file-type/**",
+      "node_modules/content-type/**",
+      "node_modules/media-typer/**",
+      "node_modules/ieee754/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "NckiksMusic-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nckik′s music",
+      "uninstallDisplayName": "Nckik′s music ${version}",
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "artifactName": "NckiksMusic-Setup-${version}.${ext}"
+    }
+  }
+}

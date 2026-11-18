@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; media-src media: neaudio:; font-src 'self' file:; connect-src 'self' file:">
+<title>Nckik′s music</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body data-theme="dark">
+
+<div class="app">
+
+  <header class="bar">
+    <div class="bar-l">
+      <button class="ibtn" id="btnLib" title="曲库 (Ctrl+O)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <path d="M4 7h11M4 12h11M4 17h7"/><circle cx="18.5" cy="17" r="2.4"/><path d="M20.9 17V9.4l-3.2.9"/>
+        </svg>
+      </button>
+    </div>
+    <div class="drag" id="drag"></div>
+    <div class="bar-r">
+      <button class="ibtn" id="btnSet" title="设置">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <circle cx="12" cy="12" r="3.05"/><path d="M19.3 14.9a1.6 1.6 0 00.32 1.77l.06.06a1.95 1.95 0 11-2.76 2.76l-.06-.06a1.6 1.6 0 00-1.77-.32 1.6 1.6 0 00-.97 1.47V21a1.95 1.95 0 11-3.9 0v-.1a1.6 1.6 0 00-1.04-1.47 1.6 1.6 0 00-1.77.32l-.06.06a1.95 1.95 0 11-2.76-2.76l.06-.06a1.6 1.6 0 00.32-1.77 1.6 1.6 0 00-1.47-.97H4.2a1.95 1.95 0 110-3.9h.1a1.6 1.6 0 001.47-1.04 1.6 1.6 0 00-.32-1.77l-.06-.06A1.95 1.95 0 118.15 4.7l.06.06a1.6 1.6 0 001.77.32h.08a1.6 1.6 0 00.97-1.47V3.5a1.95 1.95 0 113.9 0v.1a1.6 1.6 0 00.97 1.47 1.6 1.6 0 001.77-.32l.06-.06a1.95 1.95 0 112.76 2.76l-.06.06a1.6 1.6 0 00-.32 1.77v.08a1.6 1.6 0 001.47.97h.1a1.95 1.95 0 110 3.9h-.1a1.6 1.6 0 00-1.47.97z"/>
+        </svg>
+      </button>
+      <div class="wctrl">
+        <button id="wFs" title="全屏 (F11)">
+          <svg viewBox="0 0 16 16" stroke-width="1.35"><path d="M6.2 2.6H2.6v3.6M9.8 2.6h3.6v3.6M13.4 9.8v3.6H9.8M2.6 9.8v3.6h3.6"/></svg>
+        </button>
+        <button id="wMin" title="最小化"><svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg></button>
+        <button id="wMax" title="最大化"><svg viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.2"/></svg></button>
+        <button id="wClose" class="cls" title="关闭"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6"/></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <button class="fs-exit" id="fsExit" title="退出全屏 (Esc)">
+    <svg viewBox="0 0 16 16"><path d="M6.2 2.6v3.6H2.6M9.8 2.6v3.6h3.6M13.4 9.8h-3.6v3.6M2.6 9.8h3.6v3.6"/></svg>
+    退出全屏
+  </button>
+
+  <main class="stage">
+    <section class="covercol">
+      <div class="cover" id="cover">
+        <img id="coverImg" alt="">
+        <div class="coversheen"></div>
+        <div class="cover-empty" id="coverEmpty">
+          <div class="ce-t" id="ceT">还没有音乐</div>
+          <div class="ce-d" id="ceD">拖入文件，或点击导入</div>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="mt" id="npT">未载入</div>
+        <div class="ma" id="npA">支持 MP3 / FLAC / WAV / M4A / OGG</div>
+        <div class="mf" id="npF"></div>
+      </div>
+    </section>
+
+    <section class="lyrcol">
+      <div class="ln-inner" id="lnInner"></div>
+      <div class="lyr-empty" id="lyrEmpty">暂无歌词 · 同目录放置同名 .lrc 即可</div>
+    </section>
+  </main>
+
+  <footer class="ctrl">
+    <div class="scrub" id="scrub">
+      <div class="track"><div class="fill" id="fill"></div><span class="knob" id="knob"><b></b></span></div>
+      <div class="bub" id="bub">0:00</div>
+    </div>
+    <div class="row">
+      <div class="side l">
+        <span class="fmt" id="fmtTag">—</span>
+      </div>
+      <div class="center">
+        <button class="cb" id="btnShuffle" title="随机播放 (S)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+            <path d="M4 6h3.2l9.6 12H20M4 18h3.2M17 3.6L20 6l-3 2.4M17 15.6L20 18l-3 2.4"/><path d="M13.6 9.2L17 6"/>
+          </svg>
+        </button>
+        <button class="cb" id="btnPrev" title="上一首 (Ctrl+Alt+←)">
+          <svg viewBox="0 0 24 24" fill="currentColor"><rect x="5.6" y="5" width="2.4" height="14" rx="1.2"/><path d="M19 5.4v13.2L9.4 12z"/></svg>
+        </button>
+        <button class="cb big" id="btnPlay" title="播放 / 暂停 (空格 / Ctrl+Alt+P)">
+          <svg id="icPlay" viewBox="0 0 24 24" fill="currentColor"><path d="M8.4 5.2l10.4 6.8-10.4 6.8z"/></svg>
+          <svg id="icPause" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="6.6" y="4.8" width="4" height="14.4" rx="1.7"/><rect x="13.4" y="4.8" width="4" height="14.4" rx="1.7"/></svg>
+        </button>
+        <button class="cb" id="btnNext" title="下一首 (Ctrl+Alt+→)">
+          <svg viewBox="0 0 24 24" fill="currentColor"><rect x="16" y="5" width="2.4" height="14" rx="1.2"/><path d="M5 5.4v13.2L14.6 12z"/></svg>
+        </button>
+        <button class="cb" id="btnRepeat" title="循环模式 (R)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 7h9.5a3.5 3.5 0 013.5 3.5v1M17 17H7.5A3.5 3.5 0 014 13.5v-1"/>
+            <path d="M9.4 4.6L7 7l2.4 2.4M14.6 19.4L17 17l-2.4-2.4"/>
+          </svg>
+        </button>
+      </div>
+      <div class="side r">
+        <button class="cb sm" id="btnVol" title="音量">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9.5h3L11.5 6v12L7 14.5H4z"/><path d="M15 9a4 4 0 010 6"/><path d="M17.8 6.4a7.6 7.6 0 010 11.2"/>
+          </svg>
+        </button>
+        <button class="cb sm" id="btnFmt" title="音质信息">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+            <path d="M3 12h2.2l1.8-5 2.4 10 2.2-7 1.8 4H21"/>
+          </svg>
+        </button>
+        <button class="cb sm" id="btnDev" title="输出设备">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="8" width="10" height="9" rx="2"/><path d="M9 8V6.4a1.6 1.6 0 011.6-1.6h6A1.6 1.6 0 0118.2 6.4V15a1.6 1.6 0 01-1.6 1.6H14"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<!-- 音量 -->
+<div class="pop" id="popVol">
+  <div class="pop-head">音量</div>
+  <div class="volrow"><input type="range" id="volRange" min="0" max="100" value="78"></div>
+  <div class="pop-row" id="muteRow"><span>静音</span><span class="pc" id="muteMark"></span></div>
+</div>
+
+<!-- 音质 / 文件格式 -->
+<div class="pop wide" id="popFmt">
+  <div class="pop-head">音质</div>
+  <div class="qlist" id="qualList"></div>
+  <div class="pop-sep"></div>
+  <div class="pop-head">当前播放 · 实测</div>
+  <div class="pop-kv" id="fmtList"></div>
+  <div class="pop-note" id="fmtNote">本地曲目读文件本身；网易云曲目读实际返回的码率与格式，都不是宣传参数。</div>
+</div>
+
+<!-- 输出设备 -->
+<div class="pop wide" id="popDev">
+  <div class="pop-head">输出设备 · 实测</div>
+  <div id="devList"></div>
+  <div class="pop-note" id="devNote"></div>
+</div>
+
+<!-- 曲库抽屉 -->
+<aside class="drawer" id="dLib">
+  <div class="dr-head">
+    <h3>曲库</h3>
+    <button class="x" data-close>✕</button>
+  </div>
+  <div class="dr-body">
+    <div class="seg srcseg" id="segSrc"><b data-s="local" class="on">本地</b><b data-s="net">网易云</b></div>
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20 20"/></svg>
+      <input id="q" placeholder="搜索曲名 / 艺人 / 专辑">
+    </div>
+    <div class="dr-actions" id="localActions">
+      <button class="ghost" id="btnAddFiles">导入文件</button>
+      <button class="ghost" id="btnAddFolder">导入文件夹</button>
+    </div>
+    <div class="linkrow" id="netActions">
+      <input class="lin" id="neLink" placeholder="粘贴歌曲 / 歌单 / 专辑链接，或 ID" spellcheck="false">
+      <button class="ghost mini" id="btnNeOpen">打开</button>
+    </div>
+    <div class="ne-note" id="neNote"></div>
+    <div class="ne-home" id="neHome"></div>
+    <div class="dr-sub" id="libCount">0 首</div>
+    <div class="list" id="libList"></div>
+  </div>
+</aside>
+
+<!-- 设置抽屉 -->
+<aside class="drawer" id="dSet">
+  <div class="dr-head">
+    <h3>设置</h3>
+    <button class="x" data-close>✕</button>
+  </div>
+  <div class="dr-body">
+    <div class="lbl">外观</div>
+    <div class="seg" id="segTheme"><b data-t="dark">夜间</b><b data-t="light">日间</b><b data-t="auto">自动</b></div>
+    <div class="group">
+      <div class="line"><div class="k">今日日出 · 日落<small id="sunNote">按本地经纬度用 NOAA 算法计算，不联网</small></div><div class="v" id="sunTxt">--:--</div></div>
+      <div class="line"><div class="k">位置<small>自动日夜按此坐标算；填「纬度, 经度」</small></div>
+        <input class="vin" id="inGeo" spellcheck="false" value="31.2304, 121.4737"></div>
+      <div class="line"><div class="k">封面取色<small>单一主色，整屏同源；不混第二种颜色</small></div><div class="v" id="acTxt">--</div></div>
+    </div>
+
+    <div class="lbl">快捷键</div>
+    <div class="group">
+      <div class="line"><div class="k">全局快捷键<small>系统级注册，其他窗口聚焦时也生效</small></div>
+        <div class="sw on" id="swKeys"><i></i></div></div>
+      <div class="line"><div class="k">播放 / 暂停</div><div class="keychip">Ctrl Alt P</div></div>
+      <div class="line"><div class="k">上一首 / 下一首</div><div class="keychip">Ctrl Alt ← →</div></div>
+      <div class="line"><div class="k">音量 ±2%</div><div class="keychip">Ctrl Alt ↑ ↓</div></div>
+      <div class="line"><div class="k">窗口内<small>空格播放 · ← → 快进退 5s · L 歌词 · 双击标题栏最大化</small></div><div class="keychip" id="keyState">已注册</div></div>
+    </div>
+
+    <div class="lbl">网易云</div>
+    <div class="group">
+      <div class="line"><div class="k">登录状态<small>手机扫码登录，凭证加密保存，不收账号密码</small></div><div class="v" id="neAuthState">未登录</div></div>
+      <div class="line col">
+        <div class="authrow">
+          <button class="ghost" id="btnNeQr">扫码登录</button>
+          <button class="ghost mini" id="btnNeLogout">退出</button>
+        </div>
+      </div>
+      <div class="qrwrap" id="qrWrap">
+        <div class="qrbox">
+          <div class="qrimg" id="qrShot"></div>
+          <div class="qrmask" id="qrMask"></div>
+        </div>
+        <div class="qrstate" id="qrState">正在获取二维码…</div>
+        <div class="qrhelp">手机打开「网易云音乐」→ 左上角 ≡ → 扫一扫</div>
+        <div class="qracts">
+          <button class="ghost" id="btnQrRefresh">刷新二维码</button>
+        </div>
+      </div>
+      <div class="line"><div class="k">音源适配<small>搜索 / 歌单 / 专辑 / 歌词 / 封面均走官方网页接口，非正式契约</small></div><div class="v dim">已接入</div></div>
+    </div>
+
+    <div class="lbl">音频输出</div>
+    <div class="group">
+      <div class="line"><div class="k">输出设备</div><div class="v" id="setDev">默认设备</div></div>
+      <div class="line"><div class="k">USB 独占<small>位完美直通需要 WASAPI Exclusive，本版本走系统混音，未接入</small></div><div class="v dim">未接入</div></div>
+      <div class="line"><div class="k">无缝播放<small>HTML5 音频不支持双解码器预读，未接入</small></div><div class="v dim">未接入</div></div>
+    </div>
+
+    <div class="lbl">播放</div>
+    <div class="group">
+      <div class="line"><div class="k">歌词时间轴<small>LRC 逐行时间戳；无歌词显示"暂无歌词"，不做均分推断</small></div><div class="v">LRC</div></div>
+      <div class="line"><div class="k">循环模式</div><div class="v" id="setRepeat">关闭</div></div>
+      <div class="line"><div class="k">随机播放</div><div class="v" id="setShuffle">关闭</div></div>
+    </div>
+
+    <div class="lbl">关于</div>
+    <div class="group">
+      <div class="line"><div class="k">名称</div><div class="v">Nckik′s music</div></div>
+      <div class="line"><div class="k">字体</div><div class="v">苹方 Medium</div></div>
+      <div class="line"><div class="k">版本</div><div class="v">0.4.0</div></div>
+    </div>
+  </div>
+</aside>
+
+<div class="scrim" id="scrim"></div>
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,833 @@
+'use strict';
+const { app, BrowserWindow, ipcMain, dialog, protocol, globalShortcut, shell, net, safeStorage, nativeImage } = require('electron');
+const path = require('node:path');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const { Readable } = require('node:stream');
+const ne = require('./netease');
+
+const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
+const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const MIME = {
+  '.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
+  '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.wma': 'audio/x-ms-wma',
+  '.aiff': 'audio/aiff', '.aif': 'audio/aiff'
+};
+const IMG_MIME = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
+const SIDECAR_NAMES = ['cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'front.jpg', 'albumart.jpg'];
+
+/* ---------------- 应用身份 ----------------
+ * 显示名带一个撇号（U+2032），用在窗口标题、关于页、安装包与快捷方式上。
+ * 数据目录另起一个纯 ASCII 的名字：路径里出现 ′ 这类字符，备份/同步/命令行
+ * 工具很容易转义出错，而用户根本不需要看到这个目录名。
+ * 注意顺序：必须先把 userData 指过去，再取 userDir，否则下面拿到的还是旧路径。
+ */
+const APP_NAME = 'Nckik′s music';
+const APP_DATA_DIR = 'NckiksMusic';
+app.setName(APP_NAME);
+/* 只在 userData 还等于「按应用名推出来的默认值」时才改道：
+ * 用户显式传了 --user-data-dir（多配置 / 调试）、或测试先 setPath 过临时目录，
+ * 都必须尊重 —— 无条件覆盖会把外部指定整个吃掉（审计时靠探针抓出来的）。 */
+const nameDefaultDir = path.join(app.getPath('appData'), app.getName());
+if (app.getPath('userData') === nameDefaultDir) {
+  app.setPath('userData', path.join(app.getPath('appData'), APP_DATA_DIR));
+}
+
+const userDir = app.getPath('userData');
+const settingsPath = path.join(userDir, 'settings.json');
+const libraryPath = path.join(userDir, 'library.json');
+
+/* media 是本地文件；neaudio 是网易云音频（主进程代理，带 Range 透传）。
+ * 远程地址会过期，且 http/https 混杂，交给自建协议统一处理：
+ * 渲染层始终只看到 neaudio://s/<id>，音频源换了服务器也不用改前端。 */
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
+  { scheme: 'neaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
+]);
+
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+if (process.env.SHOT_DPR) app.commandLine.appendSwitch('force-device-scale-factor', process.env.SHOT_DPR);
+// Windows 任务栏分组与通知身份：不设的话打包后会显示成 electron.app.Electron
+if (process.platform === 'win32') app.setAppUserModelId('com.nckik.music');
+
+/* 兜底日志：主进程里任何没接住的异常都别静默消失。
+ * 只写文件、不弹窗、不中断，避免把「某个 IPC 里的编程错误」升级成闪退。 */
+const crashLogPath = path.join(app.getPath('userData'), 'crash.log');
+function logCrash(where, err) {
+  try {
+    // 目录可能还不存在（首次运行 / userData 被清掉）：appendFileSync 不会自动建目录，
+    // 少了这一步，真正启动失败时反而什么都留不下来。
+    fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
+    const line = `[${new Date().toISOString()}] ${where} :: ${(err && err.stack) || err}\n`;
+    if (fs.existsSync(crashLogPath) && fs.statSync(crashLogPath).size > 512 * 1024) fs.unlinkSync(crashLogPath);
+    fs.appendFileSync(crashLogPath, line);
+  } catch {}
+}
+process.on('uncaughtException', e => logCrash('uncaughtException', e));
+process.on('unhandledRejection', e => logCrash('unhandledRejection', e));
+
+let win = null;
+let preFull = null;        // 进入全屏前的窗口状态，退出时原样还原
+
+/* 单实例：两个实例会抢音频设备，也会互相覆盖全局快捷键注册 */
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) app.quit();
+
+/* ---------------- 本地媒体协议：带 Range 支持，保证拖动进度条可 seek ---------------- */
+function registerMediaProtocol() {
+  protocol.handle('media', async (request) => {
+    let filePath;
+    try {
+      // searchParams.get 已经做过百分号解码，这里绝不能再 decode 一次：
+      // 路径里只要有一个裸 '%'（如 "100% Pure.mp3"），二次解码就会抛 URIError → 400。
+      filePath = new URL(request.url).searchParams.get('p') || '';
+    } catch { return new Response('bad url', { status: 400 }); }
+    if (!filePath) return new Response('bad url', { status: 400 });
+    if (!AUDIO_EXT.has(path.extname(filePath).toLowerCase())) return new Response('unsupported', { status: 415 });
+
+    let stat;
+    try { stat = await fsp.stat(filePath); } catch { return new Response('not found', { status: 404 }); }
+    if (!stat.isFile()) return new Response('not found', { status: 404 });
+
+    const total = stat.size;
+    const type = MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+    const range = request.headers.get('range');
+
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range);
+      let start = 0;
+      let end = total - 1;
+      if (m) {
+        if (!m[1] && m[2]) {
+          // `bytes=-N` 是「最后 N 字节」，不是「0 到 N」。按 0..N 解会让播放器
+          // 以为文件只有 N 字节，尾部请求也都拿到错误区间。
+          const tail = parseInt(m[2], 10);
+          start = Math.max(0, total - (Number.isFinite(tail) ? tail : 0));
+        } else {
+          if (m[1]) start = parseInt(m[1], 10);
+          if (m[2]) end = parseInt(m[2], 10);
+        }
+      }
+      if (Number.isNaN(start) || start < 0) start = 0;
+      if (Number.isNaN(end) || end >= total) end = total - 1;
+      if (start > end || total === 0) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${total}` } });
+      const stream = fs.createReadStream(filePath, { start, end });
+      return new Response(Readable.toWeb(stream), {
+        status: 206,
+        headers: {
+          'Content-Type': type,
+          'Content-Length': String(end - start + 1),
+          'Content-Range': `bytes ${start}-${end}/${total}`,
+          'Accept-Ranges': 'bytes'
+        }
+      });
+    }
+
+    return new Response(Readable.toWeb(fs.createReadStream(filePath)), {
+      status: 200,
+      headers: { 'Content-Type': type, 'Content-Length': String(total), 'Accept-Ranges': 'bytes' }
+    });
+  });
+}
+
+/* ---------------- 网易云音频协议 ----------------
+ * 渲染层拿到的地址是 neaudio://s/<id>，真正的 CDN 地址在这里解析并代理。
+ * 两个必须做的点：
+ *   1. 透传 Range —— 不转发 Range，audio 元素就无法 seek，进度条拖拽会退化成从头加载；
+ *   2. 地址过期换一次 —— 网易云返回的直链 20 分钟失效，命中 401/403 时
+ *      丢掉缓存重新解析一次，而不是让播放直接失败。
+ */
+const PASSTHROUGH_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
+
+function registerNeProtocol() {
+  protocol.handle('neaudio', async (request) => {
+    let id = 0;
+    try {
+      const u = new URL(request.url);
+      id = Number((u.pathname || '').replace(/^\/+/, '')) || Number(u.searchParams.get('id')) || 0;
+    } catch {}
+    if (!id) return new Response('bad id', { status: 400 });
+
+    const range = request.headers.get('range');
+    let lastStatus = 0;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let info;
+      try {
+        info = await ne.songUrl(id);
+      } catch (e) {
+        // 需要会员 / 无版权：返回 404，渲染层按 mediaErr 走「跳过并提示」
+        return new Response(String((e && e.message) || e), {
+          status: 404,
+          headers: { 'content-type': 'text/plain; charset=utf-8', 'x-ne-reason': (e && e.code) || 'NE_ERROR' }
+        });
+      }
+
+      const headers = {};
+      if (range) headers.Range = range;
+
+      let res;
+      try { res = await net.fetch(info.url, { headers }); }
+      catch { return new Response('upstream failed', { status: 502 }); }
+      lastStatus = res.status;
+
+      if ((res.status === 401 || res.status === 403) && attempt === 0) {
+        ne.invalidateUrl(id);       // 直链过期，换一条再来
+        continue;
+      }
+
+      const h = new Headers();
+      for (const k of PASSTHROUGH_HEADERS) {
+        const v = res.headers.get(k);
+        if (v) h.set(k, v);
+      }
+      if (!h.has('accept-ranges')) h.set('accept-ranges', 'bytes');
+      return new Response(res.body, { status: res.status, headers: h });
+    }
+    return new Response('upstream ' + lastStatus, { status: 410 });
+  });
+}
+
+/* ---------------- 网易云凭证 ----------------
+ * 只存扫码登录换来的会话串（MUSIC_U / __csrf 等），不接收也不保存账号密码。
+ * 用系统密钥库（Windows DPAPI / macOS Keychain）加密后落盘，settings.json 里不出现明文。
+ */
+const neAuthPath = path.join(userDir, 'ne-auth.bin');
+
+/* 改名（云音乐 → Nckik′s music）会换掉数据目录。老用户升级上来不该丢曲库：
+ * 新目录里还没有 library.json/settings.json 时，从旧目录把三份文件搬过来。
+ * 只搬这三个文件，别的（缓存、日志）不带；拷贝失败不影响启动。
+ * 测试/调试环境可设 NCKIK_SKIP_MIGRATION=1 跳过（空配置是刻意的，不要搬旧数据）。 */
+function migrateOldUserData() {
+  if (process.env.NCKIK_SKIP_MIGRATION === '1') return;
+  try {
+    if (fs.existsSync(libraryPath) || fs.existsSync(settingsPath)) return;   // 已有数据，绝不覆盖
+    const appData = app.getPath('appData');
+    const names = ['云音乐', 'yun-music-player'];
+    for (const name of names) {
+      const dir = path.join(appData, name);
+      if (dir === userDir || !fs.existsSync(dir)) continue;
+      const files = ['library.json', 'settings.json', 'ne-auth.bin'].filter(f => {
+        try { return fs.statSync(path.join(dir, f)).isFile(); } catch { return false; }
+      });
+      if (!files.length) continue;
+      fs.mkdirSync(userDir, { recursive: true });
+      for (const f of files) {
+        try { fs.copyFileSync(path.join(dir, f), path.join(userDir, f)); } catch {}
+      }
+      console.log('migrated from', dir, files.join(','));
+      return;                                   // 只迁一次，取第一个有数据的旧目录
+    }
+  } catch {}
+}
+
+function readNeCookie() {
+  try {
+    if (!fs.existsSync(neAuthPath)) return '';
+    if (!safeStorage.isEncryptionAvailable()) return '';
+    return safeStorage.decryptString(fs.readFileSync(neAuthPath));
+  } catch { return ''; }
+}
+
+function writeNeCookie(cookie) {
+  const v = String(cookie || '').trim();
+  if (!v) {
+    try { fs.unlinkSync(neAuthPath); } catch {}
+    return false;
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('系统密钥库不可用，无法安全保存凭证');
+  }
+  fs.writeFileSync(neAuthPath, safeStorage.encryptString(v));
+  return true;
+}
+
+/* ---------------- 持久化 ---------------- */
+/* 解析失败时把坏文件改名留档，避免"曲库凭空消失"；写入走 临时文件 + rename，断电不会写出半截 JSON */
+const readJSON = (p, fb) => {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
+  catch (e) {
+    if (e && e.code !== 'ENOENT') {
+      const bak = `${p}.bad-${Date.now()}`;
+      try { fs.renameSync(p, bak); console.error('readJSON failed, kept copy at', bak, e.message); } catch {}
+    }
+    return fb;
+  }
+};
+const writeJSON = (p, v) => {
+  try {
+    const tmp = `${p}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(v, null, 2));
+    fs.renameSync(tmp, p);
+  } catch (e) { console.error('writeJSON', p, e); }
+};
+
+const DEFAULT_SETTINGS = {
+  theme: 'auto', volume: 0.78, shuffle: false, repeat: 'off', sinkId: '', muted: false,
+  lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true,
+  quality: 'exhigh'            // 网易云音质档位：standard / higher / exhigh / lossless
+};
+
+/* ---------------- 元数据 ---------------- */
+let mmPromise = null;
+const getMM = () => (mmPromise ||= import('music-metadata'));
+
+function guessFromName(file) {
+  const base = path.basename(file, path.extname(file));
+  const m = /^(.*?)\s+-\s+(.*)$/.exec(base);
+  if (m) return { title: m[2].trim(), artist: m[1].trim(), album: '' };
+  return { title: base, artist: '未知艺人', album: '' };
+}
+
+/* 同目录的通用封面只读一次：一张 cover.jpg 被整张专辑共享，没必要每首读一遍 */
+const dirCoverCache = new Map();
+
+async function readImage(dir, name) {
+  const ext = path.extname(name).toLowerCase();
+  if (!IMG_EXT.has(ext)) return null;
+  try {
+    const buf = await fsp.readFile(path.join(dir, name));
+    if (buf.length > 12 * 1024 * 1024) return null;
+    return `data:${IMG_MIME[ext]};base64,${buf.toString('base64')}`;
+  } catch { return null; }
+}
+
+async function sidecarCover(file) {
+  const dir = path.dirname(file);
+  let files;
+  try { files = fs.readdirSync(dir); } catch { return null; }
+  const lower = new Map(files.map(f => [f.toLowerCase(), f]));
+  const base = path.basename(file, path.extname(file)).toLowerCase();
+
+  // 1) 与曲目同名的封面：每首不同，不缓存
+  for (const ext of IMG_EXT) {
+    const real = lower.get(base + ext);
+    if (real) { const data = await readImage(dir, real); if (data) return data; }
+  }
+  // 2) 目录通用封面：整目录共享，按目录缓存，避免 N 首重复读同一张图
+  if (dirCoverCache.has(dir)) return dirCoverCache.get(dir);
+  let found = null;
+  for (const n of SIDECAR_NAMES) {
+    const real = lower.get(n);
+    if (real) { found = await readImage(dir, real); if (found) break; }
+  }
+  dirCoverCache.set(dir, found);
+  return found;
+}
+
+/* 内嵌歌词与封面互不影响：歌词无论 withCover 与否都要取，否则"内嵌兜底"永远为空 */
+function pickLyrics(common) {
+  const list = (common && common.lyrics) || [];
+  return list.map(l => (typeof l === 'string' ? l : l && l.text)).filter(Boolean)[0] || '';
+}
+
+async function readTrack(file, withCover = false) {
+  const g = guessFromName(file);
+  const out = {
+    path: file, title: g.title, artist: g.artist, album: g.album,
+    duration: 0, codec: '', sampleRate: 0, bitDepth: 0, bitrate: 0, lossless: false, cover: null
+  };
+  try {
+    const mm = await getMM();
+    const meta = await mm.parseFile(file, { duration: true, skipCovers: !withCover });
+    const c = meta.common || {};
+    if (c.title) out.title = c.title;
+    if (c.artist) out.artist = c.artist;
+    if (c.album) out.album = c.album;
+    out.duration = Math.round(meta.format?.duration || 0);
+    out.codec = (meta.format?.codec || path.extname(file).slice(1)).toUpperCase();
+    out.sampleRate = meta.format?.sampleRate || 0;
+    out.bitDepth = meta.format?.bitsPerSample || 0;
+    out.bitrate = meta.format?.bitrate || 0;
+    out.lossless = !!meta.format?.lossless;
+
+    const lyr = pickLyrics(c);
+    if (lyr) out.embeddedLyrics = lyr;
+
+    if (withCover) {
+      const pic = (c.picture || [])[0];
+      out.cover = pic
+        ? `data:${pic.format || 'image/jpeg'};base64,${Buffer.from(pic.data).toString('base64')}`
+        : await sidecarCover(file);
+    }
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+  }
+  return out;
+}
+
+function findSidecarLrc(file) {
+  const dir = path.dirname(file);
+  const base = path.basename(file, path.extname(file));
+  const candidates = [`${base}.lrc`];
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (name.toLowerCase() === `${base.toLowerCase()}.lrc`) { candidates.unshift(path.join(dir, name)); break; }
+    }
+  } catch {}
+  for (const c of candidates) {
+    const p = path.isAbsolute(c) ? c : path.join(dir, c);
+    try { if (fs.statSync(p).isFile()) return p; } catch {}
+  }
+  return null;
+}
+
+async function scanFolder(dir, acc = []) {
+  let list = [];
+  try { list = await fsp.readdir(dir, { withFileTypes: true }); } catch { return acc; }
+  for (const d of list) {
+    if (d.name.startsWith('.')) continue;
+    const full = path.join(dir, d.name);
+    if (d.isDirectory()) await scanFolder(full, acc);
+    else if (AUDIO_EXT.has(path.extname(d.name).toLowerCase())) acc.push(full);
+  }
+  return acc;
+}
+
+/* 有限并发：串行解析大目录会把主进程 CPU 打满，1000 首要等很久且全程无反馈 */
+async function mapLimit(items, limit, fn) {
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) || 1 }, async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+}
+
+const scanState = { busy: false, abort: false };
+const send = (ch, payload) => { if (win && !win.isDestroyed()) win.webContents.send(ch, payload); };
+
+/* ---------------- 窗口 ---------------- */
+function createWindow() {
+  win = new BrowserWindow({
+    width: 1100, height: 700, minWidth: 860, minHeight: 560,
+    frame: false, backgroundColor: '#0b0b0e', show: false,
+    title: APP_NAME,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  win.on('closed', () => { win = null; });
+  // 渲染进程崩溃时留证并给一次自动恢复，总比留个白窗口强
+  win.webContents.on('render-process-gone', (_e, details) => {
+    logCrash('render-process-gone', JSON.stringify(details));
+    if (!win || win.isDestroyed()) return;
+    if (details && details.reason === 'clean-exit') return;
+    try { win.webContents.reload(); } catch {}
+  });
+  win.webContents.on('preload-error', (_e, p, err) => logCrash('preload-error ' + p, err));
+
+  const q = (process.env.SHOT_T || process.env.SHOT_OPEN)
+    ? { query: { t: process.env.SHOT_T || '', open: process.env.SHOT_OPEN || '' } }
+    : undefined;
+  win.loadFile(path.join(__dirname, 'renderer', 'index.html'), q);
+  win.once('ready-to-show', () => win.show());
+  win.on('maximize', () => send('win:state', { maximized: true }));
+  win.on('unmaximize', () => send('win:state', { maximized: false }));
+  win.on('enter-full-screen', () => send('win:state', { fullscreen: true, maximized: false }));
+  win.on('leave-full-screen', () => {
+    const wasMax = !!(preFull && preFull.maximized);
+    restoreFromFull();
+    // maximize() 在 Windows 上异步生效，此刻 isMaximized 可能仍是 false；
+    // 按即将还原的目标状态回报，随后的 maximize 事件会再校正一次。
+    send('win:state', { fullscreen: false, maximized: wasMax ? true : win.isMaximized() });
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  if (process.env.SHOT) {
+    win.webContents.once('did-finish-load', () => {
+      if (process.env.SHOT_FS) {
+        setTimeout(() => { setFullscreen(true); setTimeout(capture, 1200); }, 700);
+      } else {
+        setTimeout(capture, 2600);
+      }
+    });
+  }
+}
+
+async function capture() {
+  try {
+    if (process.env.SHOT_P) {
+      await win.webContents.executeJavaScript(
+        `(() => { const el = document.querySelector('.ln.on'); if (el) el.style.setProperty('--p', ${JSON.stringify(process.env.SHOT_P)}); return true; })()`
+      );
+      await new Promise(r => setTimeout(r, 120));
+    }
+    const rect = process.env.SHOT_RECT
+      ? (([x, y, width, height]) => ({ x, y, width, height }))(process.env.SHOT_RECT.split(',').map(Number))
+      : undefined;
+    const img = await win.webContents.capturePage(rect);
+    const out = process.env.SHOT;
+    fs.writeFileSync(out, img.toPNG());
+    console.log('SHOT saved', out);
+  } catch (e) { console.error('SHOT failed', e); }
+  setTimeout(() => app.quit(), 300);
+}
+
+/* ---------------- 全屏 ---------------- */
+/*
+ * 用原生 setFullScreen 而不是「放大到屏幕尺寸 + 置顶」：
+ * 后者盖不住任务栏（任务栏在 Z 序上更靠前），要盖住就得 alwaysOnTop，
+ * 而 alwaysOnTop 会让窗口压在其他程序之上，不像全屏。
+ */
+function setFullscreen(on) {
+  if (!win || win.isDestroyed()) return false;
+  if (on) {
+    if (win.isFullScreen()) return true;
+    // getNormalBounds 拿的是「还原态」尺寸，最大化时也能拿到正确值
+    preFull = { maximized: win.isMaximized(), bounds: win.getNormalBounds() };
+    win.setFullScreen(true);
+    return true;
+  }
+  if (!win.isFullScreen()) return false;
+  win.setFullScreen(false);
+  return false;
+}
+
+function restoreFromFull() {
+  const s = preFull;
+  preFull = null;
+  if (!s || !win || win.isDestroyed()) return;
+  if (s.maximized) { win.maximize(); return; }
+  if (win.isMaximized()) win.unmaximize();
+  win.setBounds(s.bounds);
+}
+
+/* ---------------- IPC ---------------- */
+ipcMain.handle('dialog:files', async () => {
+  if (!win || win.isDestroyed()) return [];
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择音乐文件', properties: ['openFile', 'multiSelections'],
+    filters: [{ name: '音频', extensions: [...AUDIO_EXT].map(e => e.slice(1)) }]
+  });
+  return r.canceled ? [] : r.filePaths;
+});
+
+ipcMain.handle('dialog:folder', async () => {
+  if (!win || win.isDestroyed()) return [];
+  const r = await dialog.showOpenDialog(win, { title: '选择音乐文件夹', properties: ['openDirectory'] });
+  return r.canceled ? [] : r.filePaths;
+});
+
+ipcMain.handle('scan:cancel', () => { scanState.abort = true; return true; });
+
+ipcMain.handle('lib:scan', async (_e, { files = [], dirs = [] } = {}) => {
+  if (scanState.busy) return [];
+  const all = new Set();
+  // 拖进来的路径可能是文件也可能是目录，两种都收
+  for (const f of files) {
+    try {
+      const st = await fsp.stat(f);
+      if (st.isDirectory()) for (const x of await scanFolder(f)) all.add(x);
+      else if (AUDIO_EXT.has(path.extname(f).toLowerCase())) all.add(f);
+    } catch {}
+  }
+  for (const d of dirs) for (const f of await scanFolder(d)) all.add(f);
+
+  const list = [...all];
+  scanState.busy = true;
+  scanState.abort = false;
+  let done = 0;
+  send('scan:progress', { done: 0, total: list.length });
+
+  const out = [];
+  try {
+    await mapLimit(list, 6, async (f) => {
+      if (scanState.abort) return;
+      const t = await readTrack(f, false);
+      if (scanState.abort) return;
+      out.push(t);
+      done++;
+      if (done % 8 === 0 || done === list.length) send('scan:progress', { done, total: list.length });
+    });
+  } finally {
+    scanState.busy = false;
+  }
+  return out;
+});
+
+const isNeKey = p => typeof p === 'string' && p.startsWith('ne:');
+
+ipcMain.handle('track:detail', async (_e, file) => {
+  // 网易云的封面/时长在搜索与详情阶段已经拿到，没有本地文件可解析
+  if (isNeKey(file)) return { source: 'netease' };
+  return readTrack(file, true);
+});
+
+ipcMain.handle('track:lyric', async (_e, file) => {
+  if (isNeKey(file)) {
+    try { return await ne.lyric(Number(file.slice(3))); }
+    catch (e) { return { text: '', source: '', note: String((e && e.message) || e) }; }
+  }
+  const side = findSidecarLrc(file);
+  if (side) {
+    try { return { text: await fsp.readFile(side, 'utf8'), source: path.basename(side) }; } catch {}
+  }
+  // 只取歌词：不解析封面、不读时长，比整条 readTrack 轻得多
+  try {
+    const mm = await getMM();
+    const meta = await mm.parseFile(file, { duration: false, skipCovers: true });
+    const lyr = pickLyrics(meta.common);
+    return { text: lyr, source: lyr ? '内嵌' : '' };
+  } catch { return { text: '', source: '' }; }
+});
+
+ipcMain.handle('settings:get', () => ({ ...DEFAULT_SETTINGS, ...readJSON(settingsPath, {}) }));
+ipcMain.handle('settings:set', (_e, s) => {
+  writeJSON(settingsPath, { ...DEFAULT_SETTINGS, ...s });
+  // 音质档位不只是界面开关：neaudio 协议在解析地址时用的是主进程这一份，
+  // 只改渲染层的设置会让「本地曲目上选的档位」在下次播网易云时对不上。
+  if (s && s.quality) ne.setQuality(s.quality);
+  return true;
+});
+
+ipcMain.handle('library:get', () => readJSON(libraryPath, []));
+ipcMain.handle('library:set', (_e, list) => {
+  if (!Array.isArray(list)) return false;
+  writeJSON(libraryPath, list.map(({ cover, ...rest }) => rest));
+  return true;
+});
+
+/* 关窗前的最后一笔：renderer 用 send 发来，主进程保证落盘（200ms 防抖窗口内的改动不会丢） */
+ipcMain.on('settings:set-sync', (_e, s) => {
+  if (s && typeof s === 'object') {
+    writeJSON(settingsPath, { ...DEFAULT_SETTINGS, ...s });
+    if (s.quality) ne.setQuality(s.quality);
+  }
+});
+ipcMain.on('library:set-sync', (_e, list) => {
+  if (Array.isArray(list)) writeJSON(libraryPath, list.map(({ cover, ...rest }) => rest));
+});
+
+ipcMain.handle('media:url', (_e, file) => {
+  const s = String(file || '');
+  if (isNeKey(s)) return 'neaudio://s/' + s.slice(3);
+  return `media://f/?p=${encodeURIComponent(s)}`;
+});
+
+/* ---------------- 网易云 IPC ----------------
+ * 统一返回 { ok, ... } / { ok:false, error:{code,message} }：
+ * Error 对象过 IPC 会丢掉自定义字段，形如「需要会员」这种可判断的原因必须显式带出来。
+ */
+const neCall = async fn => {
+  try { return { ok: true, ...(await fn()) }; }
+  catch (e) {
+    return { ok: false, error: { code: (e && e.code) || 'NE_ERROR', message: String((e && e.message) || e) } };
+  }
+};
+
+ipcMain.handle('ne:search', (_e, { q, limit } = {}) =>
+  neCall(async () => ({ tracks: await ne.searchSongs(q, limit) })));
+
+ipcMain.handle('ne:songs', (_e, ids) =>
+  neCall(async () => ({ tracks: await ne.songDetail(Array.isArray(ids) ? ids : [ids]) })));
+
+ipcMain.handle('ne:playlist', (_e, id) => neCall(() => ne.playlistDetail(id)));
+ipcMain.handle('ne:album', (_e, id) => neCall(() => ne.albumDetail(id)));
+ipcMain.handle('ne:link', (_e, v) => neCall(async () => ({ link: await ne.resolveLink(v) })));
+
+ipcMain.handle('ne:cover', (_e, url, size) =>
+  neCall(async () => {
+    const c = await ne.coverData(url, Number(size) || 500);
+    return { dataUrl: c.dataUrl, bytes: c.bytes };
+  }));
+
+/* 播放前先问一次：既能拿到真实码率填「音质·实测」，
+ * 也能在地址拿不到时给出可读原因，而不是等 audio 报一个 mediaErr 4。
+ * 档位由渲染层传入（设置项），这里同步给音源层以保证地址缓存与档位一致。 */
+ipcMain.handle('ne:url', (_e, id, quality) =>
+  neCall(async () => {
+    if (quality) ne.setQuality(quality);
+    const i = await ne.songUrl(Number(id), quality);
+    const type = String(i.type || '');
+    return {
+      codec: type ? type.toUpperCase() : '',
+      bitrate: i.br,
+      lossless: /flac|alac|ape|wav/i.test(type),
+      level: i.level,
+      requested: i.requested,
+      downgraded: !!i.downgraded,
+      size: i.size
+    };
+  }));
+
+/* ---------------- 列表缩略封面 ----------------
+ * 曲库列表一屏十几行，每行都要封面：这里只返回「小图」，不把几 MB 的内嵌原图
+ * 塞进 IPC。主进程按路径缓存缩略结果，来回滚动不会反复解析文件。
+ */
+const THUMB_MAX = 240;
+const thumbCache = new Map();     // path -> data URL（失败也缓存空串，避免反复踩同一个坏文件）
+
+function thumbFrom(buf, fmt) {
+  try {
+    const img = nativeImage.createFromBuffer(buf);
+    if (!img.isEmpty()) {
+      const small = img.resize({ width: 96, height: 96, quality: 'good' });
+      return small.toDataURL();     // PNG data URL，通常十几 KB
+    }
+  } catch {}
+  return 'data:' + (fmt || 'image/jpeg') + ';base64,' + buf.toString('base64');
+}
+
+async function readThumb(file) {
+  if (thumbCache.has(file)) {
+    const hit = thumbCache.get(file);
+    thumbCache.delete(file);          // 命中即刷新 LRU 位置
+    thumbCache.set(file, hit);
+    return hit;
+  }
+  let out = '';
+  try {
+    const mm = await getMM();
+    const meta = await mm.parseFile(file, { duration: false, skipCovers: false });
+    const pic = ((meta.common && meta.common.picture) || [])[0];
+    if (pic) out = thumbFrom(Buffer.from(pic.data), pic.format);
+    else {
+      const side = await sidecarCover(file);          // 同目录 cover.jpg 等
+      if (side) out = thumbFrom(Buffer.from(side.slice(side.indexOf(',') + 1), 'base64'));
+    }
+  } catch { out = ''; }
+  thumbCache.set(file, out);
+  while (thumbCache.size > THUMB_MAX) thumbCache.delete(thumbCache.keys().next().value);
+  return out;
+}
+
+ipcMain.handle('track:cover', async (_e, file) => {
+  if (isNeKey(file)) return { ok: false, error: { code: 'NE_NO_COVER', message: '网易云曲目请用 ne:cover' } };
+  const url = await readThumb(String(file || ''));
+  return url ? { ok: true, dataUrl: url } : { ok: false, error: { code: 'NO_COVER', message: '没有内嵌封面' } };
+});
+
+/* ---------------- 网易云账号：扫码登录 ----------------
+ * 音源权限跟着账号走，所以登录入口是「扫码」，不是让用户去浏览器里翻 Cookie。
+ *   - 二维码 SVG 由主进程本地生成并内联返回：不用联网取图，CSP 也不用给图片域名开口子；
+ *   - 会话串只在 803 那一刻在主进程内部取出，加密落盘后不再回传渲染层，页面里不出现第二份凭证；
+ *   - 密钥库不可用不算登录失败：本次会话照常可用，只是没法长期保存，需要明确告诉用户。
+ */
+const neErr = e => ({ code: (e && e.code) || 'NE_ERROR', message: String((e && e.message) || e) });
+
+ipcMain.handle('ne:status', async () => {
+  if (!ne.hasCookie()) return { hasCookie: false, loggedIn: false, uid: 0 };
+  try {
+    const a = await ne.account();
+    return {
+      hasCookie: true,
+      loggedIn: !!a.loggedIn,
+      uid: a.userId || 0,
+      nickname: a.nickname || '',
+      avatarUrl: a.avatarUrl || '',
+      vipType: a.vipType || 0
+    };
+  } catch (e) {
+    // 网络/风控异常不代表凭证失效：如实说「没验证成功」，不要误报已过期骗用户白扫一次
+    return { hasCookie: true, loggedIn: true, unknown: true, uid: 0, nickname: '', error: neErr(e).message };
+  }
+});
+
+/* 抽屉「网易云」首页：当前账号自己创建的歌单 + 推荐歌单。
+ * 两段各自成败（推荐接口是公开的，登录态挂了也不该让整页空白）。 */
+ipcMain.handle('ne:home', () => neCall(() => ne.home()));
+
+/* 每日推荐 / 私人FM：都要求登录，失败码统一 NE_LOGIN_REQUIRED，界面据此提示重新扫码 */
+ipcMain.handle('ne:daily', () => neCall(() => ne.dailySongs()));
+ipcMain.handle('ne:fm', (_e, n) => neCall(() => ne.personalFm(n)));
+
+ipcMain.handle('ne:qr', async () => {
+  try {
+    const q = await ne.qrCreate();
+    return { ok: true, svg: ne.qrSvg(q.url, { margin: 3 }), url: q.url, ttl: q.ttl };
+  } catch (e) {
+    return { ok: false, error: neErr(e) };
+  }
+});
+
+ipcMain.handle('ne:qrPoll', async () => {
+  try {
+    const r = await ne.qrPoll();
+    if (r.code !== 803) return { ok: true, code: r.code, message: r.message, loggedIn: false };
+
+    let saved = false, saveErr = '';
+    try { saved = writeNeCookie(r.cookie); } catch (e) { saveErr = e.message; }
+    return {
+      ok: true, code: 803, loggedIn: true, saved,
+      nickname: r.nickname || '', avatarUrl: r.avatarUrl || '',
+      warning: saved ? '' : (saveErr || '登录成功，但凭证没能落盘，重启后需要重新扫码')
+    };
+  } catch (e) {
+    return { ok: false, code: 0, error: neErr(e) };
+  }
+});
+
+ipcMain.handle('ne:logout', () => {
+  try { writeNeCookie(''); } catch {}
+  ne.setCookie('');
+  return { hasCookie: false, loggedIn: false };
+});
+
+ipcMain.handle('win:min', () => { if (win && !win.isDestroyed()) win.minimize(); });
+ipcMain.handle('win:max', () => {
+  if (!win || win.isDestroyed()) return false;
+  if (win.isFullScreen()) return false;          // 全屏下最大化没有意义，忽略
+  if (win.isMaximized()) win.unmaximize(); else win.maximize();
+  return win.isMaximized();
+});
+ipcMain.handle('win:close', () => { if (win && !win.isDestroyed()) win.close(); });
+ipcMain.handle('win:fullscreen', (_e, on) => setFullscreen(!!on));
+ipcMain.handle('win:fullscreen:get', () => !!win && !win.isDestroyed() && win.isFullScreen());
+
+let keyTable = [];
+ipcMain.handle('keys:register', (_e, list) => {
+  const prev = keyTable;
+  globalShortcut.unregisterAll();
+  const res = [];
+  const next = [];
+  for (const { accel, id } of list || []) {
+    let ok = false;
+    try { ok = globalShortcut.register(accel, () => send('key:global', id)); }
+    catch { ok = false; }
+    if (ok) next.push({ accel, id });
+    res.push({ accel, id, ok });
+  }
+  // 一个都没注册上（几乎都不该发生）：把上一次可用的表恢复回去，
+  // 别因为一次失败把原本能用的快捷键全丢掉。
+  if (!next.length && res.length && prev.length) {
+    for (const { accel, id } of prev) {
+      try { globalShortcut.register(accel, () => send('key:global', id)); } catch {}
+    }
+    keyTable = prev;
+    return prev.map(p => ({ ...p, ok: true, restored: true }));
+  }
+  keyTable = next;
+  return res;
+});
+ipcMain.handle('keys:clear', () => { globalShortcut.unregisterAll(); keyTable = []; return true; });
+
+/* ---------------- 生命周期 ---------------- */
+app.on('second-instance', () => {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+});
+
+app.whenReady().then(() => {
+  if (!gotLock) return;
+  migrateOldUserData();             // 改名后第一次启动：把老目录里的曲库/设置/凭证接过来
+  registerMediaProtocol();
+  registerNeProtocol();
+  ne.setCookie(readNeCookie());     // 上次扫过的凭证在开窗前就位，首屏点歌即可用
+  ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
+  createWindow();
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+}).catch(e => logCrash('whenReady', e));
+
+app.on('will-quit', () => globalShortcut.unregisterAll());
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
