@@ -19,7 +19,10 @@ const S = {
   seekDrag: false,
   lastLy: -1,
   lnNodes: [],
-  lastP: -1,
+  lnChars: [],                     // 每行的字节点数组（没有逐字数据的行是 null）
+  curCh: -2,                       // 当前正在填的字下标：-2 还没开始，n 已完成 n 个
+  curFrac: -1,                     // 当前字内的比例，避免每帧重复写同一个样式值
+  waitNode: -1,                    // 「…」挂在哪一行上
   hist: [],
   libDirty: false,
   srcMode: 'local',                 // 曲库抽屉的两条音轨：local / net
@@ -335,6 +338,25 @@ async function loadArt(k) {
 }
 
 /* ------------------------------------------------------------------ LRC */
+
+/* 增强型 LRC 的行内逐字标签：<mm:ss.xx>字。QQ / 酷狗 与部分本地 LRC 会带。
+ * 返回 [{ t, text }]；没有标签返回 null，交给「按字摊开」的兜底。 */
+function parseWordTags(raw) {
+  const marks = [...raw.matchAll(/<(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)>/g)];
+  if (!marks.length) return null;
+  const words = [];
+  for (let i = 0; i < marks.length; i++) {
+    const m = marks[i];
+    const from = m.index + m[0].length;
+    const to = i + 1 < marks.length ? marks[i + 1].index : raw.length;
+    const seg = raw.slice(from, to).replace(/<[^>]*>/g, '');
+    const ss = parseFloat(String(m[2]).replace(':', '.'));
+    const t = parseInt(m[1], 10) * 60 + ss;
+    if (!Number.isNaN(t) && seg) words.push({ t, text: seg });
+  }
+  return words.length ? words : null;
+}
+
 function parseLRC(src) {
   if (!src) return [];
   const lines = src.split(/\r?\n/);
@@ -348,24 +370,135 @@ function parseLRC(src) {
   for (const raw of lines) {
     const stamps = [...raw.matchAll(/\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]/g)];
     if (!stamps.length) continue;
-    const text = raw.replace(/\[[^\]]*\]/g, '').trim();
+    const words = parseWordTags(raw);
+    // 行内 <...> 是时间标签，不能留在正文里（老代码只剥了 [...]，带逐字标签的
+    // LRC 会把尖括号原样画出来）
+    const text = raw.replace(/\[[^\]]*\]/g, '').replace(/<[^>]*>/g, '').trim();
     if (!text) continue;
     for (const s of stamps) {
       const mm = parseInt(s[1], 10);
       const ss = parseFloat(String(s[2]).replace(':', '.'));
       if (Number.isNaN(ss)) continue;
-      out.push({ t: mm * 60 + ss - offset, text });
+      out.push({ t: mm * 60 + ss - offset, text, words });
     }
   }
   out.sort((a, b) => a.t - b.t);
   return out.filter((l, i) => i === 0 || l.t !== out[i - 1].t);
 }
 
+/* ------------------------------------------------------------ 逐字时间轴
+ * 填充的粒度是「一个字」，所以每行先摊出一串 { c, t0, t1 }。
+ * 时间来源三级，越靠前越准：
+ *   1. 网易云 yrc：每个字都有真实起止（parseYRC）；
+ *   2. 增强型 LRC 的行内 <mm:ss.xx>：每段真实起点，段内再按字宽分；
+ *   3. 只有行时间戳：把 [本行, 下一行) 按字宽摊开。这条是估计，但单位仍是
+ *      「字」——每个字有自己的起止，不会出现整行一口气扫过去的忽快忽慢。
+ * 摊开时给每个字压上限（MAX_CH）：长间奏就提前唱完，剩下交给「…」占位，
+ * 而不是让最后一个字拖十几秒才填满。
+ */
+const MAX_CH = 1.4;    // 单字填充时长上限（秒）
+const GAP_MIN = 1.2;   // 空档超过这个秒数才显示「…」，句间正常停顿不闪
+
+function charWeight(c) {
+  if (!c || /\s/.test(c)) return 0.34;                                 // 空格几乎没有字宽
+  if (/[\u2e80-\u9fff\uac00-\ud7af\uff00-\uffef]/.test(c)) return 1;   // 汉字 / 假名 / 谚文 / 全角
+  if (/[，。！？、；：,.!?;:'"（）()]/.test(c)) return 0.85;             // 标点：有字宽但短
+  return 0.55;                                                        // 拉丁字母 / 数字
+}
+
+/* 把一段文字按字宽摊到 [t0, t0 + span) 上 */
+function spreadChars(out, text, t0, span) {
+  const list = [...String(text)];
+  if (!list.length || !(span > 0)) return;
+  const wsum = list.reduce((s, c) => s + charWeight(c), 0) || 1;
+  const per = Math.min(span / wsum, MAX_CH);
+  let t = t0;
+  for (const c of list) {
+    const d = per * charWeight(c);
+    out.push({ c, t0: t, t1: t + d });
+    t += d;
+  }
+}
+
+function assignChars(lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.chars && l.chars.length) continue;
+    const next = lines[i + 1];
+    const chars = [];
+    if (l.words && l.words.length) {
+      for (let w = 0; w < l.words.length; w++) {
+        const seg = l.words[w];
+        const end = w + 1 < l.words.length
+          ? l.words[w + 1].t
+          : Math.min(seg.t + 2.4, next ? next.t : seg.t + 2.4);
+        spreadChars(chars, seg.text, seg.t, Math.max(0.12, end - seg.t));
+      }
+    } else {
+      spreadChars(chars, l.text, l.t, next ? Math.max(0.3, next.t - l.t) : 4);
+    }
+    l.chars = chars;
+  }
+  return lines;
+}
+
+/* 网易云 yrc（逐字歌词）：一行形如
+ *   [1000,2000](1000,300,0)你(1300,250,0)好
+ * 时间单位是毫秒：行首 [起点, 行时长]，每个 (字起点, 字时长, 0) 后面跟这个字。
+ * 有它就能真正按字对齐，不需要任何估计。 */
+function parseYRC(src) {
+  if (!src) return [];
+  const out = [];
+  for (const raw of String(src).split(/\r?\n/)) {
+    const head = /^\[(\d+),(\d+)\](.*)$/.exec(raw.trim());
+    if (!head) continue;
+    const chars = [];
+    const re = /\((\d+),(\d+),-?\d+\)([^()]*)/g;
+    let m;
+    while ((m = re.exec(head[3]))) {
+      const st = Number(m[1]) / 1000;
+      const du = Number(m[2]) / 1000;
+      const txt = m[3];
+      if (!txt) continue;
+      // 一个时间戳可能带多个字（含空格），按字宽均分这一小段
+      const list = [...txt];
+      const wsum = list.reduce((s, c) => s + charWeight(c), 0) || 1;
+      let t = st;
+      for (const c of list) {
+        const d = du > 0 ? (du / wsum) * charWeight(c) : 0;
+        chars.push({ c, t0: t, t1: t + d });
+        t += d;
+      }
+    }
+    /* yrc 的正文带前导空格（「 作词 : 法老」这种元信息行），
+     * 而行文本要 trim，否则「字数 = 节点数」对不上、行首还会多一个空 span。
+     * 两边一起去掉首尾空白字，保持一致。 */
+    while (chars.length && !chars[0].c.trim()) chars.shift();
+    while (chars.length && !chars[chars.length - 1].c.trim()) chars.pop();
+    const text = chars.map(c => c.c).join('').trim();
+    if (!text) continue;
+    out.push({ t: Number(head[1]) / 1000, text, chars });
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out.filter((l, i) => i === 0 || l.t !== out[i - 1].t);
+}
+
+/* 歌词入口：有逐字数据就用逐字，否则按行时间摊到字 */
+function buildLyrics(ly) {
+  if (!ly) return [];
+  const y = parseYRC(ly.yrc);
+  if (y.length) return y;
+  return assignChars(parseLRC(ly.text));
+}
+
 function renderLyrics() {
   const box = $('#lnInner');
   box.innerHTML = '';
   S.lnNodes = [];
-  S.lastP = -1;
+  S.lnChars = [];
+  S.curCh = -2;
+  S.curFrac = -1;
+  S.waitNode = -1;
   S.lastLy = -1;
   $('#lyrEmpty').classList.toggle('show', S.lyrics.length === 0);
   if (!S.lyrics.length) {
@@ -380,7 +513,31 @@ function renderLyrics() {
     const d = document.createElement('div');
     d.className = 'ln';
     d.dataset.i = i;
-    d.textContent = l.text;          // 单层文字：渐变裁进字形，见 app.css 注释
+    /* 每个字一个 span：填充按字推进（--p 逐字写），不是整行扫一条渐变。
+     * 单个 span 仍然只栅格化一层渐变裁进字形，不会出现两层文字的白边。 */
+    const chars = l.chars && l.chars.length ? l.chars : null;
+    if (chars) {
+      const spans = [];
+      const cf = document.createDocumentFragment();
+      for (const ch of chars) {
+        const s = document.createElement('span');
+        s.className = 'ch';
+        s.textContent = ch.c;
+        cf.appendChild(s);
+        spans.push(s);
+      }
+      d.appendChild(cf);
+      S.lnChars.push(spans);
+    } else {
+      d.textContent = l.text;          // 兜底：没有任何字级数据时按整行
+      S.lnChars.push(null);
+    }
+    /* 没有进度可填的时候（间奏、空行、还没开口）用「…」占位，
+     * 放大缩小循环 + 透明度过渡，接上进度时自然淡回填充条 */
+    const gap = document.createElement('span');
+    gap.className = 'gap';
+    gap.textContent = '…';
+    d.appendChild(gap);
     d.addEventListener('click', () => { audio.currentTime = l.t; });
     frag.appendChild(d);
     S.lnNodes.push(d);
@@ -435,6 +592,28 @@ function centerAfterGrow(i) {
   }, 430);
 }
 
+/* 逐字填充：算出「该填到第几个字、这个字填了几成」，只写变化的那几个 span。
+ * 已完成 / 还没轮到的字只在字下标变化时批量刷一次，不每帧写几十个样式。 */
+function paintChars(i, chIdx, frac) {
+  const spans = S.lnChars[i];
+  const chars = S.lyrics[i] && S.lyrics[i].chars;
+  if (!spans || !chars || !chars.length) return;
+  if (chIdx !== S.curCh) {
+    for (let j = 0; j < spans.length; j++) {
+      spans[j].style.setProperty('--p', (j < chIdx ? 100 : 0) + '%');
+    }
+    S.curCh = chIdx;
+    S.curFrac = -1;
+  }
+  if (chIdx >= 0 && chIdx < spans.length) {
+    const p = Math.round(frac * 1000) / 10;      // 0.1% 精度够用，省掉无谓重绘
+    if (p !== S.curFrac) {
+      S.curFrac = p;
+      spans[chIdx].style.setProperty('--p', p + '%');
+    }
+  }
+}
+
 /* t 由播放时钟传入，不再取 audio.currentTime —— 后者只有 ~4Hz，逐帧插值才顺滑 */
 function updateLyric(t) {
   if (t == null) t = audio.currentTime;
@@ -442,23 +621,63 @@ function updateLyric(t) {
   const i = currentLineIndex(t);
   if (i !== S.lastLy) {
     const nodes = S.lnNodes;
-    if (S.lastLy >= 0 && nodes[S.lastLy]) nodes[S.lastLy].style.setProperty('--p', '0%');
+    if (S.lastLy >= 0 && nodes[S.lastLy]) paintChars(S.lastLy, -2, 0);   // 上一句清空，回跳时重新填
     for (let k = 0; k < nodes.length; k++) nodes[k].classList.toggle('on', k === i);
     if (i >= 0) centerLine(i);
     S.lastLy = i;
-    S.lastP = -1;
+    S.curCh = -2;
+    S.curFrac = -1;
     if (i >= 0) centerAfterGrow(i);
     else clearTimeout(centerTimer);      // 间奏 / 开头没有当前句，别留一个迟到的校正
   }
-  if (i < 0) return;
-  const cur = S.lyrics[i];
-  const next = S.lyrics[i + 1];
-  let span = next ? next.t - cur.t : 4;
-  if (span > 8) span = clamp(cur.text.length * 0.22, 1.6, 6);   // 长间奏：按字数估，擦完即停
-  const p = clamp((t - cur.t - 0.3) / span, 0, 1);
-  if (Math.abs(p - S.lastP) < 0.0012) return;   // 变化太小时不写样式，省掉无谓的绘制
-  S.lastP = p;
-  S.lnNodes[i].style.setProperty('--p', (p * 100).toFixed(2) + '%');
+
+  /* 还没有当前句时，「…」挂在第一句上：前奏很长也有个地方显示 */
+  const at = i >= 0 ? i : 0;
+  const line = S.lyrics[at];
+  if (!line) return;
+  const chars = line.chars;
+
+  let chIdx = -2;                        // -2 一个字还没唱；n 表示已唱完 n 个字
+  let frac = 0;
+  let waiting = false;
+
+  if (!chars || !chars.length) {
+    waiting = true;                                     // 空行 / 这一行没有时间戳
+  } else if (t < chars[0].t0) {
+    chIdx = -2;
+    waiting = chars[0].t0 - t > GAP_MIN;                // 前奏太长才显示「…」
+  } else {
+    let k = 0;
+    for (let j = 0; j < chars.length; j++) {            // 字是顺序的，扫一遍就够（一句最多几十字）
+      if (t >= chars[j].t0) k = j; else break;
+    }
+    const span = chars[k].t1 - chars[k].t0;
+    frac = span > 0 ? clamp((t - chars[k].t0) / span, 0, 1) : 1;
+    chIdx = frac >= 1 ? k + 1 : k;
+    if (chIdx >= chars.length) {
+      // 整句唱完了：后面还留着长空档才换成「…」，否则保持填满（句间正常停顿不闪）
+      const next = S.lyrics[at + 1];
+      waiting = !!next && next.t - t > GAP_MIN;
+      chIdx = chars.length;
+    }
+  }
+
+  if (waiting) {
+    // 整句已经唱完、只是后面空档长：先把这一句补满再换「…」。
+    // 否则会停在最后一个字唱到一半的进度上，看着像压根没唱完。
+    if (chars && chars.length && t >= chars[chars.length - 1].t1) paintChars(at, chars.length, 0);
+    if (S.waitNode !== at) {
+      if (S.waitNode >= 0 && S.lnNodes[S.waitNode]) S.lnNodes[S.waitNode].classList.remove('waiting');
+      S.lnNodes[at].classList.add('waiting');
+      S.waitNode = at;
+    }
+    return;
+  }
+  if (S.waitNode >= 0) {                 // 有进度了：淡出「…」，切回填充条
+    if (S.lnNodes[S.waitNode]) S.lnNodes[S.waitNode].classList.remove('waiting');
+    S.waitNode = -1;
+  }
+  paintChars(at, chIdx, frac);
 }
 
 /* ------------------------------------------------------------------ 渲染 */
@@ -1601,7 +1820,7 @@ async function playIndex(i) {
   try {
     const ly = await window.api.trackLyric(k.path);
     if (seq !== loadSeq) return;
-    S.lyrics = parseLRC(ly.text);
+    S.lyrics = buildLyrics(ly);
     S.lyricSrc = ly.source || '';
     setLyrHint(k, ly);
     renderLyrics();

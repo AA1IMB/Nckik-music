@@ -331,14 +331,18 @@ async function albumDetail(id) {
 async function lyric(id) {
   const sid = Number(id);
   if (!Number.isInteger(sid) || sid <= 0) throw new NeError('曲目 ID 不对', 'NE_BAD_ID');
-  const j = await getJSON('/api/song/lyric?id=' + sid + '&lv=-1&kv=-1&tv=-1');
+  /* yv=-1 取逐字歌词（yrc）：每行形如 [1000,2000](1000,300,0)你(1300,250,0)好，
+   * 每个字都有真实的起止时间。渲染层优先用它按字对齐进度；
+   * 老接口不认 yv 时只是少这个字段，不影响 lrc。 */
+  const j = await getJSON('/api/song/lyric?id=' + sid + '&lv=-1&kv=-1&tv=-1&yv=-1');
   const text = String((j.lrc && j.lrc.lyric) || '');
+  const yrc = String((j.yrc && j.yrc.lyric) || '');
   // 没有时间戳的（纯音乐说明、只有一句版权信息）不算歌词：
   // 渲染层是按行时间戳擦除的，塞进去只会得到一堆同时间的行。
   const timed = /\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/.test(text);
-  if (!text.trim()) return { text: '', source: '', note: '该曲目暂无歌词' };
-  if (!timed) return { text: '', source: '', note: '该曲目只有纯文本歌词，没有时间轴' };
-  return { text, source: '网易云' };
+  if (!text.trim() && !yrc.trim()) return { text: '', source: '', note: '该曲目暂无歌词' };
+  if (!timed && !yrc.trim()) return { text: '', source: '', note: '该曲目只有纯文本歌词，没有时间轴' };
+  return { text: timed ? text : '', yrc: yrc.trim() ? yrc : '', source: '网易云' };
 }
 
 const urlCache = new Map();   // `${id}|${level}` -> { url, br, type, level, size, expi, at }
