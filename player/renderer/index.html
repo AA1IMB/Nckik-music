@@ -71,7 +71,13 @@
     </div>
     <div class="row">
       <div class="side l">
-        <span class="fmt" id="fmtTag">—</span>
+        <!-- 原「音质文字标签」的位置改放播放列表入口（音质实测仍在右下角波形按钮里） -->
+        <button class="plbtn" id="btnPl" title="播放列表">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7h10.5M4 12h10.5M4 17h6.5"/><circle cx="17.4" cy="16.4" r="2.1"/><path d="M19.5 16.4V9.3l-3 .8"/>
+          </svg>
+          <span class="pln" id="plNum">0</span>
+        </button>
       </div>
       <div class="center">
         <button class="cb" id="btnShuffle" title="随机播放 (S)">
@@ -139,6 +145,18 @@
   <div class="pop-head">输出设备 · 实测</div>
   <div id="devList"></div>
   <div class="pop-note" id="devNote"></div>
+</div>
+
+<!-- 播放列表 -->
+<div class="pop plpop" id="popPl">
+  <div class="pop-head"><span>播放列表</span><span class="pl-sub" id="plCount">0 首</span></div>
+  <div class="pl-tools">
+    <button class="ghost mini" id="plSelect" title="用某个歌单整体覆盖播放列表">选择歌单</button>
+    <button class="ghost mini" id="plInsert" title="挑一首歌追加到末尾">插入歌曲</button>
+    <button class="ghost mini" id="plClear" title="清空（不改动源歌单）">清空</button>
+  </div>
+  <div class="pl-body" id="plBody"></div>
+  <div class="pop-note" id="plNote">点条目播放 · × 只从本列表移除，不改动源歌单</div>
 </div>
 
 <!-- 曲库抽屉 -->

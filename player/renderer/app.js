@@ -847,7 +847,7 @@ function paintMeta() {
     $('#npT').textContent = '未载入';
     $('#npA').textContent = '支持 MP3 / FLAC / WAV / M4A / OGG';
     $('#npF').textContent = '把文件拖进窗口，或按 Ctrl+O 导入';
-    $('#fmtTag').textContent = '—';
+    $('#btnPl').title = '播放列表';
     cover.classList.add('empty', 'onboard');
     cover.classList.remove('has-art');
     img.removeAttribute('src');
@@ -876,11 +876,13 @@ function paintMeta() {
     $('#npF').textContent = bits.join(' · ');
   }
 
-  $('#fmtTag').textContent = k.error
+  // 左下角现在是播放列表入口：把原来那行「WAV 无损」的信息挪进按钮的 tooltip，
+  // 音质实测仍可看右下角波形按钮里的面板
+  $('#btnPl').title = '播放列表 · 当前 ' + (k.error
     ? '解析失败'
     : k.unavailable
       ? '不可播放'
-      : k.lossless ? `${k.codec} 无损` : k.codec || (isNet(k) ? '网易云' : '音频');
+      : k.lossless ? `${k.codec} 无损` : k.codec || (isNet(k) ? '网易云' : '音频'));
 
   const cov = getCover(k.path);
   if (cov) {
@@ -1179,6 +1181,358 @@ function markCurrent() {
 function updateRowDuration(i) {
   const el = $(`#libList .r[data-dur="${i}"]`);
   if (el) el.textContent = durationText(S.tracks[i]);
+}
+
+/* ------------------------------------------------------------------ 播放列表
+ * 结构：S.settings.playlist = [{ id, title, artist, duration }]
+ *
+ * id 复用全局唯一键（本地是绝对路径，网易云是 `ne:<id>`），和曲库去重、封面缓存
+ * 用的是同一套键，所以同一首歌不会因为来源不同而出现两份。
+ *
+ * 列表只描述「播哪些、按什么顺序播」，不复制曲目对象：播放时按 id 回曲库定位下标；
+ * 不在曲库里的网易云曲目按 id 重建一条，交给 playNet（它本来就会「加入曲库并播放」）。
+ * 任何修改都立刻写回 settings.json，刷新后原样恢复。
+ */
+const PL_MAX = 500;
+
+/* 面板自己的小状态：list 列表页 / pick 选歌单页 / add 挑歌页；
+ * ask 是覆盖前的确认条（不弹 window.confirm，免得打断播放界面的手感）。 */
+const PL = { view: 'list', ask: null, busy: false, sources: [], cands: [] };
+
+const plItems = () => (Array.isArray(S.settings.playlist) ? S.settings.playlist : []);
+
+function plToItem(t) {
+  return {
+    id: String((t && (t.path || t.id)) || ''),
+    title: String((t && t.title) || '未知曲目').slice(0, 120),
+    artist: String((t && t.artist) || '').slice(0, 80),
+    duration: Number(t && t.duration) || 0
+  };
+}
+
+/* 手改过 settings.json 的人可以把这里写成任何东西：逐条校验、按 id 去重、限长 */
+function plNormalize(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const x of list) {
+    if (!x || typeof x !== 'object') continue;
+    const id = String(x.id == null ? '' : x.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      title: String(x.title || '未知曲目').slice(0, 120),
+      artist: String(x.artist || '').slice(0, 80),
+      duration: Number(x.duration) || 0
+    });
+    if (out.length >= PL_MAX) break;
+  }
+  return out;
+}
+
+function plSave() {
+  saveSettings();
+  plSyncBadge();
+}
+
+/* 入口按钮上的角标 + 「当前曲目在列表里」的高亮 */
+function plSyncBadge() {
+  const n = plItems().length;
+  const num = $('#plNum');
+  if (num) num.textContent = n > 99 ? '99+' : String(n);
+  const btn = $('#btnPl');
+  if (btn) {
+    const cur = S.i >= 0 ? S.tracks[S.i] : null;
+    btn.classList.toggle('live', !!cur && plItems().some(x => x.id === cur.path));
+  }
+}
+
+function renderPl() {
+  plSyncBadge();
+  const pop = $('#popPl');
+  if (!pop.classList.contains('show')) return;
+
+  const items = plItems();
+  const cur = S.i >= 0 ? S.tracks[S.i] : null;
+  const curId = cur ? cur.path : '';
+  $('#plCount').textContent = items.length ? items.length + ' 首' : '空';
+  $('#plClear').disabled = !items.length;
+
+  const body = $('#plBody');
+  if (PL.view === 'pick') return renderPlPick(body);
+  if (PL.view === 'add') return renderPlAdd(body);
+
+  const parts = [];
+  if (PL.ask) {
+    parts.push('<div class="pl-ask"><div>' + esc(PL.ask.text) + '</div><div class="row2">'
+      + '<button class="ghost mini" data-pl="no">取消</button>'
+      + '<button class="ghost mini" data-pl="yes">' + esc(PL.ask.ok) + '</button></div></div>');
+  }
+  if (!items.length) {
+    parts.push('<div class="pl-empty">播放列表是空的'
+      + '<small>「选择歌单」整单载入 · 「插入歌曲」逐首添加</small></div>');
+  } else {
+    items.forEach((x, i) => {
+      const on = x.id === curId;
+      parts.push('<div class="pl-row' + (on ? ' on' : '') + '" data-i="' + i + '" title="播放">'
+        + '<div class="pl-main"><div class="pl-t">' + esc(x.title) + '</div>'
+        + '<div class="pl-a">' + esc(x.artist || '未知艺人') + '</div></div>'
+        + '<span class="pl-dur">' + (x.duration ? fmt(x.duration) : '—') + '</span>'
+        + '<button class="pl-x" data-del="' + i + '" title="从播放列表移除">✕</button></div>');
+    });
+  }
+  body.innerHTML = parts.join('');
+  $('#plNote').textContent = '点条目播放 · × 只从本列表移除，不改动源歌单';
+  // 只滚 .pl-body 自己，不碰页面：面板是 fixed 的，scrollIntoView 会连带滚祖先
+  const row = body.querySelector('.pl-row.on');
+  if (row) {
+    const rb = row.getBoundingClientRect(), bb = body.getBoundingClientRect();
+    if (rb.top < bb.top || rb.bottom > bb.bottom) body.scrollTop += rb.top - bb.top - 8;
+  }
+}
+
+/* ---- 可选歌单：本地曲库 / 当前打开的网易云歌单 / 我的歌单 ---- */
+function plSources() {
+  const out = [];
+  const local = S.tracks.filter(t => !isNet(t));
+  if (local.length) {
+    out.push({ key: 'local', name: '本地曲库', sub: local.length + ' 首 · 本机文件', tracks: local });
+  }
+  const coll = S.ne.coll;
+  if (coll && coll.status === 'ready' && coll.tracks && coll.tracks.length) {
+    out.push({
+      key: 'coll', name: coll.name || '当前歌单',
+      sub: coll.tracks.length + ' 首 · 网易云', tracks: coll.tracks
+    });
+  }
+  const d = S.ne.home.data;
+  const mine = d && d.mine && d.mine.list;
+  if (Array.isArray(mine)) {
+    for (const p of mine) {
+      if (!p || !p.id) continue;
+      out.push({
+        key: 'ne', id: p.id, name: p.name || '网易云歌单',
+        sub: (p.count || 0) + ' 首 · 网易云（打开时读取）'
+      });
+    }
+  }
+  return out;
+}
+
+function renderPlPick(body) {
+  const src = plSources();
+  PL.sources = src;
+  const n = plItems().length;
+  const back = '<div class="pl-back" data-view="list">‹ 返回列表</div>';
+  $('#plNote').textContent = '选定歌单后先确认，再整体覆盖；不追加';
+  const head = back + '<div class="pl-sec">选一个歌单 · 会整体覆盖当前列表（' + n + ' 首）</div>';
+  if (PL.busy) {
+    body.innerHTML = back + '<div class="pl-sec">正在读取歌单…</div>';
+    return;
+  }
+  if (!src.length) {
+    body.innerHTML = head + '<div class="pl-empty">还没有可用的歌单'
+      + '<small>先在曲库导入文件，或登录网易云</small></div>';
+    return;
+  }
+  body.innerHTML = head + src.map((s, i) =>
+    '<div class="pl-row" data-src="' + i + '"><div class="pl-main">'
+    + '<div class="pl-t">' + esc(s.name) + '</div>'
+    + '<div class="pl-a">' + esc(s.sub) + '</div></div><span class="pl-plus">›</span></div>'
+  ).join('');
+}
+
+/* ---- 挑歌：当前歌单 / 本地曲库 / 当前搜索结果 ---- */
+function plCandidates() {
+  const groups = [];
+  const coll = S.ne.coll;
+  if (coll && coll.status === 'ready' && coll.tracks && coll.tracks.length) {
+    groups.push({ title: '当前歌单 · ' + (coll.name || '网易云'), tracks: coll.tracks.slice(0, 60) });
+  }
+  const local = S.tracks.filter(t => !isNet(t));
+  if (local.length) {
+    groups.push({ title: '本地曲库 · ' + local.length + ' 首', tracks: local.slice(0, 60) });
+  }
+  const q = ($('#q').value || '').trim().toLowerCase();
+  const found = S.ne.view === 'search' ? S.ne.items : [];
+  const hits = q
+    ? found.filter(t => [t.title, t.artist, t.album].filter(Boolean).join(' ').toLowerCase().includes(q))
+    : found;
+  if (hits.length) {
+    groups.push({ title: (q ? '搜索结果' : '网易云搜索') + ' · ' + hits.length + ' 首', tracks: hits.slice(0, 60) });
+  }
+  return groups;
+}
+
+function renderPlAdd(body) {
+  const groups = plCandidates();
+  PL.cands = [];
+  const back = '<div class="pl-back" data-view="list">‹ 返回列表</div>';
+  $('#plNote').textContent = '点一首追加到末尾；同一首不会重复加入';
+  if (!groups.length) {
+    body.innerHTML = back + '<div class="pl-sec">挑一首歌加入末尾</div>'
+      + '<div class="pl-empty">没有可挑的歌<small>先在曲库导入文件，或在网易云搜索</small></div>';
+    return;
+  }
+  const curIds = new Set(plItems().map(x => x.id));
+  const parts = [back, '<div class="pl-sec">挑一首歌加入末尾 · 已在列表里的会标出来</div>'];
+  for (const g of groups) {
+    parts.push('<div class="pl-sec">' + esc(g.title) + '</div>');
+    for (const t of g.tracks) {
+      const item = plToItem(t);
+      const dup = curIds.has(item.id);
+      const idx = PL.cands.push(t) - 1;
+      parts.push('<div class="pl-row" data-add="' + idx + '"><div class="pl-main">'
+        + '<div class="pl-t">' + esc(item.title) + '</div>'
+        + '<div class="pl-a">' + esc(item.artist || '未知艺人') + (dup ? ' · 已在列表' : '') + '</div></div>'
+        + '<span class="pl-plus">+</span></div>');
+    }
+  }
+  body.innerHTML = parts.join('');
+}
+
+/* ---- 选择：整单覆盖（先确认） ---- */
+async function plSelectSource(src) {
+  if (!src || PL.busy) return;
+  let tracks = src.tracks;
+  if (!tracks) {
+    PL.busy = true;
+    renderPl();
+    try {
+      const r = await window.api.nePlaylist(src.id);
+      if (!r || !r.ok) throw new Error((r && r.error && r.error.message) || '读取失败');
+      tracks = r.tracks || [];
+    } catch (e) {
+      PL.busy = false;
+      renderPl();
+      toast('读取歌单失败：' + ((e && e.message) || e));
+      return;
+    }
+    PL.busy = false;
+  }
+  const items = plNormalize((tracks || []).map(plToItem));
+  if (!items.length) { toast('这个歌单里没有可用的曲目'); return; }
+  const old = plItems().length;
+  PL.ask = {
+    text: '用「' + src.name + '」的 ' + items.length + ' 首覆盖播放列表？'
+      + (old ? '当前 ' + old + ' 首会被清空，不追加。' : '当前列表是空的。'),
+    ok: '覆盖',
+    run: () => {
+      S.settings.playlist = items;           // 整体替换，不是追加
+      plSave();
+      toast('已载入 ' + items.length + ' 首 · ' + src.name);
+    }
+  };
+  PL.view = 'list';
+  renderPl();
+}
+
+/* ---- 插入：追加到末尾，按 id 去重 ---- */
+function plAppend(t) {
+  const item = plToItem(t);
+  if (!item.id) return;
+  const list = plItems();
+  if (list.some(x => x.id === item.id)) { toast('已在播放列表中：' + item.title); return; }
+  if (list.length >= PL_MAX) { toast('播放列表最多 ' + PL_MAX + ' 首'); return; }
+  list.push(item);
+  S.settings.playlist = list;
+  plSave();
+  renderPl();
+  toast('已加入播放列表 · ' + item.title);
+}
+
+/* ---- 删除：只动本列表；删的正好是当前曲目就按顺序切下一首 ---- */
+async function plRemove(idx) {
+  const list = plItems();
+  const item = list[idx];
+  if (!item) return;
+  const cur = S.i >= 0 ? S.tracks[S.i] : null;
+  const wasCurrent = !!cur && cur.path === item.id;
+  list.splice(idx, 1);
+  S.settings.playlist = list;
+  plSave();
+  renderPl();
+  if (!wasCurrent) return;
+  if (!list.length) { toast('已移除，列表空了 · 当前曲目继续播放'); return; }
+  await plPlay(idx % list.length);            // 删的是最后一个就回到第一首
+}
+
+async function plPlay(idx) {
+  const item = plItems()[idx];
+  if (!item) return;
+  let i = S.tracks.findIndex(t => t.path === item.id);
+  if (i < 0 && item.id.startsWith(NET_PREFIX)) {
+    // 曲库被清过但列表还在：按 id 重建一条，playNet 会把它重新加进曲库
+    closePops();
+    await playNet({
+      source: 'netease', path: item.id,
+      netId: Number(item.id.slice(NET_PREFIX.length)),
+      title: item.title, artist: item.artist, duration: item.duration
+    });
+    return;
+  }
+  if (i < 0) { toast('这首不在曲库里了，重新导入后才能播放：' + item.title); return; }
+  closePops();
+  await playIndex(i);
+}
+
+function plClearAsk() {
+  const n = plItems().length;
+  if (!n) return;
+  PL.view = 'list';
+  PL.ask = {
+    text: '清空播放列表里的 ' + n + ' 首？（不改动源歌单，也不动曲库）',
+    ok: '清空',
+    run: () => {
+      S.settings.playlist = [];
+      plSave();
+      toast('播放列表已清空');
+    }
+  };
+  renderPl();
+}
+
+function plBind() {
+  const btn = $('#btnPl');
+  btn.onclick = e => {
+    e.stopPropagation();
+    const pop = $('#popPl');
+    if (pop.classList.contains('show')) { closePops(); return; }
+    PL.view = 'list';
+    PL.ask = null;
+    pop._place = placePl;
+    openPop(pop, btn);
+    btn.classList.add('open');
+    renderPl();
+  };
+  $('#plSelect').onclick = e => { e.stopPropagation(); PL.view = 'pick'; PL.ask = null; renderPl(); };
+  $('#plInsert').onclick = e => { e.stopPropagation(); PL.view = 'add'; PL.ask = null; renderPl(); };
+  $('#plClear').onclick = e => { e.stopPropagation(); plClearAsk(); };
+
+  // 面板内统一委托：删除 / 确认条 / 选歌单 / 加歌 / 播放
+  $('#popPl').addEventListener('click', e => {
+    const t = e.target;
+    const del = t.closest('[data-del]');
+    if (del) { e.stopPropagation(); plRemove(Number(del.dataset.del)); return; }
+    const ans = t.closest('[data-pl]');
+    if (ans) {
+      e.stopPropagation();
+      const ask = PL.ask;
+      PL.ask = null;
+      if (ans.dataset.pl === 'yes' && ask) { ask.run(); renderPl(); }
+      else renderPl();
+      return;
+    }
+    const back = t.closest('[data-view]');
+    if (back) { e.stopPropagation(); PL.view = back.dataset.view; PL.ask = null; renderPl(); return; }
+    const sel = t.closest('[data-src]');
+    if (sel) { e.stopPropagation(); plSelectSource(PL.sources[Number(sel.dataset.src)]); return; }
+    const add = t.closest('[data-add]');
+    if (add) { e.stopPropagation(); plAppend(PL.cands[Number(add.dataset.add)]); return; }
+    const row = t.closest('.pl-row[data-i]');
+    if (row && PL.view === 'list') plPlay(Number(row.dataset.i));
+  });
 }
 
 /* ------------------------------------------------------------------ 网易云 */
@@ -2029,7 +2383,7 @@ function prev() {
 const FALLBACK_SETTINGS = {
   theme: 'auto', volume: 0.78, shuffle: false, repeat: 'off', sinkId: '', muted: false,
   lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true, quality: 'exhigh',
-  lyricTrans: true
+  lyricTrans: true, playlist: []
 };
 
 function seek(delta) {
@@ -2082,6 +2436,11 @@ function closePops() {
     p.classList.remove('show');
     if (popRO) popRO.unobserve(p);
   });
+  // 播放列表入口的高亮与内部页签跟着一起复位：下次打开总是从列表页开始
+  const btn = $('#btnPl');
+  if (btn) btn.classList.remove('open');
+  PL.view = 'list';
+  PL.ask = null;
 }
 
 /* 弹层尺寸不是常量：字体加载完成后文字会变宽，内容超高又多出一条滚动条。
@@ -2092,6 +2451,7 @@ let popRO = null;
 function placePop(pop) {
   const anchor = pop._anchor;
   if (!anchor || !pop.classList.contains('show')) return;
+  if (typeof pop._place === 'function') { pop._place(pop, anchor); return; }   // 自定义贴边（播放列表）
   const r = anchor.getBoundingClientRect();
   const w = pop.offsetWidth, h = pop.offsetHeight;
   /* 用 clientWidth/Height 而不是 innerWidth/Height：后者含页面纵向滚动条的宽度，
@@ -2108,6 +2468,19 @@ function placePop(pop) {
 
   pop.style.left = left + 'px';
   pop.style.top = top + 'px';
+}
+
+/* 播放列表的贴边规则和其它弹层不同：左对齐到入口按钮，底边压在整个控制栏之上，
+ * 这样面板再长也不会盖住播放键与进度条（歌词区是临时被盖一下，点条目就关）。 */
+function placePl(pop, anchor) {
+  const r = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  const vw = document.documentElement.clientWidth || window.innerWidth;
+  const vh = document.documentElement.clientHeight || window.innerHeight;
+  const ctrl = $('.ctrl');
+  const footTop = (ctrl ? ctrl.getBoundingClientRect().top : r.top) - 12;
+  pop.style.left = clamp(r.left, 12, Math.max(12, vw - w - 12)) + 'px';
+  pop.style.top = clamp(footTop - h, 12, Math.max(12, vh - h - 12)) + 'px';
 }
 
 function openPop(pop, anchor) {
@@ -2739,6 +3112,7 @@ function applyTransVisibility() {
   if (!Number.isFinite(S.settings.volume)) S.settings.volume = 0.78;
   if (!['off', 'all', 'one'].includes(S.settings.repeat)) S.settings.repeat = 'off';
   if (typeof S.settings.lyricTrans !== 'boolean') S.settings.lyricTrans = true;
+  S.settings.playlist = plNormalize(S.settings.playlist);
   if (!['auto', 'dark', 'light'].includes(S.settings.theme)) S.settings.theme = 'auto';
   S.settings.lat = Number.isFinite(Number(S.settings.lat)) ? clamp(Number(S.settings.lat), -89.9, 89.9) : 31.2304;
   S.settings.lon = Number.isFinite(Number(S.settings.lon)) ? clamp(Number(S.settings.lon), -180, 180) : 121.4737;
@@ -2750,7 +3124,9 @@ function applyTransVisibility() {
   $('#inGeo').value = `${S.settings.lat}, ${S.settings.lon}`;
 
   bind();
+  plBind();                             // 播放列表入口（原音质标签位置）
   syncToggles();
+  plSyncBadge();
   applyTransVisibility();               // 先按上次的选择定好译文显隐，再画歌词
   setSource('local');
   // 上次扫过码的话，开机就把歌单在后台取回来：等用户点开「网易云」时已经是现成的

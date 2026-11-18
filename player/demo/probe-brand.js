@@ -78,7 +78,7 @@ app.on('browser-window-created', (_e, w) => {
       button: probe('#btnPlay'),
       input: probe('#q'),
       ghost: probe('.ghost'),
-      tag: document.querySelector('#fmtTag') ? getComputedStyle(document.querySelector('#fmtTag')).fontFamily : ''
+      tag: probe('#btnPl')
     };
   })()`);
   log('  ', JSON.stringify(font));
@@ -87,6 +87,7 @@ app.on('browser-window-created', (_e, w) => {
   ok('播放按钮用苹方', /^["']?PingFang/.test(font.button), font.button);
   ok('搜索框用苹方', /^["']?PingFang/.test(font.input), font.input);
   ok('设置按钮用苹方', /^["']?PingFang/.test(font.ghost), font.ghost);
+  ok('播放列表入口用苹方', /^["']?PingFang/.test(font.tag), font.tag);
 
   log('\n=== 3. 设置页截图 ===');
   await js(`openDrawer(document.querySelector('#dSet')); 0`);
