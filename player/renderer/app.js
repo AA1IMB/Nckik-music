@@ -1598,7 +1598,11 @@ async function plPlay(qi) {
     });
     return;
   }
-  toast('这首不在曲库里了，重新导入后才能播放：' + row.item.title);
+  // 本地文件已经不在曲库（删了 / 挪走了）：先说一声，再按队列顺序往下继续。
+  // 不能只 toast 就 return —— 点了没反应会让人以为界面卡死；这里的策略与
+  // playAt 遇到失效行时一致（skipDead 往下找第一首能放的）。
+  toast('这首不在曲库里了，已跳过：' + row.item.title);
+  return playAt(qi);
 }
 
 /* 上移/下移：只改列表顺序，不动曲目对象；当前曲目靠 id 保位，播放不中断 */
