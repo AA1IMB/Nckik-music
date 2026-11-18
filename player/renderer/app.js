@@ -562,10 +562,15 @@ function renderLyrics() {
       S.lnChars.push(null);
     }
     /* 空档里的「…」：它不是装饰，而是「这一句还没唱完」的延续 ——
-     * 挂在本句末尾，跟着时间轴匀速填满、再渐隐，细节见 paintGap()。 */
+     * 挂在本句末尾，跟着时间轴匀速填满、再渐隐，细节见 paintGap()。
+     * 分两层：外层 .gap 由 JS 按时间轴写出入场 / 渐隐（--p 也写在它上面），
+     * 内层 .gap-t 只用 CSS 关键帧做呼吸 —— 两者相乘，互不干扰。 */
     const gap = document.createElement('span');
     gap.className = 'gap';
-    gap.textContent = '…';
+    const gapText = document.createElement('span');
+    gapText.className = 'gap-t';
+    gapText.textContent = '…';
+    gap.appendChild(gapText);
     d.appendChild(gap);
     d.addEventListener('click', () => { audio.currentTime = l.t; });
     frag.appendChild(d);
@@ -654,6 +659,7 @@ function paintGap(at, t, from, to) {
   if (gap !== S.gapNode) {
     hideGap();                            // 换了一句：先把上一行的收掉
     S.gapNode = gap;
+    gap.classList.add('ongap');           // 呼吸动画随空档开场，天然从最暗的相位起
   }
   const fillEnd = to - GAP_LEAD;
   const p = clamp((t - from) / Math.max(0.2, fillEnd - from), 0, 1);
@@ -670,6 +676,7 @@ function paintGap(at, t, from, to) {
 
 function hideGap() {
   if (!S.gapNode) return;
+  S.gapNode.classList.remove('ongap');   // 摘掉呼吸：隐藏的歌词不该继续跑动画
   S.gapNode.style.opacity = '0';
   S.gapNode.style.setProperty('--p', '0%');
   S.gapNode = null;

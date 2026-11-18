@@ -84,5 +84,40 @@ const js = c => win.webContents.executeJavaScript(c, true);
   // 填满之后(10.0s 填满)、下一句开口(10.5s)之前：渐隐到一半
   await shot(10.25, 'shot-lyric-fade.png', 'gap-fade');
 
+  /* 呼吸：把 CSS 动画的 currentTime 钉在两个相位上各拍一张 ——
+   * 0ms 是最暗（0.35），3000ms 正好是半程最亮（1.0）。
+   * 窗口没有被真正呈现在屏幕上时，Chromium 不产帧、动画时间轴不前进，
+   * 所以这里直接定相位，而不是等墙钟（探针里已按真实时间验过它会自己走）。 */
+  await js(`(() => { audio.pause(); audio.currentTime = 8.4; })()`);
+  await sleep(500);
+  const breatheShot = async (ms, file) => {
+    const info = await js(`(async () => {
+      const i = S.lastLy;
+      const host = i >= 0 ? (S.lyrics[i].prevTimed ?? -1) : -1;
+      const n = host >= 0 ? S.lnNodes[host] : null;
+      const g = n ? n.querySelector('.gap') : null;
+      const t = g ? g.querySelector('.gap-t') : null;
+      const a = t ? t.getAnimations()[0] : null;
+      if (!a) return { err: 'no-animation' };
+      a.pause();
+      a.currentTime = ${ms};
+      await Promise.race([
+        new Promise(r => requestAnimationFrame(() => r())),
+        new Promise(r => setTimeout(r, 150))
+      ]);
+      return {
+        t: +audio.currentTime.toFixed(2),
+        gapP: g ? Math.round(parseFloat(g.style.getPropertyValue('--p')) || 0) : null,
+        outerOp: g ? +(+getComputedStyle(g).opacity).toFixed(2) : null,
+        breathe: t ? +(+getComputedStyle(t).opacity).toFixed(2) : null,
+        animT: Math.round(a.currentTime)
+      };
+    })()`);
+    fs.writeFileSync(path.join(root, 'demo', file), (await win.webContents.capturePage()).toPNG());
+    log(file.replace('.png', ''), JSON.stringify(info));
+  };
+  await breatheShot(0, 'shot-lyric-breathe-min.png');
+  await breatheShot(3000, 'shot-lyric-breathe-max.png');
+
   app.quit();
 })().catch(e => { console.error('SHOT CRASH', e); app.quit(); });

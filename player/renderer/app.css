@@ -303,22 +303,47 @@ body::before {
 }
 
 /* 空档里的「…」现在算「这一句的延长」：它有真实进度，跟着填充条匀速被填满，
- * 再渐隐收在下一句开口的位置。节奏全在 JS 里按时间轴算，这里不写任何动画 ——
- * 也就没有放大缩小的脉冲，也不加 transition（逐帧写更跟手，seek 后立刻对）。 */
+ * 再渐隐收在下一句开口的位置。节奏全在 JS 里按时间轴算 ——
+ * 也就没有放大缩小的脉冲，也不加 transition（逐帧写更跟手，seek 后立刻对）。
+ *
+ * 分两层是为了把「呼吸」和「进度」彻底解耦：
+ *   外层 .gap   —— JS 每帧写 opacity（入场 / 渐隐），并在它上面写 --p；
+ *   内层 .gap-t —— 只有 CSS 关键帧在改 opacity，JS 完全不碰。
+ * 两层 opacity 相乘，呼吸叠在渐隐之上，谁也不会把谁覆盖掉。 */
 .ln .gap {
   --p: 0%;
-  --lc1: var(--acInk, #fff);
-  --lc2: var(--fg);
+  /* 呼吸参数：单程 = cycle / 2；调这里就够，不用动 JS */
+  --gap-breathe-cycle: 6s;   /* 完整周期，5–8s 之间比较自然 */
+  --gap-breathe-min: .35;    /* 呼吸最暗处 */
+  --gap-breathe-max: 1;      /* 呼吸最亮处 */
   position: absolute;
   left: 100%;
   top: 0;
   margin-left: .18em;
+  opacity: 0;
+  pointer-events: none;
+}
+.ln .gap-t {
+  --lc1: var(--acInk, #fff);
+  --lc2: var(--fg);
+  display: inline-block;
   background-image: linear-gradient(90deg, var(--lc1) 0 var(--p), var(--lc2) var(--p) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  opacity: 0;
-  pointer-events: none;
+}
+/* 只有空档真的在演的时候才挂 .ongap：一首歌上百行歌词，不能让每行的「…」
+ * 都常驻一条永不结束的动画（哪怕不可见，也要占合成器的时间）。 */
+.ln .gap.ongap .gap-t {
+  animation: gapBreathe var(--gap-breathe-cycle) cubic-bezier(.37, 0, .63, 1) infinite;
+}
+/* 0.35 ↔ 1 的正弦式呼吸：单程 3s、整周期 6s，慢了不闪、快了不闷 */
+@keyframes gapBreathe {
+  0%, 100% { opacity: var(--gap-breathe-min); }
+  50%      { opacity: var(--gap-breathe-max); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ln .gap.ongap .gap-t { animation: none; opacity: var(--gap-breathe-max); }
 }
 
 .lyr-empty {

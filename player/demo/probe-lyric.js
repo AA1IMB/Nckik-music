@@ -85,20 +85,29 @@ async function waitFor(fn, ms = 8000, step = 120) {
   return false;
 }
 
-/* 读当前行每个字的状态，以及「…」的填充比例 / 透明度 / 是否带动画 */
+/* 读当前行每个字的状态，以及「…」的填充比例 / 外层透明度 / 内层呼吸 */
 const chSnap = `(() => {
   const i = S.lastLy;
   const host = i >= 0 ? (S.lyrics[i].prevTimed ?? -1) : -1;
   const node = host >= 0 ? S.lnNodes[host] : null;
   const g = node ? node.querySelector('.gap') : null;
+  const t = g ? g.querySelector('.gap-t') : null;
   const cs = g ? getComputedStyle(g) : null;
+  const ts = t ? getComputedStyle(t) : null;
+  const an = t ? t.getAnimations()[0] : null;
   return {
     i, host,
     op: cs ? +(+cs.opacity).toFixed(3) : null,
     p: g ? +(parseFloat(g.style.getPropertyValue('--p')) || 0) : null,
-    anim: g ? g.getAnimations().length : null,
+    animOuter: g ? g.getAnimations().length : null,
+    ongap: !!(g && g.classList.contains('ongap')),
+    breathe: ts ? +(+ts.opacity).toFixed(3) : null,
+    animName: an ? an.animationName : null,
+    animDur: an ? an.effect.getTiming().duration : null,
+    animIter: an ? an.effect.getTiming().iterations : null,
+    animState: an ? an.playState : null,
     transform: cs ? cs.transform : null,
-    bg: cs ? String(cs.backgroundImage).slice(0, 60) : null,
+    bg: ts ? String(ts.backgroundImage).slice(0, 60) : null,
     chars: node ? [...node.querySelectorAll('.ch')].map(s => ({ c: s.textContent, p: parseFloat(s.style.getPropertyValue('--p')) || 0 })) : []
   };
 })()`;
@@ -221,13 +230,51 @@ const chSnap = `(() => {
   await js(`(() => { audio.pause(); audio.currentTime = 3.2; })()`);
   await sleep(400);
   const gap = await js(`(${chSnap})`);
-  log('  ' + JSON.stringify({ op: gap.op, p: gap.p, anim: gap.anim, transform: gap.transform, bg: gap.bg, chars: gap.chars.map(c => c.p) }));
+  log('  ' + JSON.stringify({
+    op: gap.op, p: gap.p, ongap: gap.ongap, breathe: gap.breathe,
+    animName: gap.animName, animDur: gap.animDur, animIter: gap.animIter,
+    animOuter: gap.animOuter, transform: gap.transform, bg: gap.bg,
+    chars: gap.chars.map(c => c.p)
+  }));
   ok('空档里这一句先补满（不留半句）',
     gap.chars.length > 0 && gap.chars.every(c => c.p >= 99.9),
     JSON.stringify(gap.chars.map(c => c.p)));
   ok('空档 >3 秒时「…」可见', gap.op > 0.5, `op=${gap.op}`);
-  ok('「…」没有缩放 / 循环动画', gap.anim === 0 && gap.transform === 'none', `${gap.anim} / ${gap.transform}`);
-  ok('「…」也由 --p 驱动渐变填充', /linear-gradient/.test(gap.bg || ''), String(gap.bg));
+  ok('外层没有动画、也没有缩放（只由 JS 写 opacity / --p）',
+    gap.animOuter === 0 && gap.transform === 'none', `${gap.animOuter} / ${gap.transform}`);
+  ok('「…」由 --p 驱动渐变填充', /linear-gradient/.test(gap.bg || ''), String(gap.bg));
+  ok('呼吸动画挂在空档期间（.ongap 生效）', gap.ongap === true && gap.animName === 'gapBreathe',
+    `ongap=${gap.ongap} anim=${gap.animName}`);
+
+  /* 呼吸：整周期 6s（单程 3s）、无限循环、正弦式缓动，opacity 在 0.35~1 之间往复。
+   * 这里按真实时间采样 3.2s，正好走完「最暗 → 最亮」的半程。 */
+  ok('呼吸周期 6s、无限循环、正弦缓动',
+    gap.animDur === 6000 && gap.animIter === Infinity && gap.animState === 'running',
+    `dur=${gap.animDur} iter=${gap.animIter} state=${gap.animState}`);
+
+  const breathe = await js(`(async () => {
+    const g = S.lnNodes[0].querySelector('.gap');
+    const t = g.querySelector('.gap-t');
+    const a = t.getAnimations()[0];
+    const kf = a ? a.effect.getKeyframes().map(k => String(k.opacity)) : [];
+    const easing = a ? getComputedStyle(t).animationTimingFunction : '';
+    const ops = [];
+    const chBefore = S.curCh;
+    for (let k = 0; k < 13; k++) { ops.push(+(+getComputedStyle(t).opacity).toFixed(3)); await new Promise(r => setTimeout(r, 250)); }
+    return {
+      ops, kf, easing,
+      min: Math.min(...ops), max: Math.max(...ops),
+      chStable: S.curCh === chBefore,
+      pAfter: +(parseFloat(g.style.getPropertyValue('--p')) || 0)
+    };
+  })()`);
+  log('  呼吸采样：' + JSON.stringify(breathe.ops));
+  log('  关键帧：' + JSON.stringify(breathe.kf) + '  缓动：' + breathe.easing);
+  ok('呼吸下限约 0.35', breathe.min <= 0.45, `min=${breathe.min}`);
+  ok('呼吸上限约 1（3s 内到达最亮）', breathe.max >= 0.9, `max=${breathe.max}`);
+  ok('opacity 始终在 0.3~1.05 之间（不过冲、不消失）',
+    breathe.ops.every(o => o >= 0.3 && o <= 1.05), JSON.stringify(breathe.ops));
+  ok('呼吸不碰填充进度（curCh 不变）', breathe.chStable === true);
 
   /* 匀速：把播放头放在填充窗口的 20% / 50% / 80%，比例应该正好是 20 / 50 / 80。
    * 同步调用 updateLyric 后立刻读样式 —— 中间不让出事件循环，rAF 插不进来。 */
@@ -282,8 +329,10 @@ const chSnap = `(() => {
   await js(`audio.currentTime = ${backAt}`);
   await sleep(400);
   const back = await js(`(${chSnap})`);
-  log('  ' + JSON.stringify({ op: back.op, chars: back.chars.slice(0, 3) }));
+  log('  ' + JSON.stringify({ op: back.op, ongap: back.ongap, animName: back.animName, chars: back.chars.slice(0, 3) }));
   ok('进入下一句后「…」收掉', back.op === 0, `op=${back.op}`);
+  ok('呼吸动画随空档结束一起停掉（不留常驻动画）',
+    back.ongap === false && back.animName === null, `ongap=${back.ongap} anim=${back.animName}`);
   ok('下一句第一个字已在填', back.chars[0] && back.chars[0].p > 20 && back.chars[0].p < 80,
     JSON.stringify(back.chars.slice(0, 2)));
 
