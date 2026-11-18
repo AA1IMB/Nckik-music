@@ -1,14 +1,15 @@
 'use strict';
 /**
- * 探针：逐字歌词进度 + 无进度时「…」占位（不属于项目代码）
+ * 探针：逐字歌词进度 + 空档的「…」（不属于项目代码）
  * ---------------------------------------------------------------------------
- * 验三件事：
+ * 验四件事：
  *   1. 数据层：每行都能摊出「每字一个 { c, t0, t1 }」，时间单调、单字不超过上限；
  *      yrc（网易云逐字）与行内 <mm:ss.xx> 的真实时间要原样保留；
  *   2. 渲染层：把播放时钟设到某个字的中间，只有它自己的 --p 是 0~100，
  *      它前面的字是 100%、后面的字是 0% —— 不允许整行一条渐变扫过去；
- *   3. 空档：间奏里当前句挂上 .waiting（"…" 可见且有缩放动画），
- *      进度恢复后 .waiting 消失。
+ *   3. 空档：「…」算一句，跟着时间轴匀速填、下一句开口前 0.5s 填满，再渐隐收尾；
+ *      不做放大缩小的循环动画；空档不到 3s 时不出现；
+ *   4. 边界：前奏、末尾、无时间戳歌词。
  */
 const { app } = require('electron');
 const path = require('node:path');
@@ -22,8 +23,10 @@ process.env.NCKIK_SKIP_MIGRATION = '1';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ymp-lyr-'));
 app.setPath('userData', tmp);
 
-/* 造一首「本地曲目 + 同名 .lrc」：第 1 句唱完到第 2 句有 6 秒空档，
- * 正好用来验「…」占位；句子长短不同，用来验逐字速度不跟整行长度挂钩。 */
+/* 造一首「本地曲目 + 同名 .lrc」，三个关键空档用来验阈值与节奏：
+ *   0s「短句」唱到 2.8s → 6s 下一句：空档 3.2s，超过 3s 阈值，该出现「…」；
+ *   6s 那句正好唱到 12s（首尾相接，不该出现「…」）；
+ *   12s「第三句」唱到 16.2s → 18s：空档 1.8s，不够 3s，也不该出现「…」。 */
 const media = path.join(tmp, 'media');
 fs.mkdirSync(media, { recursive: true });
 fs.copyFileSync(path.join(root, 'demo', 'demo.wav'), path.join(media, 'lyr.wav'));
@@ -31,8 +34,8 @@ fs.writeFileSync(path.join(media, 'lyr.lrc'), [
   '[ti:逐字测试]',
   '[00:00.00]短句',
   '[00:06.00]间奏之后的第二句歌词',
-  '[00:10.00]第三句更长一些用来验证字与字之间的速度是不同的',
-  '[00:16.00]末句'
+  '[00:12.00]第三句',
+  '[00:18.00]末句'
 ].join('\n'), 'utf8');
 const wav = path.join(media, 'lyr.wav');
 const st = fs.statSync(wav);
@@ -42,7 +45,7 @@ fs.writeFileSync(path.join(tmp, 'library.json'), JSON.stringify([{
   codec: 'WAV', sampleRate: 44100, bitDepth: 16, bitrate: 1411200, lossless: true,
   hasCover: false, hasLyric: true, mtime: st.mtimeMs, size: st.size, addedAt: Date.now()
 }], null, 2));
-fs.writeFileSync(path.join(tmp, 'settings.json'), JSON.stringify({ theme: 'dark', volume: 0, muted: true }));
+fs.writeFileSync(path.join(tmp, 'settings.json'), JSON.stringify({ theme: 'dark', volume: 0, muted: true, globalKeys: false }));
 
 const logPath = path.join(root, 'demo', 'probe-lyric.log');
 fs.writeFileSync(logPath, '');
@@ -82,18 +85,21 @@ async function waitFor(fn, ms = 8000, step = 120) {
   return false;
 }
 
-/* 读当前行每个字的状态：p 为 --p 的百分比数值 */
+/* 读当前行每个字的状态，以及「…」的填充比例 / 透明度 / 是否带动画 */
 const chSnap = `(() => {
   const i = S.lastLy;
-  const node = i >= 0 ? S.lnNodes[i] : null;
-  if (!node) return { i, chars: [], waiting: null };
-  const spans = [...node.querySelectorAll('.ch')];
+  const host = i >= 0 ? (S.lyrics[i].prevTimed ?? -1) : -1;
+  const node = host >= 0 ? S.lnNodes[host] : null;
+  const g = node ? node.querySelector('.gap') : null;
+  const cs = g ? getComputedStyle(g) : null;
   return {
-    i,
-    waiting: node.classList.contains('waiting'),
-    gapOp: (() => { const g = node.querySelector('.gap'); return g ? +getComputedStyle(g).opacity : null; })(),
-    gapAnim: (() => { const g = node.querySelector('.gap'); return g ? getComputedStyle(g).animationName : null; })(),
-    chars: spans.map(s => ({ c: s.textContent, p: parseFloat(s.style.getPropertyValue('--p')) || 0 }))
+    i, host,
+    op: cs ? +(+cs.opacity).toFixed(3) : null,
+    p: g ? +(parseFloat(g.style.getPropertyValue('--p')) || 0) : null,
+    anim: g ? g.getAnimations().length : null,
+    transform: cs ? cs.transform : null,
+    bg: cs ? String(cs.backgroundImage).slice(0, 60) : null,
+    chars: node ? [...node.querySelectorAll('.ch')].map(s => ({ c: s.textContent, p: parseFloat(s.style.getPropertyValue('--p')) || 0 })) : []
   };
 })()`;
 
@@ -157,15 +163,24 @@ const chSnap = `(() => {
       if (!spans) bad.push(i + ':no-spans');
       else if (spans.length !== l.chars.length) bad.push(i + ':' + spans.length + '/' + l.chars.length);
     });
-    return { lines: S.lyrics.length, bad, hasGap: S.lnNodes.every(n => !!n.querySelector('.gap')) };
+    return {
+      lines: S.lyrics.length, bad,
+      hasGap: S.lnNodes.every(n => !!n.querySelector('.gap')),
+      nexts: S.lyrics.map(l => ({ to: l.nextT, prev: l.prevTimed }))
+    };
   })()`);
   log('  ' + JSON.stringify(rendered));
   ok('每行一个字一个 span', rendered.bad.length === 0, rendered.bad.join(','));
-  ok('每行都带「…」占位节点', rendered.hasGap === true);
+  ok('每行都带「…」节点', rendered.hasGap === true);
+  ok('行间链好了 nextT / prevTimed（空档判定不用每帧往后扫）',
+    rendered.nexts[0].to === 6 && rendered.nexts[1].to === 12
+    && rendered.nexts[2].to === 18 && rendered.nexts[3].to === Infinity
+    && rendered.nexts[3].prev === 3,
+    JSON.stringify(rendered.nexts));
 
   // 反复把时钟放到不同字里，验证「已填的是前缀，当前字在中间」
   const probes = [
-    { line: 1, ch: 0 }, { line: 1, ch: 3 }, { line: 1, ch: 6 }, { line: 2, ch: 2 }, { line: 2, ch: 9 }
+    { line: 1, ch: 0 }, { line: 1, ch: 3 }, { line: 1, ch: 6 }, { line: 2, ch: 1 }, { line: 3, ch: 1 }
   ];
   for (const pr of probes) {
     const r = await js(`(() => {
@@ -185,74 +200,101 @@ const chSnap = `(() => {
     if (!(r.prefix && r.after)) log('    ' + JSON.stringify(r.ps));
   }
 
-  /* ---------- 4. 空档：「…」占位 ---------- */
-  log('=== 4. 间奏的「…」占位 ===');
-  /* 用真实播放头驱动：暂停后把 currentTime 停在第 1 句唱完(2.8s)、
-   * 第 2 句还没开始(6.0s) 的位置。只调 updateLyric() 不行 ——
-   * 逐帧循环的下一帧就会用真实时钟把它覆盖回去。 */
+  /* ---------- 4. 空档：「…」当成一句来唱 ---------- */
+  log('=== 4. 空档：「…」当成一句来唱 ===');
+  const gapInfo = await js(`(() => {
+    const l = S.lyrics[0];
+    const from = l.chars[l.chars.length - 1].t1;
+    const l2 = S.lyrics[2];
+    const from2 = l2.chars[l2.chars.length - 1].t1;
+    return {
+      from: +from.toFixed(3), to: l.nextT, dur: +(l.nextT - from).toFixed(3),
+      smallFrom: +from2.toFixed(3), smallTo: l2.nextT, smallDur: +(l2.nextT - from2).toFixed(3)
+    };
+  })()`);
+  log('  ' + JSON.stringify(gapInfo));
+  ok('第一个空档 3.2s（在 3s 阈值之上）', Math.abs(gapInfo.dur - 3.2) < 0.05, `dur=${gapInfo.dur}`);
+  ok('第二个空档 1.8s（在 3s 阈值之下）', Math.abs(gapInfo.smallDur - 1.8) < 0.05, `dur=${gapInfo.smallDur}`);
+
+  /* 用真实播放头驱动：暂停后把 currentTime 停在空档里。
+   * 只调 updateLyric() 不行 —— 逐帧循环的下一帧就会用真实时钟把它覆盖回去。 */
   await js(`(() => { audio.pause(); audio.currentTime = 3.2; })()`);
   await sleep(400);
   const gap = await js(`(${chSnap})`);
-  log('  ' + JSON.stringify(gap));
-  ok('空档里当前句挂上 .waiting', gap.waiting === true);
-  ok('空档里这一句已经补满（不留半句）',
+  log('  ' + JSON.stringify({ op: gap.op, p: gap.p, anim: gap.anim, transform: gap.transform, bg: gap.bg, chars: gap.chars.map(c => c.p) }));
+  ok('空档里这一句先补满（不留半句）',
     gap.chars.length > 0 && gap.chars.every(c => c.p >= 99.9),
     JSON.stringify(gap.chars.map(c => c.p)));
-  ok('「…」有缩放循环动画', gap.gapAnim === 'gapPulse', String(gap.gapAnim));
+  ok('空档 >3 秒时「…」可见', gap.op > 0.5, `op=${gap.op}`);
+  ok('「…」没有缩放 / 循环动画', gap.anim === 0 && gap.transform === 'none', `${gap.anim} / ${gap.transform}`);
+  ok('「…」也由 --p 驱动渐变填充', /linear-gradient/.test(gap.bg || ''), String(gap.bg));
 
-  /* 动画要真的在跑：playState=running、currentTime 在前进、
-   * 连续采样的 opacity 在 0.55~1 之间来回，缩放跟着变。 */
-  const anim = await js(`(async () => {
+  /* 匀速：把播放头放在填充窗口的 20% / 50% / 80%，比例应该正好是 20 / 50 / 80。
+   * 同步调用 updateLyric 后立刻读样式 —— 中间不让出事件循环，rAF 插不进来。 */
+  const lin = await js(`(() => {
+    const host = S.lyrics[0];
+    const from = host.chars[host.chars.length - 1].t1;
+    const to = host.nextT;
+    const end = to - 0.5;
     const g = S.lnNodes[0].querySelector('.gap');
-    const a = g.getAnimations()[0];
-    const t1 = a ? a.currentTime : -1;
-    const ops = [];
-    for (let k = 0; k < 7; k++) {
-      ops.push(+getComputedStyle(g).opacity);
-      await new Promise(r => setTimeout(r, 110));
-    }
-    const a2 = g.getAnimations()[0];
-    const cs = getComputedStyle(g);
-    const m = new DOMMatrixReadOnly(cs.transform === 'none' ? '' : cs.transform);
-    return {
-      name: a2 && a2.animationName, state: a2 && a2.playState,
-      dur: a2 && a2.effect.getTiming().duration,
-      adv: a ? Math.round(a2.currentTime - t1) : null,
-      ops: ops.map(o => +o.toFixed(3)),
-      scale: +m.a.toFixed(3),
-      kf: a2 ? a2.effect.getKeyframes().map(k => ({ o: k.offset, op: k.opacity, tr: k.transform })) : null
-    };
+    const at = f => { updateLyric(from + (end - from) * f); return +(parseFloat(g.style.getPropertyValue('--p')) || 0); };
+    const p20 = at(0.2), p50 = at(0.5), p80 = at(0.8);
+    updateLyric(end);
+    const pEnd = +(parseFloat(g.style.getPropertyValue('--p')) || 0);
+    const opEnd = +(+getComputedStyle(g).opacity).toFixed(3);
+    return { p20, p50, p80, pEnd, opEnd, end: +end.toFixed(3) };
   })()`);
-  log('  动画：' + JSON.stringify({ name: anim.name, state: anim.state, dur: anim.dur, adv: anim.adv, ops: anim.ops, scale: anim.scale }));
-  log('  关键帧：' + JSON.stringify(anim.kf));
-  ok('「…」上有 gapPulse 1.5s 循环动画且处于 running',
-    anim.name === 'gapPulse' && anim.dur === 1500 && anim.state === 'running', `${anim.name}/${anim.dur}/${anim.state}`);
-  ok('动画时钟在前进（不是停在第一帧）', anim.adv > 500, `adv=${anim.adv}ms`);
-  ok('「…」始终可见（采样 opacity 都 > 0.5）', anim.ops.every(o => o > 0.5), JSON.stringify(anim.ops));
-  ok('「…」明暗在起伏（opacity 有 >0.15 的波动）',
-    Math.max(...anim.ops) - Math.min(...anim.ops) > 0.15,
-    `range=${(Math.max(...anim.ops) - Math.min(...anim.ops)).toFixed(3)}`);
-  ok('关键帧是「放大→缩小」往复（scale .86 ↔ 1.14、opacity .55 ↔ 1）',
-    Array.isArray(anim.kf) && anim.kf.length === 3
-    && /scale\(0\.86\)/.test(anim.kf[0].tr) && /scale\(1\.14\)/.test(anim.kf[1].tr) && /scale\(0\.86\)/.test(anim.kf[2].tr)
-    && parseFloat(anim.kf[0].op) === 0.55 && parseFloat(anim.kf[1].op) === 1,
-    JSON.stringify(anim.kf && anim.kf.map(k => k.tr + '@' + k.op)));
+  log('  ' + JSON.stringify(lin));
+  ok('填充是匀速的：20% / 50% / 80% 处比例分别是 20 / 50 / 80',
+    Math.abs(lin.p20 - 20) < 2 && Math.abs(lin.p50 - 50) < 2 && Math.abs(lin.p80 - 80) < 2,
+    `${lin.p20}/${lin.p50}/${lin.p80}`);
+  ok('下一句开口前 0.5s 正好填满（100%、还不透明）',
+    lin.pEnd >= 99.9 && lin.opEnd >= 0.99, `p=${lin.pEnd} op=${lin.opEnd} end=${lin.end}`);
 
-  /* 播放头走进第 2 句：.waiting 要撤掉、「…」淡出、填充条接上 */
+  /* 渐隐：填满之后到下一句开口，opacity 由 1 平滑落到 0 */
+  const fade = await js(`(() => {
+    const host = S.lyrics[0];
+    const to = host.nextT;
+    const g = S.lnNodes[0].querySelector('.gap');
+    const read = t => { updateLyric(t); return +(+getComputedStyle(g).opacity).toFixed(3); };
+    const full = read(to - 0.5), quarter = read(to - 0.375), mid = read(to - 0.25), late = read(to - 0.02), off = read(to + 0.01);
+    return { full, quarter, mid, late, off };
+  })()`);
+  log('  ' + JSON.stringify(fade));
+  ok('渐隐从「刚填满」开始（不透明度 1）', fade.full >= 0.99, String(fade.full));
+  ok('渐隐是单调下降的（1 → 0.5 → 近 0）',
+    fade.quarter > fade.mid && fade.mid > fade.late && Math.abs(fade.mid - 0.5) < 0.08,
+    JSON.stringify(fade));
+  ok('下一句开口前几乎看不见了', fade.late < 0.1, String(fade.late));
+  ok('下一句开口后「…」收掉（opacity 0）', fade.off === 0, String(fade.off));
+
+  /* 空档不到 3s：不该出现「…」，这一句保持填满 */
+  await js(`(() => { audio.currentTime = ${gapInfo.smallFrom + 0.9}; })()`);
+  await sleep(400);
+  const small = await js(`(${chSnap})`);
+  log('  ' + JSON.stringify({ op: small.op, p: small.p, chars: small.chars.map(c => c.p) }));
+  ok('空档只有 1.8s 时不显示「…」（阈值 3s）', small.op === 0, `op=${small.op}`);
+  ok('短空档里这一句保持填满', small.chars.length > 0 && small.chars.every(c => c.p >= 99.9),
+    JSON.stringify(small.chars.map(c => c.p)));
+
+  /* 播放头走进第 2 句：「…」收起、填充条接上 */
   const backAt = await js(`(() => { const c = S.lyrics[1].chars[0]; return +(c.t0 + (c.t1 - c.t0) * 0.4).toFixed(3); })()`);
   await js(`audio.currentTime = ${backAt}`);
   await sleep(400);
   const back = await js(`(${chSnap})`);
-  log('  ' + JSON.stringify({ waiting: back.waiting, gapOp: back.gapOp, chars: back.chars.slice(0, 3) }));
-  ok('进度恢复后 .waiting 消失（平滑切回填充条）', back.waiting === false);
-  ok('恢复后第一个字已在填', back.chars[0] && back.chars[0].p > 20 && back.chars[0].p < 80);
+  log('  ' + JSON.stringify({ op: back.op, chars: back.chars.slice(0, 3) }));
+  ok('进入下一句后「…」收掉', back.op === 0, `op=${back.op}`);
+  ok('下一句第一个字已在填', back.chars[0] && back.chars[0].p > 20 && back.chars[0].p < 80,
+    JSON.stringify(back.chars.slice(0, 2)));
 
-  /* ---------- 5. 前奏：还没有当前句 ---------- */
+  /* ---------- 5. 前奏 / 末尾边界 ---------- */
   log('=== 5. 前奏/末尾边界 ===');
   const pre = await js(`(() => { updateLyric(-30); return ${chSnap}; })()`);
-  ok('播放位置在歌词之前时不报错、不误填', pre.chars.length > 0 || pre.i < 0, JSON.stringify(pre).slice(0, 80));
-  const post = await js(`(() => { updateLyric(500); const s = ${chSnap}; return { len: s.chars.length, ps: s.chars.map(c => c.p) }; })()`);
+  ok('播放位置在歌词之前时不报错、不误填', pre.i < 0 || pre.chars.length === 0,
+    JSON.stringify(pre).slice(0, 80));
+  const post = await js(`(() => { updateLyric(500); const s = ${chSnap}; return { len: s.chars.length, ps: s.chars.map(c => c.p), op: s.op }; })()`);
   ok('越过最后一句后整句填满、无残留半字', post.ps.every(p => p >= 99.9), JSON.stringify(post.ps));
+  ok('最后一句后面没有空档、不挂「…」', post.op === 0 || post.op === null, `op=${post.op}`);
 
   /* ---------- 6. 没有时间戳的歌词 ---------- */
   log('=== 6. 无时间戳 / 空歌词 ===');

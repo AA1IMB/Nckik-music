@@ -302,30 +302,23 @@ body::before {
   color: transparent;
 }
 
-/* 没有进度可填时的占位「…」：挂在句尾，随字号一起缩放 */
+/* 空档里的「…」现在算「这一句的延长」：它有真实进度，跟着填充条匀速被填满，
+ * 再渐隐收在下一句开口的位置。节奏全在 JS 里按时间轴算，这里不写任何动画 ——
+ * 也就没有放大缩小的脉冲，也不加 transition（逐帧写更跟手，seek 后立刻对）。 */
 .ln .gap {
+  --p: 0%;
+  --lc1: var(--acInk, #fff);
+  --lc2: var(--fg);
   position: absolute;
   left: 100%;
   top: 0;
   margin-left: .18em;
-  color: var(--fg3);
+  background-image: linear-gradient(90deg, var(--lc1) 0 var(--p), var(--lc2) var(--p) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
   opacity: 0;
-  transform: scale(.7);
-  transform-origin: left center;
   pointer-events: none;
-  transition: opacity .3s var(--ease), transform .3s var(--ease);
-}
-.ln.waiting .gap {
-  opacity: 1;
-  transform: scale(1);
-  animation: gapPulse 1.5s ease-in-out infinite;
-}
-@keyframes gapPulse {
-  0%, 100% { transform: scale(.86); opacity: .55; }
-  50%      { transform: scale(1.14); opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .ln.waiting .gap { animation: none; transform: scale(1); opacity: 1; }
 }
 
 .lyr-empty {

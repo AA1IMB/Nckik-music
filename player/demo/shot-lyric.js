@@ -3,8 +3,9 @@
  * 截图脚本：逐字填充条 + 间奏「…」占位（不属于项目代码）
  * ---------------------------------------------------------------------------
  * 造一首「第 1 句很短、第 2 句很晚」的本地曲目：
- *   第 1 句 5 个字，单字时长被 MAX_CH(1.4s) 截断 → 7.0s 就唱完，第 2 句 10.0s 才来，
- *   中间 3 秒空档正好展示「…」；第 2 句有 19 个字，用来展示字与字之间的填充差异。
+ *   第 1 句 5 个字，单字时长被 MAX_CH(1.4s) 截断 → 7.0s 就唱完，第 2 句 10.5s 才来，
+ *   中间 3.5 秒的空档正好展示「…」被匀速填满再渐隐；第 2 句有 19 个字，
+ *   用来展示字与字之间的填充差异。
  */
 const { app } = require('electron');
 const path = require('node:path');
@@ -25,7 +26,7 @@ fs.copyFileSync(path.join(root, 'demo', 'demo.png'), path.join(media, 'lyric.png
 fs.writeFileSync(path.join(media, 'lyric.lrc'), [
   '[ti:逐字填充]',
   '[00:00.00]这一句很短',
-  '[00:10.00]第二句出现得很晚用来验证占位',
+  '[00:10.50]第二句出现得很晚用来验证占位',
   '[00:30.00]最后一句'
 ].join('\n'), 'utf8');
 const st = fs.statSync(wav);
@@ -55,10 +56,14 @@ const js = c => win.webContents.executeJavaScript(c, true);
     await js(`(() => { audio.pause(); audio.currentTime = ${t}; })()`);
     await sleep(700);
     const info = await js(`(() => {
-      const i = S.lastLy, n = i >= 0 ? S.lnNodes[i] : null;
+      const i = S.lastLy;
+      const host = i >= 0 ? (S.lyrics[i].prevTimed ?? -1) : -1;
+      const n = host >= 0 ? S.lnNodes[host] : null;
+      const g = n ? n.querySelector('.gap') : null;
       return {
-        t: +audio.currentTime.toFixed(2), i,
-        waiting: !!(n && n.classList.contains('waiting')),
+        t: +audio.currentTime.toFixed(2), i, host,
+        gapP: g ? Math.round(parseFloat(g.style.getPropertyValue('--p')) || 0) : null,
+        gapOp: g ? +(+getComputedStyle(g).opacity).toFixed(2) : null,
         ps: n ? [...n.querySelectorAll('.ch')].map(s => Math.round(parseFloat(s.style.getPropertyValue('--p')) || 0)) : []
       };
     })()`);
@@ -74,8 +79,10 @@ const js = c => win.webContents.executeJavaScript(c, true);
   })()`);
   await shot(mid, 'shot-lyric-fill.png', 'fill');
 
-  // 第 1 句唱完、第 2 句还没来
-  await shot(8.2, 'shot-lyric-gap.png', 'gap');
+  // 第 1 句唱完(7.0s)、第 2 句还没来(10.5s)：空档 3.5s，正好在填「…」
+  await shot(8.75, 'shot-lyric-gap.png', 'gap-fill');
+  // 填满之后(10.0s 填满)、下一句开口(10.5s)之前：渐隐到一半
+  await shot(10.25, 'shot-lyric-fade.png', 'gap-fade');
 
   app.quit();
 })().catch(e => { console.error('SHOT CRASH', e); app.quit(); });

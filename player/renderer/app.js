@@ -22,7 +22,9 @@ const S = {
   lnChars: [],                     // 每行的字节点数组（没有逐字数据的行是 null）
   curCh: -2,                       // 当前正在填的字下标：-2 还没开始，n 已完成 n 个
   curFrac: -1,                     // 当前字内的比例，避免每帧重复写同一个样式值
-  waitNode: -1,                    // 「…」挂在哪一行上
+  gapNode: null,                   // 正在演的空档「…」节点（没有就是 null）
+  gapP: -1,                        // 「…」上一帧的填充比例，避免重复写样式
+  gapOp: -1,                       // 「…」上一帧的透明度，同上
   hist: [],
   libDirty: false,
   srcMode: 'local',                 // 曲库抽屉的两条音轨：local / net
@@ -396,8 +398,15 @@ function parseLRC(src) {
  * 摊开时给每个字压上限（MAX_CH）：长间奏就提前唱完，剩下交给「…」占位，
  * 而不是让最后一个字拖十几秒才填满。
  */
-const MAX_CH = 1.4;    // 单字填充时长上限（秒）
-const GAP_MIN = 1.2;   // 空档超过这个秒数才显示「…」，句间正常停顿不闪
+const MAX_CH = 1.4;        // 单字填充时长上限（秒）
+/* 空档的判定与节奏：
+ * 两句之间真的空出 GAP_MIN 秒以上，才把「…」当成一句来唱 —— 句间正常换气
+ * （0.5–2 秒）不该闪一下「…」。填满的时机与渐隐都相对下一句的起点算，
+ * 而不是相对上一句的结尾，这样不管间奏多长，收尾都落在同一个位置。 */
+const GAP_MIN = 3;         // 空档超过 3 秒才启用「…」
+const GAP_LEAD = 0.5;      // 下一句开口前 0.5 秒正好填满
+const GAP_FADE = 0.5;      // 填满后的渐隐时长（收在下一句起点上）
+const GAP_IN = 0.25;       // 「…」出现时的淡入
 
 function charWeight(c) {
   if (!c || /\s/.test(c)) return 0.34;                                 // 空格几乎没有字宽
@@ -483,12 +492,30 @@ function parseYRC(src) {
   return out.filter((l, i) => i === 0 || l.t !== out[i - 1].t);
 }
 
+/* 给每行记下「下一句开口的时刻」和「最近一句有字的行」，都跳过空行。
+ * 空档判定因此是一次减法，不用每帧往后扫歌词；空行（有 [mm:ss] 但没文字）
+ * 不会被当成一个空档的边界，而是直接跨过去。 */
+function linkLines(lines) {
+  let next = Infinity;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i];
+    l.nextT = next;
+    if (l.chars && l.chars.length) next = l.chars[0].t0;
+  }
+  let prev = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].chars && lines[i].chars.length) prev = i;
+    lines[i].prevTimed = prev;
+  }
+  return lines;
+}
+
 /* 歌词入口：有逐字数据就用逐字，否则按行时间摊到字 */
 function buildLyrics(ly) {
   if (!ly) return [];
   const y = parseYRC(ly.yrc);
-  if (y.length) return y;
-  return assignChars(parseLRC(ly.text));
+  if (y.length) return linkLines(y);
+  return linkLines(assignChars(parseLRC(ly.text)));
 }
 
 function renderLyrics() {
@@ -498,7 +525,9 @@ function renderLyrics() {
   S.lnChars = [];
   S.curCh = -2;
   S.curFrac = -1;
-  S.waitNode = -1;
+  S.gapNode = null;
+  S.gapP = -1;
+  S.gapOp = -1;
   S.lastLy = -1;
   $('#lyrEmpty').classList.toggle('show', S.lyrics.length === 0);
   if (!S.lyrics.length) {
@@ -532,8 +561,8 @@ function renderLyrics() {
       d.textContent = l.text;          // 兜底：没有任何字级数据时按整行
       S.lnChars.push(null);
     }
-    /* 没有进度可填的时候（间奏、空行、还没开口）用「…」占位，
-     * 放大缩小循环 + 透明度过渡，接上进度时自然淡回填充条 */
+    /* 空档里的「…」：它不是装饰，而是「这一句还没唱完」的延续 ——
+     * 挂在本句末尾，跟着时间轴匀速填满、再渐隐，细节见 paintGap()。 */
     const gap = document.createElement('span');
     gap.className = 'gap';
     gap.textContent = '…';
@@ -614,6 +643,40 @@ function paintChars(i, chIdx, frac) {
   }
 }
 
+/* 空档期的「…」：把它当成一句来唱。
+ * 从上一句最后一个字唱完起匀速填，到下一句开口前 GAP_LEAD 秒正好填满，
+ * 再用 GAP_FADE 秒平滑收没 —— 不做放大缩小的脉冲，节奏完全由时间轴决定。
+ * 透明度逐帧写、不交给 CSS transition：seek 之后要立刻对上，不能被过渡拖住。 */
+function paintGap(at, t, from, to) {
+  const node = S.lnNodes[at];
+  const gap = node && node.querySelector('.gap');
+  if (!gap) return;
+  if (gap !== S.gapNode) {
+    hideGap();                            // 换了一句：先把上一行的收掉
+    S.gapNode = gap;
+  }
+  const fillEnd = to - GAP_LEAD;
+  const p = clamp((t - from) / Math.max(0.2, fillEnd - from), 0, 1);
+  let op = clamp((t - from) / GAP_IN, 0, 1);          // 出现时淡入，别硬闪
+  if (t > fillEnd) {
+    const k = clamp((t - fillEnd) / GAP_FADE, 0, 1);
+    op *= 1 - k * k * (3 - 2 * k);                    // smoothstep：收尾不硬切
+  }
+  const pp = Math.round(p * 1000) / 10;
+  if (pp !== S.gapP) { S.gapP = pp; gap.style.setProperty('--p', pp + '%'); }
+  const oo = Math.round(op * 100) / 100;
+  if (oo !== S.gapOp) { S.gapOp = oo; gap.style.opacity = String(oo); }
+}
+
+function hideGap() {
+  if (!S.gapNode) return;
+  S.gapNode.style.opacity = '0';
+  S.gapNode.style.setProperty('--p', '0%');
+  S.gapNode = null;
+  S.gapP = -1;
+  S.gapOp = -1;
+}
+
 /* t 由播放时钟传入，不再取 audio.currentTime —— 后者只有 ~4Hz，逐帧插值才顺滑 */
 function updateLyric(t) {
   if (t == null) t = audio.currentTime;
@@ -631,22 +694,32 @@ function updateLyric(t) {
     else clearTimeout(centerTimer);      // 间奏 / 开头没有当前句，别留一个迟到的校正
   }
 
-  /* 还没有当前句时，「…」挂在第一句上：前奏很长也有个地方显示 */
+  /* 先看是不是落在两句之间的大空档里：整段交给「…」，正文不再动 */
+  const host = i >= 0 ? (S.lyrics[i].prevTimed ?? -1) : -1;
+  if (host >= 0) {
+    const line = S.lyrics[host];
+    const chars = line.chars;
+    const from = chars[chars.length - 1].t1;         // 上一句最后一个字唱完的时刻
+    const to = line.nextT;                            // 下一句开口的时刻
+    // 最后一句后面没有下一句了（nextT 是 Infinity），填满就停，不要挂「…」
+    if (Number.isFinite(to) && to - from > GAP_MIN && t >= from && t < to) {
+      paintChars(host, chars.length, 0);              // 这句先填满，别停在半个字上
+      paintGap(host, t, from, to);
+      return;
+    }
+  }
+  hideGap();
+
   const at = i >= 0 ? i : 0;
   const line = S.lyrics[at];
   if (!line) return;
   const chars = line.chars;
+  // 空行（只有 [mm:ss] 没有字）不参与填充：「…」只服务真正的空档
+  if (!chars || !chars.length) return;
 
   let chIdx = -2;                        // -2 一个字还没唱；n 表示已唱完 n 个字
   let frac = 0;
-  let waiting = false;
-
-  if (!chars || !chars.length) {
-    waiting = true;                                     // 空行 / 这一行没有时间戳
-  } else if (t < chars[0].t0) {
-    chIdx = -2;
-    waiting = chars[0].t0 - t > GAP_MIN;                // 前奏太长才显示「…」
-  } else {
+  if (t >= chars[0].t0) {
     let k = 0;
     for (let j = 0; j < chars.length; j++) {            // 字是顺序的，扫一遍就够（一句最多几十字）
       if (t >= chars[j].t0) k = j; else break;
@@ -654,28 +727,7 @@ function updateLyric(t) {
     const span = chars[k].t1 - chars[k].t0;
     frac = span > 0 ? clamp((t - chars[k].t0) / span, 0, 1) : 1;
     chIdx = frac >= 1 ? k + 1 : k;
-    if (chIdx >= chars.length) {
-      // 整句唱完了：后面还留着长空档才换成「…」，否则保持填满（句间正常停顿不闪）
-      const next = S.lyrics[at + 1];
-      waiting = !!next && next.t - t > GAP_MIN;
-      chIdx = chars.length;
-    }
-  }
-
-  if (waiting) {
-    // 整句已经唱完、只是后面空档长：先把这一句补满再换「…」。
-    // 否则会停在最后一个字唱到一半的进度上，看着像压根没唱完。
-    if (chars && chars.length && t >= chars[chars.length - 1].t1) paintChars(at, chars.length, 0);
-    if (S.waitNode !== at) {
-      if (S.waitNode >= 0 && S.lnNodes[S.waitNode]) S.lnNodes[S.waitNode].classList.remove('waiting');
-      S.lnNodes[at].classList.add('waiting');
-      S.waitNode = at;
-    }
-    return;
-  }
-  if (S.waitNode >= 0) {                 // 有进度了：淡出「…」，切回填充条
-    if (S.lnNodes[S.waitNode]) S.lnNodes[S.waitNode].classList.remove('waiting');
-    S.waitNode = -1;
+    if (chIdx >= chars.length) chIdx = chars.length;    // 整句唱完，保持填满
   }
   paintChars(at, chIdx, frac);
 }
