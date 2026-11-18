@@ -407,7 +407,12 @@ async function loadArt(k) {
   if (hit) return hit;
   if (!isNet(k)) return null;
 
-  if (!k.coverUrl) { k.coverError = ''; return null; }   // 数据源就是没给封面，不是加载失败
+  if (!k.coverUrl) {
+    /* 早期版本从搜索结果入库的曲目没有专辑图字段，库里的 coverUrl 就是空的；
+     * 光靠本机数据永远补不上，先按 netId 向接口要一次再决定要不要放弃。 */
+    if (await healNetCover(k)) persistLibrary();
+  }
+  if (!k.coverUrl) { k.coverError = ''; return null; }   // 接口也没给：不是加载失败
   const at = coverFail.get(k.path);
   if (at && Date.now() - at < COVER_FAIL_TTL) return null;
 
@@ -423,6 +428,67 @@ async function loadArt(k) {
   coverFail.set(k.path, Date.now());
   k.coverError = (r && r.error && r.error.message) || '封面加载失败';
   return null;
+}
+
+/* 网易云曲目缺封面地址时按 netId 向接口补一次。
+ * 背景：早期版本从搜索结果入库的歌没有专辑图字段，coverUrl 一直是空的，
+ * 界面上就是「网易云没有为该曲目提供封面」——其实接口是有的，只是没再问过。
+ * 只补内存字段，落盘由调用方决定。 */
+const coverHeal = new Set();         // 正在补的 netId，避免同一首并发打两次
+async function healNetCover(t) {
+  if (!t || !isNet(t) || t.coverUrl || !t.netId) return false;
+  if (coverHeal.has(t.netId)) return false;
+  coverHeal.add(t.netId);
+  try {
+    const r = await window.api.neSongs([t.netId]);
+    const hit = (r && r.ok && Array.isArray(r.tracks)) ? r.tracks[0] : null;
+    if (!hit || !hit.coverUrl) return false;
+    t.coverUrl = hit.coverUrl;
+    if (!t.album && hit.album) t.album = hit.album;
+    if (!t.albumId && hit.albumId) t.albumId = hit.albumId;
+    return true;
+  } catch { return false; }          // 离线：保持占位，下次启动再补
+  finally { coverHeal.delete(t.netId); }
+}
+
+/* 启动后扫一遍曲库里缺封面的网易云曲目（一次接口最多 200 个 id），
+ * 补到的写回 library.json 并重画列表，用户不用手动清缓存。 */
+async function healNetCovers() {
+  const miss = S.tracks.filter(t => isNet(t) && t.netId && !t.coverUrl);
+  if (!miss.length) return 0;
+  let changed = 0;
+  for (let i = 0; i < miss.length; i += 100) {
+    const chunk = miss.slice(i, i + 100);
+    let tracks = null;
+    try {
+      const r = await window.api.neSongs(chunk.map(t => t.netId));
+      tracks = (r && r.ok && Array.isArray(r.tracks)) ? r.tracks : null;
+    } catch { tracks = null; }
+    if (!tracks) continue;
+    const byId = new Map(tracks.map(x => [x.netId, x]));
+    for (const t of chunk) {
+      const hit = byId.get(t.netId);
+      if (!hit || !hit.coverUrl) continue;
+      t.coverUrl = hit.coverUrl;
+      if (!t.album && hit.album) t.album = hit.album;
+      if (!t.albumId && hit.albumId) t.albumId = hit.albumId;
+      changed++;
+    }
+  }
+  if (!changed) return 0;
+  persistLibrary();
+  if (S.srcMode !== 'net') renderLibrary();
+  // 正在放的这首刚好就是补到的：把封面和主色一起补上
+  const k = curTrack();
+  if (k && isNet(k) && k.coverUrl && !getCover(k.path)) {
+    const art = await loadArt(k);
+    if (art) {
+      const c = await accentFrom(art);
+      if (c) setAccent(c);
+      paintMeta();
+    }
+  }
+  return changed;
 }
 
 /* ------------------------------------------------------------------ LRC */
@@ -980,9 +1046,9 @@ function paintMeta() {
     cover.classList.remove('has-art');
     cover.classList.add('empty');
     if (isNet(k)) {
-      // 三种情况给三种说法：没给图 / 正在取 / 取失败。混成一句会让用户以为网络坏了
+      // 四种情况给四种说法：库里没地址 / 已补到地址正在取 / 取失败 / 真没有
       const sub = !k.coverUrl
-        ? '网易云没有为该曲目提供封面'
+        ? (k.netId ? '封面地址缺失 · 联网后会自动补' : '网易云没有为该曲目提供封面')
         : k.coverError
           ? '封面加载失败 · 已用中性底色'
           : '正在加载封面…';
@@ -3486,6 +3552,7 @@ function applyTransVisibility() {
   plSyncBadge();
   renderPl();
   restorePos();                          // 摆好播放头但不自动出声
+  healNetCovers();                       // 补齐老数据里缺失的网易云封面（后台跑，不挡启动）
 
   loadDevices();
   registerGlobalKeys();
