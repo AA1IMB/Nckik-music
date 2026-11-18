@@ -39,4 +39,31 @@ if not exist "%TMP%" mkdir "%TMP%"
 
 echo [2/2] Starting Nckik's music...
 start "" "%EXE%" --no-sandbox "player"
+
+rem Wait a moment, then verify the process really came up. Without this
+rem check a failed start just flashes a black window and nobody can tell why.
+timeout /t 4 /nobreak >nul
+tasklist /fi "imagename eq electron.exe" 2>nul | find /i "electron.exe" >nul
+if not errorlevel 1 goto done
+
+echo.
+echo [ERROR] Nckik's music did not start.
+echo.
+echo The app writes its own error log here:
+echo   %APPDATA%\NckiksMusic\crash.log
+echo.
+if exist "%APPDATA%\NckiksMusic\crash.log" (
+  echo --- last lines of crash.log ---
+  powershell -NoProfile -Command "Get-Content -LiteralPath \"$env:APPDATA\NckiksMusic\crash.log\" -Tail 8"
+  echo -------------------------------
+  echo.
+)
+echo If the log is empty, run this in a terminal to see Chromium's own output:
+echo   cd /d "%CD%\player"
+echo   node_modules\electron\dist\electron.exe --no-sandbox .
+echo.
+pause
+exit /b 1
+
+:done
 endlocal

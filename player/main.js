@@ -69,9 +69,51 @@ process.on('unhandledRejection', e => logCrash('unhandledRejection', e));
 let win = null;
 let preFull = null;        // 进入全屏前的窗口状态，退出时原样还原
 
-/* 单实例：两个实例会抢音频设备，也会互相覆盖全局快捷键注册 */
+/* 单实例：两个实例会抢音频设备，也会互相覆盖全局快捷键注册。
+ *
+ * 不能只信 requestSingleInstanceLock()。它在 Windows 上要靠 Chromium 的
+ * ProcessSingleton 在 userData 里建锁文件（SingletonLock），一旦这个建不出来
+ * —— 权限收紧、杀软拦截、受限令牌、残留的同名文件 —— 它就返回 false，
+ * 而这里的 app.quit() 会让应用「一闪而过」，用户完全看不到原因（连 crash.log
+ * 都不会有，因为根本没走到写日志的地方）。
+ *
+ * 所以再叠一层纯 Node 的 pid 锁，只有当「两个判定都说另有实例」时才退出。 */
+const PID_LOCK = path.join(userDir, 'instance.pid');
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }  // EPERM = 进程在，只是不归我们管
+}
+function claimPidLock() {
+  let held = 0;
+  try { held = Number(String(fs.readFileSync(PID_LOCK, 'utf8')).trim()) || 0; } catch {}
+  if (pidAlive(held)) return 'held';           // 真有实例在跑
+  try { fs.unlinkSync(PID_LOCK); } catch {}    // 残留（上次崩溃没清），进程已经没了
+  try {
+    fs.writeFileSync(PID_LOCK, String(process.pid), { flag: 'wx' });
+    return 'claimed';
+  } catch (e) {
+    return e && e.code === 'EEXIST' ? 'held' : 'error';
+  }
+}
 const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) app.quit();
+const pidState = claimPidLock();
+if (!gotLock && pidState === 'held') {
+  // 两票都说有实例 → 确实是第二个实例。给一句人话，别让用户对着空屏幕反复双击。
+  try {
+    dialog.showErrorBox('Nckik′s music', '已经有一个窗口在运行了，请到任务栏看看。\n\n如果找不到，说明上一个实例卡住了：在任务管理器里结束 electron.exe 再启动。');
+  } catch {}
+  app.quit();
+} else if (!gotLock) {
+  // Chromium 的锁用不了，但 pid 锁说没有实例：照常启动，别让用户对着闪退发呆
+  console.warn('[single-instance] Chromium 锁不可用，已回退到 pid 锁继续启动');
+  logCrash('single-instance', new Error('Chromium 单实例锁不可用，已回退到 pid 锁（pid=' + pidState + '）'));
+} else if (pidState !== 'claimed') {
+  // Chromium 说我们是唯一实例 → 旧 pid 文件是残留（pid 被别的进程复用），直接覆盖
+  try { fs.writeFileSync(PID_LOCK, String(process.pid)); } catch {}
+}
+if (pidState === 'claimed') {
+  app.on('quit', () => { try { fs.unlinkSync(PID_LOCK); } catch {} });
+}
 
 /* ---------------- 本地媒体协议：带 Range 支持，保证拖动进度条可 seek ---------------- */
 function registerMediaProtocol() {
