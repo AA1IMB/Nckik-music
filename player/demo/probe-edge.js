@@ -96,7 +96,7 @@ app.on('browser-window-created', (_e, w) => {
   })()`);
   log('  ', JSON.stringify(empty));
   ok('空曲库播放/切歌/跳转不崩', empty.i === -1 && empty.playing === false);
-  ok('给出可读提示而不是静默', /先导入/.test(empty.toast), empty.toast);
+  ok('给出可读提示而不是静默', /播放列表是空的|先导入/.test(empty.toast), empty.toast);
   ok('没有把 NaN 写进 currentTime', Number.isFinite(empty.t), String(empty.t));
 
   /* 3) 不存在的文件 / 不支持的类型 */

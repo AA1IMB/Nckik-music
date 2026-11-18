@@ -494,7 +494,8 @@ body.no-tr .ln .tr { display: none; }
 .pl-tools { display: flex; gap: 6px; padding: 0 8px 6px; }
 .pl-tools .ghost { flex: 1 1 0; width: auto; height: 28px; font-size: 11.5px; }
 .pl-body {
-  max-height: min(42vh, 300px); overflow-y: auto; overscroll-behavior: contain;
+  /* 276 = 6 行 × 46，正好整行，不会把第 7 行切一半压在底部提示上 */
+  max-height: min(42vh, 276px); overflow-y: auto; overscroll-behavior: contain;
   padding: 0 2px; scrollbar-width: thin;
 }
 .pl-body::-webkit-scrollbar { width: 8px; }
@@ -502,11 +503,14 @@ body.no-tr .ln .tr { display: none; }
 .pl-body::-webkit-scrollbar-thumb { background: var(--track); border-radius: 4px; }
 .pl-body::-webkit-scrollbar-thumb:hover { background: var(--fg3); }
 
+/* 行高必须固定：虚拟滚动按 PL_ROW_H=46 算 spacer，行高浮动会让滚动条比例失真 */
 .pl-row {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 8px; border-radius: 9px; cursor: pointer;
+  height: 46px; padding: 0 8px; box-sizing: border-box;
+  border-radius: 9px; cursor: pointer;
   transition: background .15s;
 }
+.pl-pad { width: 100%; }
 .pl-row:hover { background: var(--card); }
 .pl-row.on { background: var(--card); }
 .pl-main { flex: 1 1 auto; min-width: 0; }
@@ -519,10 +523,19 @@ body.no-tr .ln .tr { display: none; }
   font-size: 13px; line-height: 1; cursor: pointer; transition: color .15s, background .15s;
 }
 .pl-x:hover { color: var(--fg); background: var(--line); }
+.pl-mv {
+  flex: none; width: 20px; height: 22px; display: grid; place-items: center;
+  border: 0; border-radius: 6px; background: none; color: var(--fg3);
+  font-size: 12px; line-height: 1; cursor: pointer; transition: color .15s, background .15s;
+}
+.pl-mv:hover { color: var(--fg); background: var(--line); }
+.pl-mv:disabled { opacity: .3; cursor: default; }
 
 .pl-sec { padding: 8px 8px 2px; font-size: 10.5px; letter-spacing: .4px; color: var(--fg3); }
 .pl-empty { padding: 20px 14px 18px; text-align: center; font-size: 12px; line-height: 1.7; color: var(--fg3); }
 .pl-empty small { display: block; margin-top: 5px; font-size: 10.5px; opacity: .85; }
+#plAsk:empty { display: none; }
+#plAsk { padding: 0 2px; }
 .pl-ask {
   margin: 2px 4px 6px; padding: 9px 10px; border-radius: 10px;
   background: var(--card); font-size: 11.5px; line-height: 1.65; color: var(--fg2);

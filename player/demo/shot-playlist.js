@@ -72,7 +72,14 @@ async function shot(name) {
   await sleep(1500);
   win.showInactive();
 
-  // 列表页（当前播放的 P01 在列表里会高亮）
+  // 起播第一首：让列表页能看到「正在播放」那一行的高亮
+  await js(`(() => {
+    const r = document.querySelector('#libList .item[data-i="0"]');
+    if (r) r.click();
+  })()`);
+  await sleep(1200);
+
+  // 列表页（当前播放的曲目在列表里会高亮）
   await js(`document.querySelector('#btnPl').click()`);
   await shot('shot-pl-list.png');
 
@@ -87,6 +94,27 @@ async function shot(name) {
   // 空状态
   await js(`(() => { S.settings.playlist = []; plSave(); closePops(); document.querySelector('#btnPl').click(); })()`);
   await shot('shot-pl-empty.png');
+
+  // 三种播放模式的按钮：只截底部中间那一小块，放大看图标
+  await js(`(() => { closePops(); })()`);
+  await sleep(200);
+  const M = [['seq', '顺序播放'], ['one', '单曲循环'], ['shuffle', '随机播放']];
+  for (const [mode, ] of M) {
+    await js(`(() => { S.settings.playMode = '${mode}'; syncModeBtn(); })()`);
+    await sleep(260);
+    const r = await js(`(() => {
+      const b = document.querySelector('#btnMode').getBoundingClientRect();
+      return { x: Math.round(b.left - 18), y: Math.round(b.top - 12),
+               width: Math.round(b.width + 36), height: Math.round(b.height + 24) };
+    })()`);
+    await sleep(120);
+    const img = await win.webContents.capturePage(r);
+    const p = path.join(root, 'demo', `shot-mode-${mode}.png`);
+    fs.writeFileSync(p, img.toPNG());
+    console.log(`shot-mode-${mode}.png`, img.toPNG().length + 'B');
+  }
+  // 复位成顺序播放，避免影响下一张图
+  await js(`(() => { S.settings.playMode = 'seq'; syncModeBtn(); })()`);
 
   console.log('done');
   setTimeout(() => app.quit(), 200);

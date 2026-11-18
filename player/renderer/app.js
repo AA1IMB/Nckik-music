@@ -7,8 +7,11 @@ const audio = new Audio();
 audio.preload = 'auto';
 
 const S = {
-  tracks: [],
-  i: -1,
+  tracks: [],                       // 曲库（素材库）：导入/搜索得到的曲目，不决定播放顺序
+  libIndex: new Map(),              // path -> track，队列解析用 O(1) 定位
+  q: [],                            // 播放队列：settings.playlist 的运行时投影，等长同序
+  shufPool: new Set(),              // 随机播放「本轮还没播过」的 id 池（存 id 不存下标）
+  i: -1,                            // ★ 队列下标（不是曲库下标）；取当前曲目请用 curTrack()
   playing: false,
   lyrics: [],
   lyIdx: -1,
@@ -49,6 +52,81 @@ const S = {
 const NET_PREFIX = 'ne:';
 const isNet = k => !!k && k.source === 'netease';
 const netIdOf = k => (isNet(k) ? Number(k.netId || String(k.path).slice(NET_PREFIX.length)) : 0);
+
+/* ------------------------------------------------------------------ 播放队列
+ * 播放列表是唯一播放源：S.q 是 settings.playlist 的运行时投影，等长同序。
+ * 曲库 S.tracks 只是素材库，负责提供曲目对象；顺序完全由列表决定。
+ * S.i 是「队列下标」——所有取当前曲目的地方都走 curTrack()，别再写 S.tracks[S.i]。
+ *
+ * 队列行里不预先塞 track 对象：列表可以上万首，全量 map 一遍纯属白占内存，
+ * 第 k 行第一次被用到时再查 S.libIndex（见 qTrack）。
+ */
+function rebuildLibIndex() {
+  S.libIndex = new Map();
+  for (const t of S.tracks) if (t && t.path) S.libIndex.set(t.path, t);
+}
+
+/* path → track。表里没有就回曲库线性找一次并补进表：
+ * 曲库也可能被别的路径改动（导入、探针直接 push），不能假设表永远最新。 */
+function resolveTrack(id) {
+  let t = S.libIndex.get(id) || null;
+  if (!t) {
+    t = S.tracks.find(x => x && x.path === id) || null;
+    if (t) S.libIndex.set(id, t);
+  }
+  return t;
+}
+
+/* 队列重建。keep='id' 表示按 id 保住当前曲目（重排、插歌都走这条）；
+ * 不传就只把下标夹回合法范围。历史栈一律清空——它的下标已经失效了。 */
+function rebuildQueue(keep) {
+  const cur = keep === 'id' ? curTrack() : null;
+  S.q = plItems().map(item => ({ id: item.id, item, t: resolveTrack(item.id) }));
+  const at = cur ? S.q.findIndex(x => x.id === cur.path) : -1;
+  if (at >= 0) S.i = at;
+  else if (S.i >= S.q.length) S.i = S.q.length ? S.q.length - 1 : -1;
+  S.hist.length = 0;
+  resetShufPool();
+}
+
+function qTrack(qi) {
+  const row = S.q[qi];
+  if (!row) return null;
+  if (!row.t) row.t = resolveTrack(row.id);
+  return row.t;
+}
+
+const curTrack = () => (S.i >= 0 ? qTrack(S.i) : null);
+const curItem = () => (S.i >= 0 && S.q[S.i] ? S.q[S.i].item : null);
+
+/* 随机池：只装「还没播过」的 id。用 id 而不是下标，
+ * 这样重排/删除/失效之后池也不会指错歌。 */
+function resetShufPool() {
+  S.shufPool = new Set(S.q.map(x => x.id));
+  const k = curTrack();
+  if (k) S.shufPool.delete(k.path);       // 当前曲不进池，避免一抽就抽回自己
+}
+
+function shufNext() {
+  if (!S.shufPool.size) resetShufPool();  // 一轮播完 → 重洗继续（随机不作「到末尾停」）
+  if (!S.shufPool.size) return -1;        // 只有一首且就是当前曲
+  const ids = [...S.shufPool];
+  const pick = ids[Math.floor(Math.random() * ids.length)];
+  S.shufPool.delete(pick);
+  const qi = S.q.findIndex(x => x.id === pick);
+  if (qi < 0) return -1;
+  if (S.i >= 0) { S.hist.push(S.i); if (S.hist.length > 500) S.hist.shift(); }
+  return qi;
+}
+
+function shufBack() {
+  while (S.hist.length) {
+    const qi = S.hist.pop();
+    if (qi >= 0 && qi < S.q.length) return qi;
+  }
+  return -1;                              // 没有来路：停在当前，不硬跳
+}
+
 
 /* 无封面 / 取色失败时的中性色（方案 3.1：低饱和或黑白封面降级为中性灰，不引入第二种彩色） */
 const NEUTRAL = '#5b5b66';
@@ -841,7 +919,7 @@ function durationText(t) {
 }
 
 function paintMeta() {
-  const k = S.tracks[S.i];
+  const k = curTrack();
   const cover = $('#cover'), img = $('#coverImg');
   if (!k) {
     $('#npT').textContent = '未载入';
@@ -924,7 +1002,7 @@ const curQuality = () => (QUALITY_NAME[S.settings && S.settings.quality] ? S.set
 
 function renderFmtPopover() {
   renderQualityList();
-  const k = S.tracks[S.i];
+  const k = curTrack();
   const note = $('#fmtNote');
   if (!k) {
     $('#fmtList').innerHTML = '';
@@ -985,7 +1063,7 @@ async function setQuality(q) {
   saveSettings();
   renderFmtPopover();
 
-  const k = S.tracks[S.i];
+  const k = curTrack();
   if (!k || !isNet(k)) {
     toast(`音质：${QUALITY_NAME[next]}` + (k ? ' · 本地文件按原文件播放' : ''));
     return;
@@ -995,7 +1073,7 @@ async function setQuality(q) {
 
 async function applyQuality(k) {
   const seq = ++qualSeq;                 // 连点两档时只认最后一次
-  const stillCurrent = () => seq === qualSeq && S.tracks[S.i] === k;
+  const stillCurrent = () => seq === qualSeq && curTrack() === k;
   const at = audio.currentTime || 0;
   const wasPlaying = !audio.paused && !audio.ended;
   const target = curQuality();
@@ -1171,16 +1249,21 @@ let markedEl = null;
 function markCurrent() {
   if (markedEl) markedEl.classList.remove('on');
   markedEl = null;
-  if (S.i < 0) return;
-  const t = S.tracks[S.i];
-  // 本地列表按曲库下标定位；网易云的搜索/歌单列表没有下标，只能按曲目 id 找
-  markedEl = (t && isNet(t) ? $(`#libList .item[data-ne="${t.netId}"]`) : null)
-    || $(`#libList .item[data-i="${S.i}"]`);
+  const t = S.i >= 0 ? curTrack() : null;
+  if (!t) { plSyncBadge(); return; }
+  /* 曲库行按曲库下标定位（S.i 现在是队列下标，所以要先翻回曲库下标）；
+   * 网易云的搜索/歌单列表没有下标，只能按曲目 id 找。 */
+  const libIdx = S.tracks.indexOf(t);
+  markedEl = (isNet(t) ? $(`#libList .item[data-ne="${t.netId}"]`) : null)
+    || (libIdx >= 0 ? $(`#libList .item[data-i="${libIdx}"]`) : null);
   if (markedEl) markedEl.classList.add('on');
+  if ($('#popPl').classList.contains('show') && PL.view === 'list') renderPlRows();
+  plSyncBadge();
 }
-function updateRowDuration(i) {
+function updateRowDuration(t) {
+  const i = S.tracks.indexOf(t);
   const el = $(`#libList .r[data-dur="${i}"]`);
-  if (el) el.textContent = durationText(S.tracks[i]);
+  if (el) el.textContent = durationText(t);
 }
 
 /* ------------------------------------------------------------------ 播放列表
@@ -1193,7 +1276,8 @@ function updateRowDuration(i) {
  * 不在曲库里的网易云曲目按 id 重建一条，交给 playNet（它本来就会「加入曲库并播放」）。
  * 任何修改都立刻写回 settings.json，刷新后原样恢复。
  */
-const PL_MAX = 500;
+const PL_ROW_H = 46;      // 列表行固定高度，虚拟滚动按这个数算窗口
+const PL_BUF = 6;         // 上下各多画几行，滚动时不至于出现白条
 
 /* 面板自己的小状态：list 列表页 / pick 选歌单页 / add 挑歌页；
  * ask 是覆盖前的确认条（不弹 window.confirm，免得打断播放界面的手感）。 */
@@ -1210,7 +1294,7 @@ function plToItem(t) {
   };
 }
 
-/* 手改过 settings.json 的人可以把这里写成任何东西：逐条校验、按 id 去重、限长 */
+/* 手改过 settings.json 的人可以把这里写成任何东西：逐条校验、按 id 去重（不设上限） */
 function plNormalize(list) {
   if (!Array.isArray(list)) return [];
   const seen = new Set();
@@ -1226,7 +1310,6 @@ function plNormalize(list) {
       artist: String(x.artist || '').slice(0, 80),
       duration: Number(x.duration) || 0
     });
-    if (out.length >= PL_MAX) break;
   }
   return out;
 }
@@ -1243,7 +1326,7 @@ function plSyncBadge() {
   if (num) num.textContent = n > 99 ? '99+' : String(n);
   const btn = $('#btnPl');
   if (btn) {
-    const cur = S.i >= 0 ? S.tracks[S.i] : null;
+    const cur = curTrack();
     btn.classList.toggle('live', !!cur && plItems().some(x => x.id === cur.path));
   }
 }
@@ -1254,7 +1337,7 @@ function renderPl() {
   if (!pop.classList.contains('show')) return;
 
   const items = plItems();
-  const cur = S.i >= 0 ? S.tracks[S.i] : null;
+  const cur = curTrack();
   const curId = cur ? cur.path : '';
   $('#plCount').textContent = items.length ? items.length + ' 首' : '空';
   $('#plClear').disabled = !items.length;
@@ -1263,32 +1346,63 @@ function renderPl() {
   if (PL.view === 'pick') return renderPlPick(body);
   if (PL.view === 'add') return renderPlAdd(body);
 
-  const parts = [];
-  if (PL.ask) {
-    parts.push('<div class="pl-ask"><div>' + esc(PL.ask.text) + '</div><div class="row2">'
+  $('#plAsk').innerHTML = PL.ask
+    ? '<div class="pl-ask"><div>' + esc(PL.ask.text) + '</div><div class="row2">'
       + '<button class="ghost mini" data-pl="no">取消</button>'
-      + '<button class="ghost mini" data-pl="yes">' + esc(PL.ask.ok) + '</button></div></div>');
-  }
+      + '<button class="ghost mini" data-pl="yes">' + esc(PL.ask.ok) + '</button></div></div>'
+    : '';
+
   if (!items.length) {
-    parts.push('<div class="pl-empty">播放列表是空的'
-      + '<small>「选择歌单」整单载入 · 「插入歌曲」逐首添加</small></div>');
+    body.innerHTML = '<div class="pl-empty">播放列表是空的'
+      + '<small>「选择歌单」整单载入 · 「插入歌曲」逐首添加</small></div>';
+    body.onscroll = null;
   } else {
-    items.forEach((x, i) => {
-      const on = x.id === curId;
-      parts.push('<div class="pl-row' + (on ? ' on' : '') + '" data-i="' + i + '" title="播放">'
-        + '<div class="pl-main"><div class="pl-t">' + esc(x.title) + '</div>'
-        + '<div class="pl-a">' + esc(x.artist || '未知艺人') + '</div></div>'
-        + '<span class="pl-dur">' + (x.duration ? fmt(x.duration) : '—') + '</span>'
-        + '<button class="pl-x" data-del="' + i + '" title="从播放列表移除">✕</button></div>');
-    });
+    renderPlRows();
+    body.onscroll = renderPlRows;       // 只重画可视窗口，滚动本身不再产生 DOM
+    scrollCurIntoView();
   }
+  $('#plNote').textContent = '点条目播放 · ↑↓ 调顺序 · × 只从本列表移除，不改动源歌单';
+}
+
+/* 虚拟滚动：列表不设上限，几千上万首也只画可视窗口那几十行。
+ * 行高固定 PL_ROW_H，上下用两个 spacer 撑出总高度，滚动条比例才正确。 */
+function renderPlRows() {
+  const body = $('#plBody');
+  if (!body) return;
+  const items = plItems();
+  if (!items.length) return;
+  const cur = curTrack();
+  const curId = cur ? cur.path : '';
+  const viewH = body.clientHeight || 300;
+  const first = Math.max(0, Math.floor(body.scrollTop / PL_ROW_H) - PL_BUF);
+  const last = Math.min(items.length, first + Math.ceil(viewH / PL_ROW_H) + PL_BUF * 2);
+
+  const parts = ['<div class="pl-pad" style="height:' + (first * PL_ROW_H) + 'px"></div>'];
+  for (let i = first; i < last; i++) {
+    const x = items[i];
+    const on = x.id === curId;
+    parts.push('<div class="pl-row' + (on ? ' on' : '') + '" data-i="' + i + '" title="播放">'
+      + '<div class="pl-main"><div class="pl-t">' + esc(x.title) + '</div>'
+      + '<div class="pl-a">' + esc(x.artist || '未知艺人') + '</div></div>'
+      + '<span class="pl-dur">' + (x.duration ? fmt(x.duration) : '—') + '</span>'
+      + '<button class="pl-mv" data-mv="-1" title="上移">↑</button>'
+      + '<button class="pl-mv" data-mv="1" title="下移">↓</button>'
+      + '<button class="pl-x" data-del="' + esc(x.id) + '" title="从播放列表移除">✕</button></div>');
+  }
+  parts.push('<div class="pl-pad" style="height:' + Math.max(0, (items.length - last) * PL_ROW_H) + 'px"></div>');
   body.innerHTML = parts.join('');
-  $('#plNote').textContent = '点条目播放 · × 只从本列表移除，不改动源歌单';
-  // 只滚 .pl-body 自己，不碰页面：面板是 fixed 的，scrollIntoView 会连带滚祖先
-  const row = body.querySelector('.pl-row.on');
-  if (row) {
-    const rb = row.getBoundingClientRect(), bb = body.getBoundingClientRect();
-    if (rb.top < bb.top || rb.bottom > bb.bottom) body.scrollTop += rb.top - bb.top - 8;
+}
+
+function scrollCurIntoView() {
+  const body = $('#plBody');
+  const items = plItems();
+  const cur = curTrack();
+  if (!body || !cur) return;
+  const at = items.findIndex(x => x.id === cur.path);
+  if (at < 0) return;
+  const top = at * PL_ROW_H;
+  if (top < body.scrollTop || top + PL_ROW_H > body.scrollTop + body.clientHeight) {
+    body.scrollTop = Math.max(0, top - Math.floor(body.clientHeight / 2) + PL_ROW_H / 2);
   }
 }
 
@@ -1421,6 +1535,9 @@ async function plSelectSource(src) {
     run: () => {
       S.settings.playlist = items;           // 整体替换，不是追加
       plSave();
+      rebuildQueue('id');                    // 当前曲还在新列表里就保住位置，否则置空
+      renderPl();
+      if (!S.q.length) stopPlayback();
       toast('已载入 ' + items.length + ' 首 · ' + src.name);
     }
   };
@@ -1434,47 +1551,87 @@ function plAppend(t) {
   if (!item.id) return;
   const list = plItems();
   if (list.some(x => x.id === item.id)) { toast('已在播放列表中：' + item.title); return; }
-  if (list.length >= PL_MAX) { toast('播放列表最多 ' + PL_MAX + ' 首'); return; }
-  list.push(item);
+  list.push(item);                        // 追加到末尾；列表不设上限
   S.settings.playlist = list;
   plSave();
+  rebuildQueue('id');
   renderPl();
   toast('已加入播放列表 · ' + item.title);
 }
 
 /* ---- 删除：只动本列表；删的正好是当前曲目就按顺序切下一首 ---- */
-async function plRemove(idx) {
+async function plRemove(id) {
   const list = plItems();
-  const item = list[idx];
-  if (!item) return;
-  const cur = S.i >= 0 ? S.tracks[S.i] : null;
-  const wasCurrent = !!cur && cur.path === item.id;
-  list.splice(idx, 1);
+  const at = list.findIndex(x => x.id === id);
+  if (at < 0) return;
+  const cur = curTrack();
+  const wasCurrent = !!cur && cur.path === id;
+  list.splice(at, 1);                     // 只从列表里摘掉，曲库与源歌单都不动
   S.settings.playlist = list;
   plSave();
+  rebuildQueue('id');
+  if (!list.length) {
+    stopPlayback();
+    renderPl();
+    toast('已移除，播放列表空了');
+    return;
+  }
   renderPl();
   if (!wasCurrent) return;
-  if (!list.length) { toast('已移除，列表空了 · 当前曲目继续播放'); return; }
-  await plPlay(idx % list.length);            // 删的是最后一个就回到第一首
+  /* 删的是正在放的那首：按顺序顶上来的下一首接着放；
+   * 删的是最后一首时回退到新的末尾，不要突然跳回开头。 */
+  const qi = Math.min(at, S.q.length - 1);
+  await plPlay(qi);
 }
 
-async function plPlay(idx) {
-  const item = plItems()[idx];
-  if (!item) return;
-  let i = S.tracks.findIndex(t => t.path === item.id);
-  if (i < 0 && item.id.startsWith(NET_PREFIX)) {
-    // 曲库被清过但列表还在：按 id 重建一条，playNet 会把它重新加进曲库
+/* 从队列下标播放；曲目不在曲库里时按 id 重建（网易云）或提示（本地文件） */
+async function plPlay(qi) {
+  const row = S.q[qi];
+  if (!row) return;
+  if (qTrack(qi)) { closePops(); return playAt(qi); }
+  if (String(row.id).startsWith(NET_PREFIX)) {
     closePops();
     await playNet({
-      source: 'netease', path: item.id,
-      netId: Number(item.id.slice(NET_PREFIX.length)),
-      title: item.title, artist: item.artist, duration: item.duration
+      source: 'netease', path: row.id,
+      netId: Number(String(row.id).slice(NET_PREFIX.length)),
+      title: row.item.title, artist: row.item.artist, duration: row.item.duration
     });
     return;
   }
-  if (i < 0) { toast('这首不在曲库里了，重新导入后才能播放：' + item.title); return; }
-  closePops();
-  await playIndex(i);
+  toast('这首不在曲库里了，重新导入后才能播放：' + row.item.title);
+}
+
+/* 上移/下移：只改列表顺序，不动曲目对象；当前曲目靠 id 保位，播放不中断 */
+function plMove(i, dir) {
+  const list = plItems();
+  const j = i + dir;
+  if (i < 0 || i >= list.length || j < 0 || j >= list.length) return;
+  const [x] = list.splice(i, 1);
+  list.splice(j, 0, x);
+  S.settings.playlist = list;
+  plSave();
+  rebuildQueue('id');
+  renderPl();
+}
+
+/* 列表空了 / 全部失效：停下来并把界面摆回「没有曲目」的样子，
+ * 但不能只 pause —— src 还指着旧文件，点播放会又响起来。 */
+function stopPlayback() {
+  ++loadSeq;                              // 丢掉还在路上的加载
+  audio.pause();
+  try { audio.removeAttribute('src'); audio.load(); } catch {}
+  S.playing = false;
+  S.i = -1;
+  S.lyrics = [];
+  S.lyricSrc = '';
+  renderLyrics();
+  setLyrHint(null, null);
+  paintMeta();
+  markCurrent();
+  syncPlayIcon();
+  renderMediaSession();
+  S.settings.playPos = null;
+  saveSettings();
 }
 
 function plClearAsk() {
@@ -1487,6 +1644,8 @@ function plClearAsk() {
     run: () => {
       S.settings.playlist = [];
       plSave();
+      rebuildQueue();
+      stopPlayback();
       toast('播放列表已清空');
     }
   };
@@ -1514,7 +1673,14 @@ function plBind() {
   $('#popPl').addEventListener('click', e => {
     const t = e.target;
     const del = t.closest('[data-del]');
-    if (del) { e.stopPropagation(); plRemove(Number(del.dataset.del)); return; }
+    if (del) { e.stopPropagation(); plRemove(del.dataset.del); return; }
+    const mv = t.closest('[data-mv]');
+    if (mv) {
+      e.stopPropagation();
+      const row = mv.closest('.pl-row[data-i]');
+      if (row) plMove(Number(row.dataset.i), Number(mv.dataset.mv));
+      return;
+    }
     const ans = t.closest('[data-pl]');
     if (ans) {
       e.stopPropagation();
@@ -2091,6 +2257,7 @@ function addTrack(t) {
   const i = S.tracks.findIndex(x => x.path === t.path);
   if (i >= 0) return i;
   S.tracks.push(t);
+  S.libIndex.set(t.path, t);        // 队列靠这张表解析曲目，新加的必须立刻可用
   return S.tracks.length - 1;
 }
 
@@ -2156,7 +2323,7 @@ async function openNeLink() {
 
 function renderMediaSession() {
   if (!('mediaSession' in navigator)) return;
-  const k = S.tracks[S.i];
+  const k = curTrack();
   if (!k) return;
   try {
     const cov = getCover(k.path);
@@ -2205,11 +2372,16 @@ function playGuarded(ms = PLAY_TIMEOUT) {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function playIndex(i) {
-  if (i < 0 || i >= S.tracks.length) return;
+/* 播放队列第 qi 项。opts = { seekTo, autoplay }。
+ * 队列行可能没有曲目对象（列表里的歌已从曲库删掉），这种行直接跳过，
+ * 不打断正在播的音频 —— 见 skipDead()。 */
+async function playAt(qi, opts) {
+  if (qi < 0 || qi >= S.q.length) return;
+  const k = qTrack(qi);
+  if (!k) return skipDead(qi, opts);
   const seq = ++loadSeq;
-  const k = S.tracks[i];
   const net = isNet(k);
+  const autoplay = !opts || opts.autoplay !== false;
 
   /* 网易云：先在「不改任何状态」的前提下确认地址可用。
    * 早先的写法是先 S.i = i 再预检，遇到不可播放的曲目就会出现
@@ -2228,11 +2400,11 @@ async function playIndex(i) {
         : code === 'NE_TIMEOUT' ? '网络超时' : '暂时无法播放';
       k.unavailable = reason;
       toast(`无法播放：${k.title}（${reason}）`);
-      if (S.tracks.length > 1 && errStreak < 3) {
+      if (S.q.length > 1 && errStreak < 3) {
         errStreak++;
-        const ni = nextIndex(1, i);
-        if (ni >= 0) playIndex(ni);
-      } else if (S.i === i) {
+        const ni = stepIndex(1, qi);
+        if (ni >= 0) playAt(ni);
+      } else if (S.i === qi) {
         paintMeta();          // 只有本来就停在这首上，才需要刷新它的状态显示
       }
       return;
@@ -2240,7 +2412,7 @@ async function playIndex(i) {
     k.unavailable = '';
   }
 
-  S.i = i;
+  S.i = qi;
 
   S.lyrics = [];
   S.lyricSrc = '';
@@ -2266,7 +2438,22 @@ async function playIndex(i) {
   audio.load();
   audio.volume = S.settings.volume;
   audio.muted = !!S.settings.muted;
-  try {
+  if (!autoplay) {
+    /* 恢复上次进度：只把播放头摆好，不出声。seek 必须等元数据到位，
+     * 否则 currentTime 会被浏览器丢掉（duration 还是 NaN）。 */
+    S.playing = false;
+    syncPlayIcon();
+    const seekTo = opts && Number(opts.seekTo);
+    if (Number.isFinite(seekTo) && seekTo > 0) {
+      const apply = () => {
+        try { audio.currentTime = Math.min(seekTo, Math.max(0, (audio.duration || 0) - 0.5)); } catch {}
+        syncClock();
+        updateLyric();
+      };
+      if (audio.readyState >= 1) apply();
+      else audio.addEventListener('loadedmetadata', apply, { once: true });
+    }
+  } else try {
     await playGuarded();
     if (seq !== loadSeq) return;
   } catch (e) {
@@ -2276,10 +2463,10 @@ async function playIndex(i) {
        * 不这么做的话就一直停在「正在加载封面…」，用户只能重启软件。 */
       audio.pause();
       toast(`加载超时，已跳过：${k.title || '该曲目'}`);
-      if (S.tracks.length > 1 && errStreak < 3) {
+      if (S.q.length > 1 && errStreak < 3) {
         errStreak++;
-        const ni = nextIndex(1, i);
-        if (ni >= 0) return playIndex(ni);
+        const ni = stepIndex(1, qi);
+        if (ni >= 0) return playAt(ni);
       }
       setCoverEmpty('暂无封面', '加载超时 · 换个音质或稍后重试');
       paintMeta();
@@ -2301,7 +2488,7 @@ async function playIndex(i) {
       if (detail.duration && detail.duration !== k.duration) {
         k.duration = detail.duration;
         S.libDirty = true;
-        updateRowDuration(i);
+        updateRowDuration(k);
       }
       art = detail.cover || null;
     }
@@ -2315,7 +2502,7 @@ async function playIndex(i) {
     } else {
       setAccent(NEUTRAL);
     }
-    if (S.i === i) paintMeta();
+    if (S.i === qi && seq === loadSeq) paintMeta();
     renderMediaSession();
   } catch {}
 
@@ -2343,47 +2530,161 @@ function syncPlayIcon() {
 }
 
 function togglePlay() {
-  if (!S.tracks.length) { toast('先导入一些音乐'); return; }
-  if (S.i < 0) { playIndex(0); return; }
+  if (!S.q.length) { toast(S.settings.playlist.length ? '播放列表里的歌都不在曲库了' : '播放列表是空的 · 先去「选择歌单」或「插入歌曲」'); return; }
+  if (S.i < 0) { playAt(0); return; }
   if (S.playing) { audio.pause(); return; }
   if (audio.ended) audio.currentTime = 0;
   audio.play().catch(e => {
-    if (e.name !== 'AbortError') toast('无法播放：' + (S.tracks[S.i] && S.tracks[S.i].codec || '未知格式'));
+    if (e.name !== 'AbortError') toast('无法播放：' + ((curTrack() && curTrack().codec) || '未知格式'));
   });
 }
 
-/* 随机模式下记住走过的顺序，"上一首"才是真的上一首，而不是又抽一次。
- * from 可以显式指定基准下标：切歌前先做可用性预检时，S.i 还没更新。 */
-function nextIndex(dir = 1, from = S.i) {
-  const n = S.tracks.length;
+/* ---------------------------------------------------------------- 索引推进
+ * 所有「下一首 / 上一首 / 播完自动续」都从这里取下标，避免三处各写一套导致行为打架。
+ * 返回 -1 = 没有下一首（顺序模式到末尾、随机池空、历史栈空）。
+ */
+const MODES = ['seq', 'one', 'shuffle'];
+const MODE_META = {
+  seq: { name: '顺序播放', icon: 'icSeq' },
+  one: { name: '单曲循环', icon: 'icOne' },
+  shuffle: { name: '随机播放', icon: 'icShuffle' }
+};
+
+function stepIndex(dir = 1, from = S.i) {
+  const n = S.q.length;
   if (!n) return -1;
-  if (S.settings.shuffle) {
-    if (dir < 0) {
-      while (S.hist.length) {
-        const p = S.hist.pop();
-        if (p !== from && p >= 0 && p < n) return p;
-      }
-    }
-    let r = from;
-    while (n > 1 && r === from) r = Math.floor(Math.random() * n);
-    if (from >= 0 && from < n) { S.hist.push(from); if (S.hist.length > 200) S.hist.shift(); }
-    return r;
-  }
-  const base = from >= 0 ? from : -dir;      // from = -1 时，下一首从 0 开始
-  return (base + dir + n) % n;
+  const mode = S.settings.playMode;
+  if (mode === 'shuffle') return dir < 0 ? shufBack() : shufNext();
+  if (from < 0) return dir > 0 ? 0 : n - 1;   // 还没开始播：向下取第一首，向上取最后一首
+  const ni = from + dir;
+  if (ni < 0 || ni >= n) return -1;           // 顺序模式不回绕：到末尾就停，由用户决定
+  return ni;
 }
 
-function next() { const i = nextIndex(1); if (i >= 0) playIndex(i); }
-function prev() {
-  if (!S.tracks.length) { toast('先导入一些音乐'); return; }
-  if (S.i >= 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
-  const i = nextIndex(-1); if (i >= 0) playIndex(i);
+/* 队列行指向一首曲库里没有的歌时（删了文件 / 没登录网易云）：
+ * 顺序模式下继续往下找，最多绕一圈；找不到就停下并说明，不要静默卡住。 */
+async function skipDead(qi, opts) {
+  const n = S.q.length;
+  for (let step = 1; step <= n; step++) {
+    const cand = (qi + step) % n;
+    if (cand === qi) break;
+    if (qTrack(cand)) return playAt(cand, opts);
+  }
+  toast('播放列表里的歌都不在曲库里了 · 重新导入或换个歌单');
+  S.playing = false;
+  syncPlayIcon();
+  paintMeta();
 }
+
+/* 曲库行的「播放」：不在列表里就插到当前曲之后，再跳过去播；已在列表就直接跳。
+ * 名字沿用 playIndex（参数是曲库下标），探针与网易云入口都从这里进。 */
+async function playIndex(libIdx) { return playLibRow(libIdx); }
+
+async function playLibRow(libIdx) {
+  const t = S.tracks[libIdx];
+  if (!t) return;
+  const at = S.q.findIndex(x => x.id === t.path);
+  if (at >= 0) return playAt(at);
+  const qi = plInsertAfterCurrent(t);
+  if (qi >= 0) return playAt(qi);
+}
+
+/* 把一首歌插到当前曲之后（列表空则放第一首），返回它在队列里的下标。
+ * 已在列表里就不重复插，直接返回已有位置。 */
+function plInsertAfterCurrent(t) {
+  const item = plToItem(t);
+  const list = plItems();
+  const at0 = list.findIndex(x => x.id === item.id);
+  if (at0 < 0) {
+    const at = S.i >= 0 && S.i < list.length ? S.i + 1 : list.length;
+    list.splice(at, 0, item);
+    S.settings.playlist = list;
+    plSave();
+    rebuildQueue('id');
+  }
+  return S.q.findIndex(x => x.id === item.id);
+}
+
+function next() {
+  const i = stepIndex(1);
+  if (i >= 0) playAt(i);
+  else if (S.settings.playMode === 'seq' && S.q.length) toast('已经是最后一首');
+}
+function prev() {
+  if (!S.q.length) { toast('播放列表是空的'); return; }
+  if (S.i >= 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
+  const i = stepIndex(-1);
+  if (i >= 0) playAt(i);
+  else if (S.settings.playMode === 'seq') toast('已经是第一首');
+}
+
+/* 播放模式：三态一键循环 seq → one → shuffle → seq。
+ * 切模式只改偏好，不碰 audio.src / 不 seek / 不动 S.i，所以不会打断播放。 */
+function cycleMode() {
+  const at = MODES.indexOf(S.settings.playMode);
+  S.settings.playMode = MODES[(at + 1) % MODES.length];
+  syncModeBtn();
+  toast(MODE_META[S.settings.playMode].name);
+  saveSettings();
+}
+
+function syncModeBtn() {
+  if (!MODES.includes(S.settings.playMode)) S.settings.playMode = 'seq';
+  const meta = MODE_META[S.settings.playMode];
+  for (const m of MODES) {
+    const el = $('#' + MODE_META[m].icon);
+    if (el) el.style.display = m === S.settings.playMode ? 'block' : 'none';
+  }
+  const btn = $('#btnMode');
+  if (btn) {
+    btn.classList.toggle('on', S.settings.playMode !== 'seq');
+    btn.classList.toggle('off', S.settings.playMode === 'seq');
+    btn.title = meta.name + ' (R)';
+    btn.setAttribute('aria-label', meta.name);
+  }
+  const row = $('#setMode');
+  if (row) row.textContent = meta.name;
+}
+
+/* 播放位置：只记「哪首 + 到哪秒」，5 秒节流，暂停和关窗时补一次。 */
+let posClock = 0;
+function persistPos(force) {
+  const k = curTrack();
+  if (!k) { S.settings.playPos = null; return; }
+  const now = performance.now();
+  if (!force && now - posClock < 5000) return;
+  posClock = now;
+  S.settings.playPos = { id: k.path, t: audio.currentTime || 0 };
+  saveSettings();
+}
+
+/* 旧配置只有 shuffle + repeat 两个开关，换成单一 playMode。
+ * 优先级：显式 playMode > 开着随机 > 单曲循环 > 顺序。
+ * repeat:'all'（列表循环）落到 seq —— 新模型里顺序播到末尾就停，这是有意的行为变化。 */
+function migratePlayMode(saved) {
+  const has = key => Object.prototype.hasOwnProperty.call(saved, key);
+  if (saved.playMode && MODES.includes(saved.playMode)) return saved.playMode;
+  if (has('shuffle') && saved.shuffle === true) return 'shuffle';
+  if (has('repeat') && saved.repeat === 'one') return 'one';
+  return 'seq';
+}
+
+/* 启动时把播放头摆到上次的位置，但不出声：自动播放会跟用户的预期打架，
+ * 也容易和系统媒体控件抢焦点。 */
+function restorePos() {
+  if (!S.q.length) { S.i = -1; return; }
+  const pos = S.settings.playPos;
+  let qi = pos && pos.id ? S.q.findIndex(x => x.id === pos.id) : -1;
+  const seekTo = qi >= 0 ? (Number(pos.t) || 0) : 0;
+  if (qi < 0) qi = 0;
+  return playAt(qi, { autoplay: false, seekTo });
+}
+
 /* 读不到设置（磁盘只读 / IPC 异常）时的兜底：界面必须能开，不能因为一份配置白屏 */
 const FALLBACK_SETTINGS = {
-  theme: 'auto', volume: 0.78, shuffle: false, repeat: 'off', sinkId: '', muted: false,
+  theme: 'auto', volume: 0.78, sinkId: '', muted: false,
   lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true, quality: 'exhigh',
-  lyricTrans: true, playlist: []
+  lyricTrans: true, playlist: [], playMode: 'seq', playPos: null
 };
 
 function seek(delta) {
@@ -2576,9 +2877,6 @@ const persistLibrary = () => window.api.setLibrary(S.tracks.map(stripHeavy));
  */
 function mergeTracks(scanned, opt = {}) {
   const sort = opt.sort !== false;
-  // 排序会打乱下标，先记住当前曲目路径，排完再按路径复位，
-  // 否则"边听边导入"会让 S.i 指向另一首，后续切歌全错位。
-  const curPath = S.tracks[S.i] && S.tracks[S.i].path;
   const known = new Set(S.tracks.map(t => t.path));
   let added = 0;
   for (const t of scanned) {
@@ -2588,12 +2886,12 @@ function mergeTracks(scanned, opt = {}) {
     S.tracks.push(t);
     added++;
   }
-  if (added && sort) {
-    S.tracks.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-CN'));
-    if (curPath) {
-      const ni = S.tracks.findIndex(t => t.path === curPath);
-      if (ni >= 0) S.i = ni;
-    }
+  // 曲库变了：重建 path→track 表，并把队列里还没解析出来的行补上。
+  // 注意 S.i 是队列下标、不是曲库下标，排序前后都不用动它。
+  if (added) {
+    rebuildLibIndex();
+    for (const row of S.q) if (!row.t) row.t = S.libIndex.get(row.id) || null;
+    if (sort) S.tracks.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-CN'));
   }
   renderLibrary();
   persistLibrary();
@@ -2803,17 +3101,7 @@ function bind() {
   $('#btnNext').onclick = next;
   $('#btnPrev').onclick = prev;
 
-  $('#btnShuffle').onclick = () => {
-    S.settings.shuffle = !S.settings.shuffle;
-    S.hist.length = 0;
-    syncToggles(); saveSettings();
-  };
-  $('#btnRepeat').onclick = () => {
-    const order = ['off', 'all', 'one'];
-    S.settings.repeat = order[(order.indexOf(S.settings.repeat) + 1) % 3];
-    syncToggles(); saveSettings();
-    toast(S.settings.repeat === 'off' ? '循环关闭' : S.settings.repeat === 'all' ? '列表循环' : '单曲循环');
-  };
+  $('#btnMode').onclick = cycleMode;
 
   // 弹层
   $('#btnVol').onclick = e => { e.stopPropagation(); openPop($('#popVol'), $('#btnVol')); };
@@ -2902,20 +3190,24 @@ function bind() {
   audio.addEventListener('pause', () => { S.playing = false; syncPlayIcon(); });
   audio.addEventListener('waiting', () => { clock.stalled = true; });
   audio.addEventListener('playing', () => { clock.stalled = false; errStreak = 0; syncClock(); });
+  /* 播完自动续：单曲循环重播当前；其余交给 stepIndex（顺序到末尾就停，随机一直有下一首） */
   audio.addEventListener('ended', () => {
-    if (S.settings.repeat === 'one') { audio.currentTime = 0; audio.play().catch(() => {}); return; }
-    if (S.settings.repeat === 'off' && !S.settings.shuffle && S.i === S.tracks.length - 1) {
-      S.playing = false; syncPlayIcon(); return;
-    }
-    next();
+    if (S.settings.playMode === 'one') { audio.currentTime = 0; audio.play().catch(() => {}); return; }
+    const ni = stepIndex(1);
+    if (ni >= 0) { playAt(ni); return; }
+    S.playing = false;
+    syncPlayIcon();
+    persistPos(true);
   });
+  audio.addEventListener('timeupdate', () => persistPos(false));
+  audio.addEventListener('pause', () => persistPos(true));
   /* 坏文件不能把整条播放链掐断：跳过去继续放，连续失败 3 次才停 */
   audio.addEventListener('error', () => {
     if (!audio.src) return;
-    const k = S.tracks[S.i];
+    const k = curTrack();
     const name = (k && k.title) || '该曲目';
     if (isNet(k)) k.unavailable = '加载失败';
-    if (S.tracks.length > 1 && errStreak < 3) {
+    if (S.q.length > 1 && errStreak < 3) {
       errStreak++;
       toast(isNet(k) ? `跳过：${name}（网易云加载失败）` : `跳过无法播放的曲目：${name}`);
       next();
@@ -2949,8 +3241,7 @@ function bind() {
     else if (e.code === 'ArrowRight') seek(5);
     else if (e.code === 'ArrowLeft') seek(-5);
     else if (e.code === 'KeyL') $('.app').classList.toggle('no-lyr');
-    else if (e.code === 'KeyS') $('#btnShuffle').click();
-    else if (e.code === 'KeyR') $('#btnRepeat').click();
+    else if (e.code === 'KeyR') cycleMode();
     else if (e.ctrlKey && e.code === 'KeyO') { e.preventDefault(); $('#btnAddFiles').click(); }
   });
 
@@ -3077,15 +3368,7 @@ function stepVolume(delta) {
 }
 
 function syncToggles() {
-  $('#btnShuffle').classList.toggle('on', S.settings.shuffle);
-  $('#btnShuffle').classList.toggle('off', !S.settings.shuffle);
-  const r = S.settings.repeat;
-  const btn = $('#btnRepeat');
-  btn.classList.toggle('on', r !== 'off');
-  btn.classList.toggle('off', r === 'off');
-  const txt = r === 'off' ? '关闭' : r === 'all' ? '列表循环' : '单曲循环';
-  $('#setRepeat').textContent = txt;
-  $('#setShuffle').textContent = S.settings.shuffle ? '开启' : '关闭';
+  syncModeBtn();
   $('#swTr').classList.toggle('on', S.settings.lyricTrans !== false);
 }
 
@@ -3104,13 +3387,17 @@ function applyTransVisibility() {
   }
   // 配置读不出来也要能开：坏文件已在主进程改名留档，这里退到默认值继续跑
   try { S.settings = await window.api.getSettings(); } catch { S.settings = null; }
+  const saved = (S.settings && typeof S.settings === 'object') ? S.settings : {};
+  // 有没有显式存过 playlist：没有（= 这个功能上线前的老配置）就在曲库加载后用曲库播一次种
+  const hadPlaylist = Object.prototype.hasOwnProperty.call(saved, 'playlist');
   if (!S.settings || typeof S.settings !== 'object') S.settings = { ...FALLBACK_SETTINGS };
   S.settings = { ...FALLBACK_SETTINGS, ...S.settings };
   // 手改过 settings.json 的人什么都能写出来：只保留类型/范围可信的值，
   // 否则 audio.volume 超范围会直接抛 IndexSizeError。
   S.settings.volume = clamp(Number(S.settings.volume), 0, 1);
   if (!Number.isFinite(S.settings.volume)) S.settings.volume = 0.78;
-  if (!['off', 'all', 'one'].includes(S.settings.repeat)) S.settings.repeat = 'off';
+  S.settings.playMode = migratePlayMode(saved);
+  if (!S.settings.playPos || typeof S.settings.playPos !== 'object') S.settings.playPos = null;
   if (typeof S.settings.lyricTrans !== 'boolean') S.settings.lyricTrans = true;
   S.settings.playlist = plNormalize(S.settings.playlist);
   if (!['auto', 'dark', 'light'].includes(S.settings.theme)) S.settings.theme = 'auto';
@@ -3145,8 +3432,18 @@ function applyTransVisibility() {
 
   try { S.tracks = ((await window.api.getLibrary()) || []).map(stripHeavy); }
   catch { S.tracks = []; }
+  rebuildLibIndex();
+  /* 老配置里没有 playlist（这个版本之前没有这个功能）：用曲库播一次种，
+   * 免得升级后一开就是空列表、什么都播不了。用户清空过列表（存了 []）就不再播种。 */
+  if (!hadPlaylist && S.tracks.length) {
+    S.settings.playlist = S.tracks.map(plToItem);
+    plSave();
+  }
+  rebuildQueue();
   renderLibrary();
-  if (S.tracks.length) playIndex(0);
+  plSyncBadge();
+  renderPl();
+  restorePos();                          // 摆好播放头但不自动出声
 
   loadDevices();
   registerGlobalKeys();
