@@ -313,7 +313,7 @@ body::before {
 .ln .gap {
   --p: 0%;
   /* 呼吸参数：单程 = cycle / 2；调这里就够，不用动 JS */
-  --gap-breathe-cycle: 6s;   /* 完整周期，5–8s 之间比较自然 */
+  --gap-breathe-cycle: 4s;   /* 完整周期；单程 2s，整周期 4s */
   --gap-breathe-min: .35;    /* 呼吸最暗处 */
   --gap-breathe-max: 1;      /* 呼吸最亮处 */
   position: absolute;
@@ -337,7 +337,7 @@ body::before {
 .ln .gap.ongap .gap-t {
   animation: gapBreathe var(--gap-breathe-cycle) cubic-bezier(.37, 0, .63, 1) infinite;
 }
-/* 0.35 ↔ 1 的正弦式呼吸：单程 3s、整周期 6s，慢了不闪、快了不闷 */
+/* 0.35 ↔ 1 的正弦式呼吸：单程 2s、整周期 4s，慢了不闪、快了不闷 */
 @keyframes gapBreathe {
   0%, 100% { opacity: var(--gap-breathe-min); }
   50%      { opacity: var(--gap-breathe-max); }

@@ -246,10 +246,10 @@ const chSnap = `(() => {
   ok('呼吸动画挂在空档期间（.ongap 生效）', gap.ongap === true && gap.animName === 'gapBreathe',
     `ongap=${gap.ongap} anim=${gap.animName}`);
 
-  /* 呼吸：整周期 6s（单程 3s）、无限循环、正弦式缓动，opacity 在 0.35~1 之间往复。
-   * 这里按真实时间采样 3.2s，正好走完「最暗 → 最亮」的半程。 */
-  ok('呼吸周期 6s、无限循环、正弦缓动',
-    gap.animDur === 6000 && gap.animIter === Infinity && gap.animState === 'running',
+  /* 呼吸：整周期 4s（单程 2s）、无限循环、正弦式缓动，opacity 在 0.35~1 之间往复。
+   * 这里按真实时间采样 3s，覆盖「最暗 → 最亮 → 回落」的完整半程以上。 */
+  ok('呼吸周期 4s、无限循环、正弦缓动',
+    gap.animDur === 4000 && gap.animIter === Infinity && gap.animState === 'running',
     `dur=${gap.animDur} iter=${gap.animIter} state=${gap.animState}`);
 
   const breathe = await js(`(async () => {
@@ -271,7 +271,7 @@ const chSnap = `(() => {
   log('  呼吸采样：' + JSON.stringify(breathe.ops));
   log('  关键帧：' + JSON.stringify(breathe.kf) + '  缓动：' + breathe.easing);
   ok('呼吸下限约 0.35', breathe.min <= 0.45, `min=${breathe.min}`);
-  ok('呼吸上限约 1（3s 内到达最亮）', breathe.max >= 0.9, `max=${breathe.max}`);
+  ok('呼吸上限约 1（单程 2s 处最亮）', breathe.max >= 0.9, `max=${breathe.max}`);
   ok('opacity 始终在 0.3~1.05 之间（不过冲、不消失）',
     breathe.ops.every(o => o >= 0.3 && o <= 1.05), JSON.stringify(breathe.ops));
   ok('呼吸不碰填充进度（curCh 不变）', breathe.chStable === true);

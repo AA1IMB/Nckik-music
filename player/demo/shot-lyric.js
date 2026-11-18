@@ -85,7 +85,7 @@ const js = c => win.webContents.executeJavaScript(c, true);
   await shot(10.25, 'shot-lyric-fade.png', 'gap-fade');
 
   /* 呼吸：把 CSS 动画的 currentTime 钉在两个相位上各拍一张 ——
-   * 0ms 是最暗（0.35），3000ms 正好是半程最亮（1.0）。
+   * 0ms 是最暗（0.35），2000ms 是单程终点、最亮（1.0）。
    * 窗口没有被真正呈现在屏幕上时，Chromium 不产帧、动画时间轴不前进，
    * 所以这里直接定相位，而不是等墙钟（探针里已按真实时间验过它会自己走）。 */
   await js(`(() => { audio.pause(); audio.currentTime = 8.4; })()`);
@@ -117,7 +117,7 @@ const js = c => win.webContents.executeJavaScript(c, true);
     log(file.replace('.png', ''), JSON.stringify(info));
   };
   await breatheShot(0, 'shot-lyric-breathe-min.png');
-  await breatheShot(3000, 'shot-lyric-breathe-max.png');
+  await breatheShot(2000, 'shot-lyric-breathe-max.png');
 
   app.quit();
 })().catch(e => { console.error('SHOT CRASH', e); app.quit(); });
