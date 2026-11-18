@@ -11,6 +11,7 @@ const S = {
   libIndex: new Map(),              // path -> track，队列解析用 O(1) 定位
   q: [],                            // 播放队列：settings.playlist 的运行时投影，等长同序
   shufPool: new Set(),              // 随机播放「本轮还没播过」的 id 池（存 id 不存下标）
+  shufDone: new Set(),              // 本轮已经播过的 id：列表增删重排时重建池也不许把它们放回来
   i: -1,                            // ★ 队列下标（不是曲库下标）；取当前曲目请用 curTrack()
   playing: false,
   lyrics: [],
@@ -86,7 +87,7 @@ function rebuildQueue(keep) {
   if (at >= 0) S.i = at;
   else if (S.i >= S.q.length) S.i = S.q.length ? S.q.length - 1 : -1;
   S.hist.length = 0;
-  resetShufPool();
+  resetShufPool(keep === 'id');           // 只是列表变了 → 保留本轮已播；整单换掉 → 开新一轮
 }
 
 function qTrack(qi) {
@@ -100,19 +101,26 @@ const curTrack = () => (S.i >= 0 ? qTrack(S.i) : null);
 const curItem = () => (S.i >= 0 && S.q[S.i] ? S.q[S.i].item : null);
 
 /* 随机池：只装「还没播过」的 id。用 id 而不是下标，
- * 这样重排/删除/失效之后池也不会指错歌。 */
-function resetShufPool() {
-  S.shufPool = new Set(S.q.map(x => x.id));
+ * 这样重排/删除/失效之后池也不会指错歌。
+ * soft=true：列表只是增删/重排，本轮已播的记录要留着 —— 否则 rebuildQueue 一调用，
+ * 播过的歌就会重新进池，用户就会听到「随机又切回刚才那首」。 */
+function resetShufPool(soft) {
+  if (!soft || !S.shufDone) S.shufDone = new Set();
+  S.shufPool = new Set(S.q.map(x => x.id).filter(id => !S.shufDone.has(id)));
   const k = curTrack();
   if (k) S.shufPool.delete(k.path);       // 当前曲不进池，避免一抽就抽回自己
 }
 
 function shufNext() {
-  if (!S.shufPool.size) resetShufPool();  // 一轮播完 → 重洗继续（随机不作「到末尾停」）
+  if (!S.shufPool.size) {                 // 一轮播完 → 开新一轮（清空已播记录再洗）
+    S.shufDone = new Set();
+    resetShufPool(false);
+  }
   if (!S.shufPool.size) return -1;        // 只有一首且就是当前曲
   const ids = [...S.shufPool];
   const pick = ids[Math.floor(Math.random() * ids.length)];
   S.shufPool.delete(pick);
+  S.shufDone.add(pick);
   const qi = S.q.findIndex(x => x.id === pick);
   if (qi < 0) return -1;
   if (S.i >= 0) { S.hist.push(S.i); if (S.hist.length > 500) S.hist.shift(); }
@@ -1152,7 +1160,11 @@ const emptyRow = html => `<div class="empty-row">${html}</div>`;
  * 做法：先全部画成「首字磁贴」占位，再由 IntersectionObserver 只给进入视口
  * 的行取图，并发上限 4；结果按 key 缓存，滚动来回不重复请求。
  */
-const thumbUrl = new Map();          // key -> data URL / ''（确认没有封面）
+const thumbUrl = new Map();          // key -> data URL（只缓存成功的：失败不能写死）
+const thumbMiss = new Map();         // key -> 失败时刻：只短暂记住失败，避免滚动时每帧重请求
+const thumbRetry = new Set();        // 正在等自动重试的 key（每个 key 只挂一个定时器）
+const THUMB_MISS_TTL = 5000;
+const THUMB_RETRY_DELAY = 8000;      // 失败后自动补一次，用户不用手动刷新
 const THUMB_CACHE_MAX = 320;
 const thumbQ = [];
 let thumbRun = 0;
@@ -1178,6 +1190,9 @@ function thumbEnqueue(el) {
   if (!key || !kind) return;
   const hit = thumbUrl.get(key);
   if (hit !== undefined) { applyThumb(el, hit); return; }
+  // 刚刚失败过就先不重复打（失败原因通常是文件被占用 / 网络抖动，TTL 后自然重试）
+  const miss = thumbMiss.get(key);
+  if (miss && Date.now() - miss < THUMB_MISS_TTL) return;
   thumbQ.push([el, kind, key]);
 }
 
@@ -1187,7 +1202,12 @@ async function fetchThumb(kind, key) {
     r = kind === 'ne' ? await window.api.neCover(key, 96) : await window.api.trackCover(key);
   } catch { r = null; }
   const url = r && r.ok && r.dataUrl ? r.dataUrl : '';
-  thumbUrl.set(key, url);
+  if (url) {
+    thumbUrl.set(key, url);
+    thumbMiss.delete(key);
+  } else {
+    thumbMiss.set(key, Date.now());     // 只记失败时间，不把「没封面」写死到会话结束
+  }
   while (thumbUrl.size > THUMB_CACHE_MAX) thumbUrl.delete(thumbUrl.keys().next().value);
   return url;
 }
@@ -1198,7 +1218,18 @@ function pumpThumbs() {
     if (!el.isConnected) continue;        // 行已经被重绘替换掉，不必请求
     thumbRun++;
     fetchThumb(kind, key)
-      .then(url => { if (url) applyThumb(el, url); })
+      .then(url => {
+        if (url) applyThumb(el, url);
+        // 失败不留白也不摆烂：只要这行还在文档里，稍后自动补一次
+        else if (el.isConnected && !thumbRetry.has(key)) {
+          thumbRetry.add(key);
+          setTimeout(() => {
+            thumbRetry.delete(key);
+            thumbMiss.delete(key);
+            if (el.isConnected) { thumbQ.push([el, kind, key]); pumpThumbs(); }
+          }, THUMB_RETRY_DELAY);
+        }
+      })
       .catch(() => {})
       .then(() => { thumbRun--; pumpThumbs(); });
   }
@@ -1206,6 +1237,7 @@ function pumpThumbs() {
 
 function fillThumbs(root) {
   if (thumbIO) thumbIO.disconnect();       // 上一批的行已经不在文档里了
+  thumbMiss.clear();                       // 列表重画 = 用户想再看一次，之前失败的也重新试
   const rows = $$('.item .th[data-art]', root);
   if (!rows.length) return;
   thumbIO = new IntersectionObserver(entries => {
@@ -2417,6 +2449,12 @@ async function playAt(qi, opts) {
   }
 
   S.i = qi;
+  // 随机模式下，「手点」或自动续播落到的那首也算本轮已播：
+  // 否则本轮洗牌里还能再抽到它，听感就是「随机又切回刚才那首」。
+  if (S.settings.playMode === 'shuffle') {
+    S.shufDone.add(k.path);
+    S.shufPool.delete(k.path);
+  }
 
   S.lyrics = [];
   S.lyricSrc = '';

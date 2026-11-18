@@ -428,7 +428,12 @@ async function sidecarCover(file) {
     const real = lower.get(n);
     if (real) { found = await readImage(dir, real); if (found) break; }
   }
-  dirCoverCache.set(dir, found);
+  // 只缓存「读到了」的结果：之前这里把 null 也按目录写死，只要第一次读的时候封面还没就位
+  // （正在拷文件、刚改完名），整个会话里这一整个目录都不会再有封面。
+  if (found) {
+    dirCoverCache.set(dir, found);
+    while (dirCoverCache.size > 200) dirCoverCache.delete(dirCoverCache.keys().next().value);
+  }
   return found;
 }
 
@@ -815,7 +820,8 @@ ipcMain.handle('ne:url', (_e, id, quality) =>
  * 塞进 IPC。主进程按路径缓存缩略结果，来回滚动不会反复解析文件。
  */
 const THUMB_MAX = 240;
-const thumbCache = new Map();     // path -> data URL（失败也缓存空串，避免反复踩同一个坏文件）
+const THUMB_MISS_TTL = 5000;      // 「没封面」只记 5 秒：文件可能正被占用 / 刚拷进来，不该永久留白
+const thumbCache = new Map();     // path -> { v: dataURL, at }
 
 function thumbFrom(buf, fmt) {
   try {
@@ -829,11 +835,12 @@ function thumbFrom(buf, fmt) {
 }
 
 async function readThumb(file) {
-  if (thumbCache.has(file)) {
-    const hit = thumbCache.get(file);
+  const hit = thumbCache.get(file);
+  // 命中的是「有图」就永远有效；命中「没图」只在 TTL 内有效 —— 过期的空结果继续往下重新解析
+  if (hit && (hit.v || Date.now() - hit.at < THUMB_MISS_TTL)) {
     thumbCache.delete(file);          // 命中即刷新 LRU 位置
     thumbCache.set(file, hit);
-    return hit;
+    return hit.v;
   }
   let out = '';
   try {
@@ -846,7 +853,7 @@ async function readThumb(file) {
       if (side) out = thumbFrom(Buffer.from(side.slice(side.indexOf(',') + 1), 'base64'));
     }
   } catch { out = ''; }
-  thumbCache.set(file, out);
+  thumbCache.set(file, { v: out, at: Date.now() });
   while (thumbCache.size > THUMB_MAX) thumbCache.delete(thumbCache.keys().next().value);
   return out;
 }
