@@ -526,16 +526,28 @@ function linkLines(lines) {
  * 逐字填充、空档「…」都只认 chars / nextT / prevTimed，看不到 tr。 */
 function buildLyrics(ly) {
   if (!ly) return [];
+  const lrc = parseLRC(ly.text);
+  const trs = ly.tr ? parseLRC(ly.tr) : [];
+  /* 译文先挂到 lrc 行上：tlyric 与 lrc 是同一次接口返回的，行首时间戳一一对应，
+   * 这一层几乎不会错。注意不能直接拿 yrc 的行首去对译文 —— 见下面的注释。 */
+  if (trs.length) mergeTranslation(lrc, trs);
   const y = parseYRC(ly.yrc);
-  const lines = y.length ? y : assignChars(parseLRC(ly.text));
-  return linkLines(mergeTranslation(lines, ly.tr ? parseLRC(ly.tr) : []));
+  if (!y.length) return linkLines(assignChars(lrc));
+  /* 有逐字数据时，行序与 lrc 是同一份（同一首歌、同一段歌词），
+   * 但 yrc 的行首是「真正开口的时刻」，比 lrc 的行首晚，实测能差 0.7s 以上
+   * （lrc 5.45 / yrc 5.46、lrc 8.12 / yrc 8.73……）。若按时间戳去配译文，
+   * 一大半会超出容差被丢掉 —— 这正是「有译文的句子空白」的根因。
+   * 所以先按行序把译文搬过来，再对剩下没搬到的行用时间戳兜底。 */
+  transferTranslation(y, lrc);
+  if (trs.length) mergeTranslation(y, trs);
+  return linkLines(y);
 }
 
 /* ------------------------------------------------------------ 歌词翻译
  * 数据来源三级，越靠前越可信：
  *   1. 行内译文：同一个时间戳连着两行（双语 LRC），parseLRC 已挂到 l.tr；
  *   2. 独立翻译时间轴：网易云 tlyric / 本地 `同名.zh.lrc` / 内嵌第二条，
- *      按时间戳与原文对齐（容差 TR_TOL），这是最准的一条；
+ *      先对齐到 lrc 行（时间戳一一对应），再按行序搬到逐字行上；
  *   3. 没有译文：l.tr 为空，渲染层不生成节点，布局与改动前完全一致。
  * 任何不确定的情况都选择「不显示」，而不是把上一句的译文错位贴到这一句。
  */
@@ -557,6 +569,25 @@ function mergeTranslation(lines, trs) {
     if (!hasLetter(c.text)) continue;                 // 「//」之类的占位
     if (normText(c.text) === normText(l.text)) continue;  // 中文歌的「译文」与原文相同
     l.tr = c.text;
+  }
+  return lines;
+}
+
+/* 把 lrc 行上已挂好的译文，按「同样的行序 + 同样的正文」搬到逐字行上。
+ * 只认归一化后正文完全相同的行，且在 6 行窗口内找 —— 对不上就不搬，
+ * 后面还有时间戳兜底，宁可不显示也不贴错。 */
+function transferTranslation(lines, lrc) {
+  if (!lines.length || !lrc.length) return lines;
+  let j = 0;
+  for (const l of lines) {
+    const key = normText(l.text);
+    let hit = -1;
+    for (let w = 0; w < 6 && j + w < lrc.length; w++) {
+      if (normText(lrc[j + w].text) === key) { hit = j + w; break; }
+    }
+    if (hit < 0) continue;
+    if (!l.tr && lrc[hit].tr) l.tr = lrc[hit].tr;
+    j = hit + 1;
   }
   return lines;
 }
@@ -621,12 +652,14 @@ function renderLyrics() {
     gap.appendChild(gapText);
     tx.appendChild(gap);
     d.appendChild(tx);
-    /* 译文：只有真的对齐上了才建节点。它是纯静态文本，不参与 --p、
-     * 不参与空档判定 —— 逐字填充与「…」永远只作用在原文那一层。 */
-    if (l.tr) {
+    /* 译文：只有真的对齐上了、且不是空白才建节点。它是纯静态文本，不参与 --p、
+     * 不参与空档判定 —— 逐字填充与「…」永远只作用在原文那一层。
+     * 匹配不到时干脆不建节点（降级为不显示），而不是留一个空块把行撑高。 */
+    const trText = l.tr ? String(l.tr).trim() : '';
+    if (trText) {
       const tr = document.createElement('div');
       tr.className = 'tr';
-      tr.textContent = l.tr;
+      tr.textContent = trText;
       d.appendChild(tr);
     }
     d.addEventListener('click', () => { audio.currentTime = l.t; });

@@ -259,6 +259,23 @@ const dump = `(() => {
     await js(`(() => { const n = S.lnNodes[0]; return !!(n && n.querySelector('.tr')); })()`));
   ok('译文不会跟着呼吸/隐藏', d.gap && d.gap.breathe !== null);
 
+  /* 7. 逐字行首与 lrc 行首不齐（真实网易云就是这样）
+   * tlyric 的时间戳跟 lrc 一模一样，而 yrc 的行首是真正开口的时刻，能晚 0.5s 以上。
+   * 按时间戳去配必然大面积超容差 —— 必须按行序搬译文。 */
+  log('=== 7. yrc 行首与 lrc 不齐时译文仍要逐行对上 ===');
+  const yc = await js(`(() => {
+    const r = buildLyrics({
+      text: '[00:00.00]A\\n[00:06.00]B\\n[00:12.00]C',
+      tr:   '[00:00.00]甲\\n[00:06.00]乙\\n[00:12.00]丙',
+      yrc:  '[460,600](460,200,0)A\\n[6600,600](6600,200,0)B\\n[12600,600](12600,200,0)C'
+    });
+    return { n: r.length, trs: r.map(l => l.tr || null), t: r.map(l => l.t), chars: r.map(l => (l.chars || []).length) };
+  })()`);
+  log('  ' + JSON.stringify(yc));
+  ok('yrc 的 3 行都解析出来（行首 0.46 / 6.6 / 12.6s，比 lrc 晚 0.46~0.6s）', yc.n === 3, 'n=' + yc.n);
+  ok('按行序把译文搬过去了，一行都没丢', JSON.stringify(yc.trs) === JSON.stringify(['甲', '乙', '丙']), yc.trs);
+  ok('译文没改字级时间轴（每行 1 个字）', JSON.stringify(yc.chars) === '[1,1,1]', yc.chars);
+
   log('=== 渲染层报错 ===');
   if (errors.length) errors.forEach(e => log('  ✗ ' + e));
   else log('  （无）');

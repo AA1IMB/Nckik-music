@@ -312,18 +312,20 @@ body::before {
 /* 译文：原文下面一行，次级样式。
  * 字号用固定 px（不是 em）：原文在切行时会有 23px→36px 的字号过渡，
  * 译文若跟着缩放会跟着跳一下；固定值让它在整首歌里保持稳定。
- * 颜色取 --fg3 / 激活时 --fg2，比原文淡一档，不抢视线；长句按容器宽换行。 */
+ * 层级同时靠字号和颜色拉开：
+ *   字号 17.5px（原文 23px，激活时 36px）
+ *   颜色 --fg2（原文激活时是 --fg）；未激活的行整行还有 .58 的透明度，
+ *   所以非当前句的译文会自然再淡一档，不抢视线。
+ * 长句按容器宽换行，不会把「…」推走。 */
 .ln .tr {
   display: block;
-  margin-top: 5px;
-  font-size: 15.5px;
-  line-height: 1.5;
-  letter-spacing: 0;
-  color: var(--fg3);
+  margin-top: 6px;
+  font-size: 17.5px;
+  line-height: 1.55;
+  letter-spacing: .1px;
+  color: var(--fg2);
   overflow-wrap: anywhere;    /* 超长单词 / 无空格语言也不撑破容器 */
-  transition: color .5s var(--ease);
 }
-.ln.on .tr { color: var(--fg2); }
 /* 设置里关掉翻译：只是不显示，不重建节点、不碰音频 */
 body.no-tr .ln .tr { display: none; }
 
