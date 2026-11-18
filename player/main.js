@@ -381,7 +381,8 @@ const writeJSON = (p, v) => {
 const DEFAULT_SETTINGS = {
   theme: 'auto', volume: 0.78, shuffle: false, repeat: 'off', sinkId: '', muted: false,
   lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true,
-  quality: 'exhigh'            // 网易云音质档位：standard / higher / exhigh / lossless
+  quality: 'exhigh',           // 网易云音质档位：standard / higher / exhigh / lossless
+  lyricTrans: true             // 歌词翻译默认显示；没有译文的歌不受影响
 };
 
 /* ---------------- 元数据 ---------------- */
@@ -437,6 +438,15 @@ function pickLyrics(common) {
   return list.map(l => (typeof l === 'string' ? l : l && l.text)).filter(Boolean)[0] || '';
 }
 
+/* 内嵌歌词里可能存了不止一份：第二份带有时间轴时按翻译处理（有些抓轨工具
+ * 会把原文和译文都塞进同一条 tag）。只取第二份，不做更多猜测。 */
+function pickLyricsTr(common) {
+  const list = (common && common.lyrics) || [];
+  const all = list.map(l => (typeof l === 'string' ? l : l && l.text)).filter(Boolean);
+  const second = all[1] || '';
+  return /\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/.test(second) ? second : '';
+}
+
 async function readTrack(file, withCover = false) {
   const g = guessFromName(file);
   const out = {
@@ -483,6 +493,24 @@ function findSidecarLrc(file) {
   } catch {}
   for (const c of candidates) {
     const p = path.isAbsolute(c) ? c : path.join(dir, c);
+    try { if (fs.statSync(p).isFile()) return p; } catch {}
+  }
+  return null;
+}
+
+/* 翻译歌词的旁挂文件：`同名.zh.lrc` / `.trans.lrc` / `.tlyric.lrc` / `.zh-CN.lrc`。
+ * 顺序即优先级，和主歌词一样大小写不敏感。 */
+const TR_SIDECAR = ['.zh.lrc', '.zh-CN.lrc', '.trans.lrc', '.tlyric.lrc'];
+function findSidecarTrans(file) {
+  const dir = path.dirname(file);
+  const base = path.basename(file, path.extname(file));
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return null; }
+  const lower = new Map(names.map(n => [n.toLowerCase(), n]));
+  for (const suf of TR_SIDECAR) {
+    const hit = lower.get((base + suf).toLowerCase());
+    if (!hit) continue;
+    const p = path.join(dir, hit);
     try { if (fs.statSync(p).isFile()) return p; } catch {}
   }
   return null;
@@ -684,15 +712,22 @@ ipcMain.handle('track:lyric', async (_e, file) => {
     catch (e) { return { text: '', source: '', note: String((e && e.message) || e) }; }
   }
   const side = findSidecarLrc(file);
+  const trSide = findSidecarTrans(file);
+  const readTr = async () => {
+    if (!trSide) return '';
+    try { return await fsp.readFile(trSide, 'utf8'); } catch { return ''; }
+  };
   if (side) {
-    try { return { text: await fsp.readFile(side, 'utf8'), source: path.basename(side) }; } catch {}
+    try {
+      return { text: await fsp.readFile(side, 'utf8'), tr: await readTr(), source: path.basename(side) };
+    } catch {}
   }
   // 只取歌词：不解析封面、不读时长，比整条 readTrack 轻得多
   try {
     const mm = await getMM();
     const meta = await mm.parseFile(file, { duration: false, skipCovers: true });
     const lyr = pickLyrics(meta.common);
-    return { text: lyr, source: lyr ? '内嵌' : '' };
+    return { text: lyr, tr: pickLyricsTr(meta.common), source: lyr ? '内嵌' : '' };
   } catch { return { text: '', source: '' }; }
 });
 

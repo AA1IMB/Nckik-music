@@ -385,7 +385,18 @@ function parseLRC(src) {
     }
   }
   out.sort((a, b) => a.t - b.t);
-  return out.filter((l, i) => i === 0 || l.t !== out[i - 1].t);
+  /* 双语 LRC 的常见写法：同一个时间戳连着两行，第二行是译文。
+   * 早先这里直接按时间戳去重，第二行会被整行丢掉；现在挂到前一行上当译文。 */
+  const merged = [];
+  for (const l of out) {
+    const prev = merged[merged.length - 1];
+    if (prev && Math.abs(l.t - prev.t) < 0.001) {
+      if (!prev.tr && l.text !== prev.text) prev.tr = l.text;
+      continue;
+    }
+    merged.push(l);
+  }
+  return merged;
 }
 
 /* ------------------------------------------------------------ 逐字时间轴
@@ -510,12 +521,44 @@ function linkLines(lines) {
   return lines;
 }
 
-/* 歌词入口：有逐字数据就用逐字，否则按行时间摊到字 */
+/* 歌词入口：有逐字数据就用逐字，否则按行时间摊到字。
+ * 译文只是「挂在行上的一个字符串」，合并完原词的时间轴与字数完全不变 ——
+ * 逐字填充、空档「…」都只认 chars / nextT / prevTimed，看不到 tr。 */
 function buildLyrics(ly) {
   if (!ly) return [];
   const y = parseYRC(ly.yrc);
-  if (y.length) return linkLines(y);
-  return linkLines(assignChars(parseLRC(ly.text)));
+  const lines = y.length ? y : assignChars(parseLRC(ly.text));
+  return linkLines(mergeTranslation(lines, ly.tr ? parseLRC(ly.tr) : []));
+}
+
+/* ------------------------------------------------------------ 歌词翻译
+ * 数据来源三级，越靠前越可信：
+ *   1. 行内译文：同一个时间戳连着两行（双语 LRC），parseLRC 已挂到 l.tr；
+ *   2. 独立翻译时间轴：网易云 tlyric / 本地 `同名.zh.lrc` / 内嵌第二条，
+ *      按时间戳与原文对齐（容差 TR_TOL），这是最准的一条；
+ *   3. 没有译文：l.tr 为空，渲染层不生成节点，布局与改动前完全一致。
+ * 任何不确定的情况都选择「不显示」，而不是把上一句的译文错位贴到这一句。
+ */
+const TR_TOL = 0.4;                                   // 译文与原文的行首允许偏差（秒）
+
+const normText = s => String(s || '').replace(/[\s\p{P}\p{S}]/gu, '');
+const hasLetter = s => /[0-9A-Za-z\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(String(s || ''));
+
+function mergeTranslation(lines, trs) {
+  if (!lines.length || !trs || !trs.length) return lines;
+  let j = 0;
+  for (const l of lines) {
+    // 两个时间轴都单调，指针只往前走
+    while (j + 1 < trs.length && Math.abs(trs[j + 1].t - l.t) <= Math.abs(trs[j].t - l.t)) j++;
+    const c = trs[j];
+    if (!c) break;
+    if (l.tr) continue;                               // 行内译文优先
+    if (Math.abs(c.t - l.t) > TR_TOL) continue;        // 对不上就不挂
+    if (!hasLetter(c.text)) continue;                 // 「//」之类的占位
+    if (normText(c.text) === normText(l.text)) continue;  // 中文歌的「译文」与原文相同
+    l.tr = c.text;
+  }
+  return lines;
 }
 
 function renderLyrics() {
@@ -542,6 +585,11 @@ function renderLyrics() {
     const d = document.createElement('div');
     d.className = 'ln';
     d.dataset.i = i;
+    /* 原文与「…」都放进 .ln-tx：它是 inline-block，宽度贴合文字本身，
+     * 「…」才能靠 left:100% 挂在句子末尾。译文 .tr 是它的兄弟块 ——
+     * 长译文只会自己换行，不会把行宽撑宽、把「…」推到右边去。 */
+    const tx = document.createElement('span');
+    tx.className = 'ln-tx';
     /* 每个字一个 span：填充按字推进（--p 逐字写），不是整行扫一条渐变。
      * 单个 span 仍然只栅格化一层渐变裁进字形，不会出现两层文字的白边。 */
     const chars = l.chars && l.chars.length ? l.chars : null;
@@ -555,10 +603,10 @@ function renderLyrics() {
         cf.appendChild(s);
         spans.push(s);
       }
-      d.appendChild(cf);
+      tx.appendChild(cf);
       S.lnChars.push(spans);
     } else {
-      d.textContent = l.text;          // 兜底：没有任何字级数据时按整行
+      tx.textContent = l.text;         // 兜底：没有任何字级数据时按整行
       S.lnChars.push(null);
     }
     /* 空档里的「…」：它不是装饰，而是「这一句还没唱完」的延续 ——
@@ -571,7 +619,16 @@ function renderLyrics() {
     gapText.className = 'gap-t';
     gapText.textContent = '…';
     gap.appendChild(gapText);
-    d.appendChild(gap);
+    tx.appendChild(gap);
+    d.appendChild(tx);
+    /* 译文：只有真的对齐上了才建节点。它是纯静态文本，不参与 --p、
+     * 不参与空档判定 —— 逐字填充与「…」永远只作用在原文那一层。 */
+    if (l.tr) {
+      const tr = document.createElement('div');
+      tr.className = 'tr';
+      tr.textContent = l.tr;
+      d.appendChild(tr);
+    }
     d.addEventListener('click', () => { audio.currentTime = l.t; });
     frag.appendChild(d);
     S.lnNodes.push(d);
@@ -1938,7 +1995,8 @@ function prev() {
 /* 读不到设置（磁盘只读 / IPC 异常）时的兜底：界面必须能开，不能因为一份配置白屏 */
 const FALLBACK_SETTINGS = {
   theme: 'auto', volume: 0.78, shuffle: false, repeat: 'off', sinkId: '', muted: false,
-  lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true, quality: 'exhigh'
+  lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true, quality: 'exhigh',
+  lyricTrans: true
 };
 
 function seek(delta) {
@@ -2527,6 +2585,13 @@ function bind() {
     $('#swKeys').classList.toggle('on', S.settings.globalKeys);
     registerGlobalKeys(); saveSettings();
   };
+  /* 歌词翻译：即时生效 —— 只切 body 上的一个类，不动音频、不重发歌词请求。
+   * 行高会跟着变，所以顺手把当前句重新居中一次。 */
+  $('#swTr').onclick = () => {
+    S.settings.lyricTrans = !S.settings.lyricTrans;
+    $('#swTr').classList.toggle('on', S.settings.lyricTrans);
+    applyTransVisibility(); saveSettings();
+  };
 
   // 网易云：扫码登录。二维码由主进程生成，这里只管开关与状态文案
   $('#btnNeQr').onclick = () => {
@@ -2615,6 +2680,14 @@ function syncToggles() {
   const txt = r === 'off' ? '关闭' : r === 'all' ? '列表循环' : '单曲循环';
   $('#setRepeat').textContent = txt;
   $('#setShuffle').textContent = S.settings.shuffle ? '开启' : '关闭';
+  $('#swTr').classList.toggle('on', S.settings.lyricTrans !== false);
+}
+
+/* 翻译的显隐只用一个 body 类：切的时候不重建歌词节点、不碰 audio，
+ * 关掉后行高变化会让列表偏离中轴，顺手重新居中一次。 */
+function applyTransVisibility() {
+  document.body.classList.toggle('no-tr', S.settings.lyricTrans === false);
+  if (S.lastLy >= 0) centerLine(S.lastLy);
 }
 
 /* ------------------------------------------------------------------ 启动 */
@@ -2632,6 +2705,7 @@ function syncToggles() {
   S.settings.volume = clamp(Number(S.settings.volume), 0, 1);
   if (!Number.isFinite(S.settings.volume)) S.settings.volume = 0.78;
   if (!['off', 'all', 'one'].includes(S.settings.repeat)) S.settings.repeat = 'off';
+  if (typeof S.settings.lyricTrans !== 'boolean') S.settings.lyricTrans = true;
   if (!['auto', 'dark', 'light'].includes(S.settings.theme)) S.settings.theme = 'auto';
   S.settings.lat = Number.isFinite(Number(S.settings.lat)) ? clamp(Number(S.settings.lat), -89.9, 89.9) : 31.2304;
   S.settings.lon = Number.isFinite(Number(S.settings.lon)) ? clamp(Number(S.settings.lon), -180, 180) : 121.4737;
@@ -2644,6 +2718,7 @@ function syncToggles() {
 
   bind();
   syncToggles();
+  applyTransVisibility();               // 先按上次的选择定好译文显隐，再画歌词
   setSource('local');
   // 上次扫过码的话，开机就把歌单在后台取回来：等用户点开「网易云」时已经是现成的
   updateNeNote().then(() => { if (S.ne.loggedIn) neEnsureHome(); }).catch(() => {});

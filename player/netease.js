@@ -337,12 +337,22 @@ async function lyric(id) {
   const j = await getJSON('/api/song/lyric?id=' + sid + '&lv=-1&kv=-1&tv=-1&yv=-1');
   const text = String((j.lrc && j.lrc.lyric) || '');
   const yrc = String((j.yrc && j.yrc.lyric) || '');
+  /* tv=-1 取的是逐行翻译（tlyric）：它是一份与原词时间戳一一对应的 LRC，
+   * 渲染层按时间戳合并，原词的时间轴一个字都不动。
+   * 没有翻译的歌这里就是空串，界面自然不出现译文。 */
+  const tr = String((j.tlyric && j.tlyric.lyric) || '');
   // 没有时间戳的（纯音乐说明、只有一句版权信息）不算歌词：
   // 渲染层是按行时间戳擦除的，塞进去只会得到一堆同时间的行。
   const timed = /\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/.test(text);
   if (!text.trim() && !yrc.trim()) return { text: '', source: '', note: '该曲目暂无歌词' };
   if (!timed && !yrc.trim()) return { text: '', source: '', note: '该曲目只有纯文本歌词，没有时间轴' };
-  return { text: timed ? text : '', yrc: yrc.trim() ? yrc : '', source: '网易云' };
+  return {
+    text: timed ? text : '',
+    yrc: yrc.trim() ? yrc : '',
+    // 只把带时间戳的翻译交出去：没有时间轴的译文无法对齐到行
+    tr: /\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/.test(tr) ? tr : '',
+    source: '网易云'
+  };
 }
 
 const urlCache = new Map();   // `${id}|${level}` -> { url, br, type, level, size, expi, at }

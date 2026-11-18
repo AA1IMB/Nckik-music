@@ -271,7 +271,7 @@ body::before {
  */
 .ln {
   position: relative;
-  width: max-content;         /* 宽度贴合文字，渐变百分比才与字宽对应 */
+  width: 100%;                /* 行宽交给 .ln-tx：译文不能把「…」推到右边去 */
   max-width: 100%;
   font-size: 23px;
   line-height: 1.45;
@@ -280,6 +280,13 @@ body::before {
   filter: blur(1.2px);
   opacity: .58;
   transition: filter .5s var(--ease), opacity .5s var(--ease), font-size .4s var(--ease);
+}
+/* 原文（含「…」）的盒子：宽度贴合文字本身，所以 .gap 的 left:100% 永远落在句末 */
+.ln .ln-tx {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
 }
 /* 未激活的行是纯色，不做渐变裁剪 —— 一整首歌词几千个字，只有当前句需要渐变 */
 .ln .ch {
@@ -301,6 +308,24 @@ body::before {
   background-clip: text;
   color: transparent;
 }
+
+/* 译文：原文下面一行，次级样式。
+ * 字号用固定 px（不是 em）：原文在切行时会有 23px→36px 的字号过渡，
+ * 译文若跟着缩放会跟着跳一下；固定值让它在整首歌里保持稳定。
+ * 颜色取 --fg3 / 激活时 --fg2，比原文淡一档，不抢视线；长句按容器宽换行。 */
+.ln .tr {
+  display: block;
+  margin-top: 5px;
+  font-size: 15.5px;
+  line-height: 1.5;
+  letter-spacing: 0;
+  color: var(--fg3);
+  overflow-wrap: anywhere;    /* 超长单词 / 无空格语言也不撑破容器 */
+  transition: color .5s var(--ease);
+}
+.ln.on .tr { color: var(--fg2); }
+/* 设置里关掉翻译：只是不显示，不重建节点、不碰音频 */
+body.no-tr .ln .tr { display: none; }
 
 /* 空档里的「…」现在算「这一句的延长」：它有真实进度，跟着填充条匀速被填满，
  * 再渐隐收在下一句开口的位置。节奏全在 JS 里按时间轴算 ——
