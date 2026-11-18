@@ -132,12 +132,57 @@ function registerMediaProtocol() {
 
 /* ---------------- 网易云音频协议 ----------------
  * 渲染层拿到的地址是 neaudio://s/<id>，真正的 CDN 地址在这里解析并代理。
- * 两个必须做的点：
+ * 必须做的点：
  *   1. 透传 Range —— 不转发 Range，audio 元素就无法 seek，进度条拖拽会退化成从头加载；
  *   2. 地址过期换一次 —— 网易云返回的直链 20 分钟失效，命中 401/403 时
- *      丢掉缓存重新解析一次，而不是让播放直接失败。
+ *      丢掉缓存重新解析一次，而不是让播放直接失败；
+ *   3. 上游必须有超时，而且必须能被取消 —— 见下面的 NE_HEAD_TIMEOUT 与
+ *      proxyBody 的注释：少这两条，切歌时会卡在「加载中」不动。
  */
 const PASSTHROUGH_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
+
+/* 等上游响应头的上限：CDN 偶尔会接受连接却迟迟不吐响应（实测有 20~35 秒的），
+ * 没有上限时 audio 元素既拿不到数据也不会报 error，界面就永远停在「正在加载封面…」。 */
+const NE_HEAD_TIMEOUT = 15000;
+
+/* 诊断开关：NCKIK_TRACE_NE=1 时打印协议层每级耗时（songUrl / fetch 头 / 换链 / 取消），
+ * 用来定位「请求被挂住」卡在哪一级。正常运行完全静默，没有开销。 */
+const NE_TRACE = !!process.env.NCKIK_TRACE_NE;
+let neTraceN = 0;
+function neTrace(...a) {
+  if (!NE_TRACE) return;
+  console.log('[neaudio]', String(Date.now() % 100000), '#' + (++neTraceN), ...a);
+}
+
+/* 把上游响应体接到协议响应上，并把「媒体元素中止」翻译成「取消上游」。
+ *
+ * 不能直接把 res.body 交出去：ProtocolRequest 上根本没有 signal，主进程无从得知
+ * 渲染层已经放弃了这次加载（切歌 / 换源 / 关窗都会发生）。变成孤儿响应体之后，
+ * 上游还会继续把整首（十几 MB）下完而没人消费；实测连着切歌十几次之后，
+ * 新的请求要 20~35 秒才拿到响应头，媒体元素就一直卡在 loading。
+ * 包一层流：Electron 取消响应体时会调到 cancel()，这里 abort 上游连接即刻释放。 */
+function proxyBody(res, ctrl, id) {
+  if (!res.body) { ctrl.abort(); return new ReadableStream({ start: c => c.close() }); }
+  const reader = res.body.getReader();
+  const abort = () => { try { ctrl.abort(); } catch {} };
+  return new ReadableStream({
+    async pull(stream) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { stream.close(); return; }
+        stream.enqueue(value);
+      } catch (e) {
+        abort();
+        try { stream.error(e); } catch {}
+      }
+    },
+    cancel(reason) {
+      neTrace('body cancel', 'id=' + id, String(reason || 'aborted'));
+      abort();
+      reader.cancel().catch(() => {});
+    }
+  });
+}
 
 function registerNeProtocol() {
   protocol.handle('neaudio', async (request) => {
@@ -150,13 +195,18 @@ function registerNeProtocol() {
 
     const range = request.headers.get('range');
     let lastStatus = 0;
+    const tIn = Date.now();
+    neTrace('in', 'id=' + id, 'range=' + range);
 
     for (let attempt = 0; attempt < 2; attempt++) {
       let info;
       try {
+        const t0 = Date.now();
         info = await ne.songUrl(id);
+        neTrace('songUrl ok', 'id=' + id, (Date.now() - t0) + 'ms', 'attempt=' + attempt);
       } catch (e) {
         // 需要会员 / 无版权：返回 404，渲染层按 mediaErr 走「跳过并提示」
+        neTrace('songUrl fail', 'id=' + id, (e && e.code) || '', (e && e.message) || e);
         return new Response(String((e && e.message) || e), {
           status: 404,
           headers: { 'content-type': 'text/plain; charset=utf-8', 'x-ne-reason': (e && e.code) || 'NE_ERROR' }
@@ -166,12 +216,34 @@ function registerNeProtocol() {
       const headers = {};
       if (range) headers.Range = range;
 
+      /* 每次响应一个独立的 controller：既用来给「等响应头」设上限，
+       * 也用来在媒体元素放弃这次加载时掐掉上游下载（见 proxyBody）。 */
+      const ctrl = new AbortController();
+      const headTimer = setTimeout(() => ctrl.abort(new Error('NE_HEAD_TIMEOUT')), NE_HEAD_TIMEOUT);
       let res;
-      try { res = await net.fetch(info.url, { headers }); }
-      catch { return new Response('upstream failed', { status: 502 }); }
+      try {
+        const tf = Date.now();
+        res = await net.fetch(info.url, { headers, signal: ctrl.signal });
+        neTrace('fetch ok', 'id=' + id, (Date.now() - tf) + 'ms', 'status=' + res.status);
+      } catch (e) {
+        /* 超时 / 连接失败：必须回一个真正的 HTTP 错误码。
+         * 之前这里只有「不超时、不取消」，上游一慢，媒体元素就永远停在 loading：
+         * 既没有数据也不派发 error，play() 的 Promise 不 settle，界面卡在加载态。
+         * 回了 5xx，媒体元素才会走 error → 渲染层「跳过并提示」的既有路径。 */
+        const timedOut = String((e && e.message) || e).includes('NE_HEAD_TIMEOUT');
+        neTrace('fetch fail', 'id=' + id, timedOut ? 'TIMEOUT' : ((e && e.message) || e));
+        return new Response(timedOut ? 'upstream timeout' : 'upstream failed', {
+          status: timedOut ? 504 : 502,
+          headers: { 'x-ne-reason': timedOut ? 'NE_UPSTREAM_TIMEOUT' : 'NE_UPSTREAM_FAIL' }
+        });
+      } finally {
+        clearTimeout(headTimer);
+      }
       lastStatus = res.status;
 
       if ((res.status === 401 || res.status === 403) && attempt === 0) {
+        neTrace('expired', 'id=' + id, 'status=' + res.status, '换链重试');
+        ctrl.abort();               // 这一份响应体不要了，别留着占连接
         ne.invalidateUrl(id);       // 直链过期，换一条再来
         continue;
       }
@@ -182,8 +254,10 @@ function registerNeProtocol() {
         if (v) h.set(k, v);
       }
       if (!h.has('accept-ranges')) h.set('accept-ranges', 'bytes');
-      return new Response(res.body, { status: res.status, headers: h });
+      neTrace('return', 'id=' + id, (Date.now() - tIn) + 'ms 总计', 'ct=' + h.get('content-type'));
+      return new Response(proxyBody(res, ctrl, id), { status: res.status, headers: h });
     }
+    neTrace('give up', 'id=' + id, 'lastStatus=' + lastStatus, (Date.now() - tIn) + 'ms');
     return new Response('upstream ' + lastStatus, { status: 410 });
   });
 }

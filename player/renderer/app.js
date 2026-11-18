@@ -1461,6 +1461,28 @@ function setLyrHint(k, ly) {
   el.textContent = note || (isNet(k) ? '该曲目暂无歌词' : '暂无歌词 · 同目录放置同名 .lrc 即可');
 }
 
+/* 「开始播放」同样要有上限。
+ *
+ * 上游卡住时 audio.play() 的 Promise 既不 resolve 也不 reject —— 媒体元素只发了
+ * loadstart + stalled，不会派发 error —— playIndex 就永远停在 await 上：
+ * 封面停在「正在加载封面…」、进度条不走，也就是「界面卡在加载态」。
+ * 给它一个上限，超时按「加载失败」处理，走和 media error 一样的「跳过并提示」。 */
+const PLAY_TIMEOUT = 15000;
+
+function playGuarded(ms = PLAY_TIMEOUT) {
+  const p = audio.play();
+  p.catch(() => {});          // 超时之后它仍可能 reject（被 pause 打断），先挂个空处理
+  let timer = 0;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => {
+      const e = new Error('play timeout');
+      e.name = 'TimeoutError';   // 和真错误区分开，调用方据此走「跳过」而不是「换格式」
+      rej(e);
+    }, ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function playIndex(i) {
   if (i < 0 || i >= S.tracks.length) return;
   const seq = ++loadSeq;
@@ -1523,10 +1545,24 @@ async function playIndex(i) {
   audio.volume = S.settings.volume;
   audio.muted = !!S.settings.muted;
   try {
-    await audio.play();
+    await playGuarded();
     if (seq !== loadSeq) return;
   } catch (e) {
     if (seq !== loadSeq || e.name === 'AbortError') return;   // 被自己人打断，不是错误
+    if (e.name === 'TimeoutError') {
+      /* 卡住了：先停下这次加载（下面的 src 变更也会中止它），再按「跳过并提示」处理。
+       * 不这么做的话就一直停在「正在加载封面…」，用户只能重启软件。 */
+      audio.pause();
+      toast(`加载超时，已跳过：${k.title || '该曲目'}`);
+      if (S.tracks.length > 1 && errStreak < 3) {
+        errStreak++;
+        const ni = nextIndex(1, i);
+        if (ni >= 0) return playIndex(ni);
+      }
+      setCoverEmpty('暂无封面', '加载超时 · 换个音质或稍后重试');
+      paintMeta();
+      return;
+    }
     toast('无法播放：' + (k.title || '该曲目')
       + (net ? '（网易云加载失败）' : `（${k.codec || '未知格式'} 可能不被支持）`));
   }
