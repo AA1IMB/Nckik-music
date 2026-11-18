@@ -79,15 +79,21 @@ function resolveTrack(id) {
 }
 
 /* 队列重建。keep='id' 表示按 id 保住当前曲目（重排、插歌都走这条）；
- * 不传就只把下标夹回合法范围。历史栈一律清空——它的下标已经失效了。 */
+ * 不传就只把下标夹回合法范围。历史栈一律清空——它的下标已经失效了。
+ * 返回当前曲是否还在新队列里：调用方（尤其是「覆盖导入」）要据此决定播放头怎么摆。 */
 function rebuildQueue(keep) {
   const cur = keep === 'id' ? curTrack() : null;
   S.q = plItems().map(item => ({ id: item.id, item, t: resolveTrack(item.id) }));
   const at = cur ? S.q.findIndex(x => x.id === cur.path) : -1;
   if (at >= 0) S.i = at;
+  /* 当前曲已经不在新列表里：游标必须清空。
+   * 之前这里只是「不越界就保留旧下标」，于是导入之后游标会落在新列表的第 N 首上，
+   * 顺序播放就从中间开始、前面的歌永远播不到。 */
+  else if (cur) S.i = -1;
   else if (S.i >= S.q.length) S.i = S.q.length ? S.q.length - 1 : -1;
   S.hist.length = 0;
   resetShufPool(keep === 'id');           // 只是列表变了 → 保留本轮已播；整单换掉 → 开新一轮
+  return at >= 0;
 }
 
 function qTrack(qi) {
@@ -1631,11 +1637,24 @@ async function plSelectSource(src) {
       + (old ? '当前 ' + old + ' 首会被清空，不追加。' : '当前列表是空的。'),
     ok: '覆盖',
     run: () => {
+      const wasPlaying = !audio.paused;      // 记住导入前的播放状态，决定导入后要不要继续出声
       S.settings.playlist = items;           // 整体替换，不是追加
       plSave();
-      rebuildQueue('id');                    // 当前曲还在新列表里就保住位置，否则置空
+      const kept = rebuildQueue('id');       // true = 当前曲还在新列表里，位置已保住
       renderPl();
-      if (!S.q.length) stopPlayback();
+      if (!S.q.length) { stopPlayback(); toast('这个歌单没有可用曲目'); return; }
+      if (kept) {
+        /* 当前曲还在列表里：不碰音频，但要把它记成本轮已播 ——
+         * 否则下一次「随机」还可能把它再抽回来，听起来就是「随机重复」。 */
+        if (S.settings.playMode === 'shuffle' && curTrack()) {
+          S.shufDone.add(curTrack().path);
+          S.shufPool.delete(curTrack().path);
+        }
+      } else {
+        /* 当前曲不在新列表里：播放头必须落到第一首。
+         * 之前这里什么都不做，游标留在旧下标上，顺序播放就从新列表中间开始。 */
+        void playAt(0, { autoplay: wasPlaying });
+      }
       toast('已载入 ' + items.length + ' 首 · ' + src.name);
     }
   };
