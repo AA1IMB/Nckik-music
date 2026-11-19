@@ -149,23 +149,6 @@
   <div class="pop-note" id="devNote"></div>
 </div>
 
-<!-- 酷狗登录：只收 Cookie，不收账号密码 -->
-<div class="pop kgpop" id="popKgAuth">
-  <div class="pop-head"><span>导入酷狗登录 Cookie</span></div>
-  <ol class="kg-how">
-    <li>浏览器打开 kugou.com 并登录</li>
-    <li>F12 → Network → 任选一个请求 → 复制请求头里的 <code>Cookie</code> 整行</li>
-    <li>粘贴到下面，保存后会立刻用一首会员曲自检</li>
-  </ol>
-  <textarea class="kg-ta" id="kgCookie" spellcheck="false" placeholder="kg_mid=…; kg_dfid=…; token=…; userid=…"></textarea>
-  <div class="kg-msg" id="kgMsg"></div>
-  <div class="row2">
-    <button class="ghost mini" id="kgAuthCancel">取消</button>
-    <button class="ghost mini" id="kgAuthSave">保存并验证</button>
-  </div>
-  <div class="pop-note">Cookie 只保存在本机（系统密钥库加密），不会写进设置、日志或曲库。</div>
-</div>
-
 <!-- 播放列表 -->
 <div class="pop plpop" id="popPl">
   <div class="pop-head"><span>播放列表</span><span class="pl-sub" id="plCount">0 首</span></div>
@@ -186,7 +169,7 @@
     <button class="x" data-close>✕</button>
   </div>
   <div class="dr-body">
-    <div class="seg srcseg" id="segSrc"><b data-s="local" class="on">本地</b><b data-s="net">网易云</b><b data-s="kg">酷狗</b></div>
+    <div class="seg srcseg" id="segSrc"><b data-s="local" class="on">本地</b><b data-s="net">网易云</b></div>
     <div class="search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20 20"/></svg>
       <input id="q" placeholder="搜索曲名 / 艺人 / 专辑">
@@ -200,14 +183,6 @@
       <button class="ghost mini" id="btnNeOpen">打开</button>
     </div>
     <div class="ne-note" id="neNote"></div>
-    <div class="kg-account" id="kgAccount" style="display:none">
-      <div class="kg-who" id="kgWho">未登录 · 仅免费曲</div>
-      <div class="kg-acts">
-        <button class="ghost mini" id="kgLoginBtn">导入 Cookie</button>
-        <button class="ghost mini" id="kgLogoutBtn" style="display:none">退出</button>
-      </div>
-    </div>
-    <div class="ne-note" id="kgNote" style="display:none"></div>
     <div class="ne-home" id="neHome"></div>
     <div class="dr-sub" id="libCount">0 首</div>
     <div class="list" id="libList"></div>
@@ -261,31 +236,6 @@
         </div>
       </div>
       <div class="line"><div class="k">音源适配<small>搜索 / 歌单 / 专辑 / 歌词 / 封面均走官方网页接口，非正式契约</small></div><div class="v dim">已接入</div></div>
-    </div>
-
-    <div class="lbl">酷狗</div>
-    <div class="group">
-      <div class="line"><div class="k">登录状态<small>凭证加密保存于本机，只用于按账号权限取链</small></div><div class="v" id="kgAuthState">未登录</div></div>
-      <div class="line col">
-        <div class="authrow">
-          <button class="ghost" id="btnKgQr">扫码登录</button>
-          <button class="ghost mini" id="btnKgCookie">导入 Cookie</button>
-          <button class="ghost mini" id="btnKgLogout">退出</button>
-        </div>
-      </div>
-      <div class="qrwrap" id="kgQrWrap">
-        <div class="qrbox" id="kgQrBox">
-          <div class="qrimg" id="kgQrShot"></div>
-          <div class="qrmask" id="kgQrMask"></div>
-        </div>
-        <div class="qrstate" id="kgQrState">正在获取二维码…</div>
-        <div class="qrhelp">手机酷狗 → 我的 → 扫一扫。二维码由酷狗官方登录页生成，约 5 分钟有效；失效后点下面的「重试扫码」换一张。</div>
-        <div class="qracts">
-          <button class="ghost" id="btnKgQrRetry">重试扫码</button>
-          <button class="ghost mini" id="btnKgQrCookie">改用导入 Cookie</button>
-        </div>
-      </div>
-      <div class="line"><div class="k">曲库能力<small>搜索 / 榜单 / 歌词 / 封面可用；每日推荐与我创建的歌单上游未开放</small></div><div class="v dim">部分接入</div></div>
     </div>
 
     <div class="lbl">音频输出</div>

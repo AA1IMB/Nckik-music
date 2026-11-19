@@ -43,33 +43,17 @@ const S = {
     homeSeq: 0,
     coll: null,                                      // { kind, id, name, sub, status, err, tracks }
     collSeq: 0
-  },
-  /* 酷狗：搜索走 S.kg，曲库首页与歌单走下面的 S.srcHome / S.srcColl
-   * （与网易云共用同一套适配层，所以曲库状态不再分两家两份）。 */
-  kg: {
-    items: [], busy: false, err: '', seq: 0,
-    status: null,                    // { loggedIn, hasCookie, stub, note, vip, userid }
-    view: 'idle'                     // idle / search
-  },
-  /* 曲库首页：按音源存一份，切标签不用重新拉。
-   * status: idle / loading / ready / error（每家各自成败，互不影响） */
-  srcHome: { netease: { status: 'idle', err: '', data: null, seq: 0 } },
-  /* 打开的榜单/歌单：{ source, kind, id, name, sub, status, err, tracks, page, hasMore } */
-  srcColl: null,
-  srcSeq: 0
+  }
 };
 
 /* ------------------------------------------------------------------ 音源 */
 /*
- * 网易云曲目的 path 是 `ne:<id>`、酷狗是 `kg:<hash>`，与本地路径共用同一个唯一键空间：
+ * 网易云曲目的 path 是 `ne:<id>`，与本地路径共用同一个唯一键空间：
  * 去重、封面缓存、排序后重定位、写盘全都沿用原有逻辑，不需要到处加 source 分支。
  */
 const NET_PREFIX = 'ne:';
 const isNet = k => !!k && k.source === 'netease';
 const netIdOf = k => (isNet(k) ? Number(k.netId || String(k.path).slice(NET_PREFIX.length)) : 0);
-const KG_PREFIX = 'kg:';
-const isKg = k => !!k && k.source === 'kugou';
-const kgHashOf = k => (isKg(k) ? String(k.kgHash || String(k.path).slice(KG_PREFIX.length)) : '');
 
 /* ------------------------------------------------------------------ 播放队列
  * 播放列表是唯一播放源：S.q 是 settings.playlist 的运行时投影，等长同序。
@@ -119,22 +103,6 @@ function rebuildQueue(keep) {
  * 以前它们被当成坏行交给 skipDead 按列表顺序往后找，随机播放就会老跳回那两三首可播的邻居。 */
 function synthNetTrack(item) {
   const id = String((item && item.id) || '');
-  if (id.startsWith(KG_PREFIX)) {
-    /* 酷狗同理：队列里的 kg:<hash> 不一定进过曲库（搜索后直接播），按 hash 现造一行。
-     * 码率等信息要等 kg:url 预检回来才知道，这里先留空。 */
-    const hash = id.slice(KG_PREFIX.length).toLowerCase();
-    if (!/^[0-9a-f]{32}$/.test(hash)) return null;
-    return {
-      path: id,
-      source: 'kugou',
-      kgHash: hash,
-      title: item.title || '',
-      artist: item.artist || '',
-      album: '',
-      duration: Number(item.duration) || 0,
-      codec: 'mp3', bitrate: 0, lossless: false, coverUrl: '', vip: !!item.vip
-    };
-  }
   if (!id.startsWith(NET_PREFIX)) return null;
   const netId = Number(id.slice(NET_PREFIX.length));
   if (!netId) return null;
@@ -481,19 +449,6 @@ async function loadArt(k) {
   if (!k) return null;
   const hit = getCover(k.path);
   if (hit) return hit;
-  /* 酷狗：搜索接口不带封面，主进程按 hash 从 playInfo 取（含专辑名那张）。
-   * 失败同样按 COVER_FAIL_TTL 记一笔，别在切歌时反复打接口。 */
-  if (isKg(k)) {
-    const at = coverFail.get(k.path);
-    if (at && Date.now() - at < COVER_FAIL_TTL) return null;
-    let r;
-    try { r = await window.api.kgCover(kgHashOf(k), 500); }
-    catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
-    if (r && r.ok && r.dataUrl) { setCover(k.path, r.dataUrl); k.coverError = ''; return r.dataUrl; }
-    coverFail.set(k.path, Date.now());
-    k.coverError = (r && r.error && r.error.message) || '封面加载失败';
-    return null;
-  }
   if (!isNet(k)) return null;
 
   if (!k.coverUrl) {
@@ -1145,9 +1100,9 @@ function paintMeta() {
   $('#npT').textContent = k.title || '未知曲目';
   $('#npA').textContent = [k.artist, k.album].filter(Boolean).join(' · ') || '未知艺人';
 
-  if (isNet(k) || isKg(k)) {
+  if (isNet(k)) {
     const bits = [];
-    if (k.codec) bits.push(String(k.codec).toUpperCase());
+    if (k.codec) bits.push(k.codec);
     if (k.bitrate) bits.push(`${Math.round(k.bitrate / 1000)}kbps`);
     if (k.lossless) bits.push('无损');
     bits.push(k.duration ? fmt(k.duration) : '时长未知');
@@ -1169,7 +1124,7 @@ function paintMeta() {
     ? '解析失败'
     : k.unavailable
       ? '不可播放'
-      : k.lossless ? `${k.codec} 无损` : k.codec || (isNet(k) ? '网易云' : isKg(k) ? '酷狗' : '音频'));
+      : k.lossless ? `${k.codec} 无损` : k.codec || (isNet(k) ? '网易云' : '音频'));
 
   const cov = getCover(k.path);
   if (cov) {
@@ -1219,17 +1174,12 @@ function renderFmtPopover() {
     return;
   }
 
-  const rows = [['来源', isNet(k) ? '网易云' : isKg(k) ? '酷狗（免费曲）' : '本地文件']];
+  const rows = [['来源', isNet(k) ? '网易云' : '本地文件']];
   if (isNet(k)) {
     rows.push(['请求音质', QUALITY_NAME[curQuality()]]);
     rows.push(['实际码率', k.bitrate ? `${Math.round(k.bitrate / 1000)} kbps` : '—']);
     rows.push(['编码', k.codec || '—']);
     rows.push(['是否无损', k.lossless ? '是' : '否']);
-  } else if (isKg(k)) {
-    // 酷狗免费曲固定 128k mp3，没有档位可选，如实写出来
-    rows.push(['实际码率', k.bitrate ? `${Math.round(k.bitrate / 1000)} kbps` : '—']);
-    rows.push(['编码', String(k.codec || 'mp3').toUpperCase()]);
-    rows.push(['是否无损', '否']);
   } else {
     // 网易云接口不回采样率/位深，与其显示两行「—」，不如本地文件才列这两项
     rows.push(['编码', k.codec || '—']);
@@ -1248,13 +1198,11 @@ function renderFmtPopover() {
     .join('');
 
   if (note) {
-    note.textContent = isKg(k)
-      ? '酷狗免费曲只有 128k mp3 一档，没有更高档位可选。'
-      : !isNet(k)
-        ? '本地文件按文件本身播放，音质档位只作用于网易云曲目。'
-        : k.downgraded
-          ? `账号没有「${QUALITY_NAME[curQuality()]}」权限，已按实际可用的 ${Math.round((k.bitrate || 0) / 1000)} kbps 播放。`
-          : '显示的是接口实际返回的码率与格式，不是宣传参数。';
+    note.textContent = !isNet(k)
+      ? '本地文件按文件本身播放，音质档位只作用于网易云曲目。'
+      : k.downgraded
+        ? `账号没有「${QUALITY_NAME[curQuality()]}」权限，已按实际可用的 ${Math.round((k.bitrate || 0) / 1000)} kbps 播放。`
+        : '显示的是接口实际返回的码率与格式，不是宣传参数。';
   }
 }
 
@@ -1281,7 +1229,7 @@ async function setQuality(q) {
 
   const k = curTrack();
   if (!k || !isNet(k)) {
-    toast(`音质：${QUALITY_NAME[next]}` + (k ? (isKg(k) ? ' · 酷狗免费曲固定 128k' : ' · 本地文件按原文件播放') : ''));
+    toast(`音质：${QUALITY_NAME[next]}` + (k ? ' · 本地文件按原文件播放' : ''));
     return;
   }
   await applyQuality(k);
@@ -1345,20 +1293,15 @@ const subOf = t => {
 
 /* 本地与网易云共用一套行模板：只差右上角的来源角标和封面来源 */
 function itemHTML(t, i) {
-  /* 标签：网易云显示 云/VIP，酷狗显示 酷/VIP。酷狗的 VIP 标记来自搜索结果 pay_type，
-   * 只是提示，点播时仍会试一次（免费曲里也有 pay_type 偏保守的条目）。 */
-  const tag = isNet(t)
-    ? `<span class="tag">${t.vip ? 'VIP' : '云'}</span>`
-    : isKg(t) ? `<span class="tag">${t.vip ? 'VIP' : '酷'}</span>` : '';
+  const tag = isNet(t) ? `<span class="tag">${t.vip ? 'VIP' : '云'}</span>` : '';
   const idx = i == null ? '' : ` data-i="${i}"`;
   /* 封面：本地走 trackCover（主进程读内嵌图/同目录图，缩到 96px 再回传），
-   * 网易云走 neCover（按 96px 取），酷狗走 kgCover（按 hash 取）。没给封面地址就不挂
-   * data-art，直接留「首字磁贴」占位，不会去请求一个注定失败的地址。 */
+   * 网易云走 neCover（同样按 96px 取）。没给封面地址就不挂 data-art，
+   * 直接留「首字磁贴」占位，不会去请求一个注定失败的地址。 */
   const art = isNet(t)
     ? (t.coverUrl ? ` data-art="ne" data-key="${esc(t.coverUrl)}"` : '')
-    : isKg(t) ? ` data-art="kg" data-key="${esc(kgHashOf(t))}"`
-      : (t.path ? ` data-art="file" data-key="${esc(t.path)}"` : '');
-  return `<div class="item"${idx} data-ne="${isNet(t) ? t.netId : ''}" data-kg="${isKg(t) ? esc(kgHashOf(t)) : ''}">
+    : (t.path ? ` data-art="file" data-key="${esc(t.path)}"` : '');
+  return `<div class="item"${idx} data-ne="${isNet(t) ? t.netId : ''}">
       <div class="th"${art}><span>${esc((t.title || '?').slice(0, 1))}</span></div>
       <div class="ii"><div class="n">${esc(t.title || '未知曲目')}${tag}</div>
       <div class="d">${esc(subOf(t))}</div></div>
@@ -1412,9 +1355,7 @@ function thumbEnqueue(el) {
 async function fetchThumb(kind, key) {
   let r = null;
   try {
-    r = kind === 'ne' ? await window.api.neCover(key, 96)
-      : kind === 'kg' ? await window.api.kgCover(key, 96)
-        : await window.api.trackCover(key);
+    r = kind === 'ne' ? await window.api.neCover(key, 96) : await window.api.trackCover(key);
   } catch { r = null; }
   const url = r && r.ok && r.dataUrl ? r.dataUrl : '';
   if (url) {
@@ -1469,7 +1410,7 @@ function fillThumbs(root) {
 /* 列表用事件委托 + 预计算下标：原来 items.map 里 indexOf 是 O(n²)，
  * 2000 首时单次渲染 120ms 以上，切歌/搜索都会卡一下。 */
 function renderLibrary() {
-  if (S.srcMode === 'net' || S.srcMode === 'kg') { renderSrcLib(); return; }
+  if (S.srcMode === 'net') { renderNet(); return; }
   const q = ($('#q').value || '').trim().toLowerCase();
   const rows = [];
   for (let i = 0; i < S.tracks.length; i++) {
@@ -1499,10 +1440,9 @@ function markCurrent() {
   const t = S.i >= 0 ? curTrack() : null;
   if (!t) { plSyncBadge(); return; }
   /* 曲库行按曲库下标定位（S.i 现在是队列下标，所以要先翻回曲库下标）；
-   * 网易云 / 酷狗的搜索列表没有下标，只能按曲目 id 找。 */
+   * 网易云的搜索/歌单列表没有下标，只能按曲目 id 找。 */
   const libIdx = S.tracks.indexOf(t);
   markedEl = (isNet(t) ? $(`#libList .item[data-ne="${t.netId}"]`) : null)
-    || (isKg(t) ? $(`#libList .item[data-kg="${esc(kgHashOf(t))}"]`) : null)
     || (libIdx >= 0 ? $(`#libList .item[data-i="${libIdx}"]`) : null);
   if (markedEl) markedEl.classList.add('on');
   if ($('#popPl').classList.contains('show') && PL.view === 'list') renderPlRows();
@@ -1979,37 +1919,23 @@ function plBind() {
  * 搜索结果不落盘，只有点过的曲目才进 S.tracks（和本地文件一起持久化）。
  */
 function setSource(mode) {
-  S.srcMode = mode === 'net' ? 'net' : mode === 'kg' ? 'kg' : 'local';
+  S.srcMode = mode === 'net' ? 'net' : 'local';
   const net = S.srcMode === 'net';
-  const kgMode = S.srcMode === 'kg';
   $$('#segSrc b').forEach(b => b.classList.toggle('on', b.dataset.s === S.srcMode));
-  $('#localActions').style.display = net || kgMode ? 'none' : 'flex';
+  $('#localActions').style.display = net ? 'none' : 'flex';
   $('#netActions').style.display = net ? 'flex' : 'none';
   $('#neNote').style.display = net ? 'block' : 'none';
-  const kgNote = $('#kgNote');
-  if (kgNote) kgNote.style.display = kgMode ? 'block' : 'none';
-  const kgAcc = $('#kgAccount');
-  if (kgAcc) kgAcc.style.display = kgMode ? 'flex' : 'none';
   if (!net) $('#neHome').classList.remove('show');
   const q = $('#q');
   q.value = '';
-  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑' : kgMode ? '搜索酷狗：曲名 / 艺人' : '搜索曲名 / 艺人 / 专辑';
+  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑' : '搜索曲名 / 艺人 / 专辑';
   if (net) {
     updateNeNote();
     if (S.ne.view !== 'coll') S.ne.view = 'home';
-    S.srcColl = null;
-    srcHomeEnsure('netease');       // 首次进来才真的打接口，之后复用缓存
-  }
-  if (kgMode) {
-    kgEnsureStatus();
-    S.kg.view = 'idle';
-    S.kg.items = [];
-    S.kg.err = '';
-    S.srcColl = null;
-    srcHomeEnsure('kugou');
+    neEnsureHome();          // 首次进来才真的打接口，之后复用缓存
   }
   renderLibrary();
-  if (net || kgMode) setTimeout(() => q.focus(), 60);
+  if (net) setTimeout(() => q.focus(), 60);
 }
 
 /* 账号状态只在这里汇总成三个值（hasCookie / loggedIn / nick），
@@ -2213,24 +2139,37 @@ const skeletonRows = n => Array.from({ length: n }, () => '<div class="sk"><i cl
 const neMsg = (html, extra = '') => `<div class="ne-msg">${html}</div>${extra}`;
 const neLoginBox = '<div class="ne-act"><button class="ghost" data-act="login">扫码登录</button></div>';
 
+function neRow(p, origin) {
+  const sub = p.special === 'like'
+    ? `我喜欢的音乐 · ${p.count} 首`
+    : origin === 'picked'
+      ? (p.playCount ? neBigNum(p.playCount) + ' 次播放' : (p.count || 0) + ' 首')
+      : (p.count || 0) + ' 首';
+  return `<div class="plrow" data-act="pl" data-id="${p.id}" data-origin="${origin}" data-name="${esc(p.name)}">
+    <div class="pth" data-cover="${esc(p.coverUrl)}"><span>${esc((p.name || '歌').slice(0, 1))}</span></div>
+    <div class="pi"><div class="pn">${esc(p.name)}</div><div class="pd">${esc(sub)}</div></div>
+    <div class="pr">›</div>
+  </div>`;
+}
+
 /* 封面是装饰：下不回来就留首字底色，不报错、不占位、不阻塞列表渲染。
  * 一次最多 4 个在飞，20 个歌单也不会同时压 20 个请求。 */
 const coverQ = [];
 let coverRun = 0;
-function fillCovers(root, source) {
+function fillCovers(root) {
   for (const el of $$('.pth[data-cover]', root)) {
     const url = el.dataset.cover;
     el.removeAttribute('data-cover');       // 只试一次，重绘不会重复排队
-    if (url) coverQ.push([el, url, el.dataset.coverSrc || source || 'netease']);
+    if (url) coverQ.push([el, url]);
   }
   pumpCovers();
 }
 function pumpCovers() {
   while (coverRun < 4 && coverQ.length) {
-    const [el, url, source] = coverQ.shift();
+    const [el, url] = coverQ.shift();
     if (!el.isConnected) continue;          // 已经被重新渲染替换掉，白请求就别发了
     coverRun++;
-    window.api.srcCover(source, url, 120)
+    window.api.neCover(url)
       .then(r => {
         if (r && r.ok && r.dataUrl && el.isConnected) {
           el.style.backgroundImage = `url("${r.dataUrl}")`;
@@ -2242,300 +2181,38 @@ function pumpCovers() {
   }
 }
 
-/* ------------------------------------------------------------------ 曲库（两音源共用一套 UI）
- * 首页结构对网易云、酷狗完全一致：①每日推荐 ②推荐歌单 ③我创建的歌单。
- * 数据由主进程 `sources.js` 归一（Section / PlaylistItem），这里只决定「每种状态画什么」：
- *   ok          → 正常列表
- *   guest       → 需要登录（给登录入口）
- *   unsupported → 上游没开放（只写原因，不给假按钮、不编数据）
- *   error       → 失败原因 + 重试
- * 所以“某一栏做不到”是可见的一行说明，而不是空白或无限转圈。
- */
-const SRC_LABEL = { netease: '网易云音乐', kugou: '酷狗音乐' };
-const SRC_TAB = { net: 'netease', kg: 'kugou' };
-
-function curSrc() { return SRC_TAB[S.srcMode] || 'local'; }
-
-function srcState(source) {
-  if (!S.srcHome[source]) S.srcHome[source] = { status: 'idle', err: '', data: null, seq: 0 };
-  return S.srcHome[source];
-}
-
-async function srcHomeEnsure(source, force = false) {
-  const st = srcState(source);
-  if (!force && (st.status === 'loading' || st.status === 'ready')) return;
-  const seq = ++st.seq;
-  st.status = 'loading';
-  st.err = '';
-  st.data = null;
-  if (curSrc() === source && !S.srcColl) renderSrcLib();
-
-  let r;
-  try { r = await window.api.srcHome(source); }
-  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
-  if (seq !== st.seq) return;              // 期间又刷新过，旧结果丢掉
-
-  if (!r || !r.ok) {
-    st.status = 'error';
-    st.err = (r && r.error && r.error.message) || '加载失败';
-    st.data = null;
-  } else {
-    st.status = 'ready';
-    st.err = '';
-    st.data = r;
-  }
-  if (curSrc() === source && !S.srcColl) renderSrcLib();
-}
-
-/* 卡片：每日推荐 / 私人FM 这种「点进去才拉曲目」的入口 */
-function srcCardHTML(item, guest) {
-  const icon = item.action === 'fm' ? ICON_FM : ICON_SUN;
-  return `<div class="rec${guest ? ' off' : ''}" data-act="card" data-card="${esc(item.action)}"
-    data-src="${esc(item.source)}" data-id="${esc(item.id)}" data-name="${esc(item.name)}">
-    <div class="ri">${icon}</div><div class="rt">${esc(item.name)}</div>
-    <div class="rd">${esc(item.sub || '')}</div></div>`;
-}
-
-/* 歌单行：与网易云原来那套 .plrow 完全同一份结构，只是多了 data-src 用来区分音源 */
-function srcPlRowHTML(item) {
-  const src = item.source || curSrc();
-  return `<div class="plrow" data-act="pl" data-src="${esc(src)}" data-id="${esc(item.id)}"
-    data-name="${esc(item.name)}" data-sub="${esc(item.sub || '')}">
-    <div class="pth" data-cover="${esc(item.coverUrl || '')}" data-cover-src="${esc(src)}"><span>${esc((item.name || '歌').slice(0, 1))}</span></div>
-    <div class="pi"><div class="pn">${esc(item.name)}</div><div class="pd">${esc(item.sub || '')}</div></div>
-    <div class="pr">›</div>
-  </div>`;
-}
-
-function srcGuestBox(source) {
-  return source === 'netease'
-    ? neLoginBox
-    : '<div class="ne-act"><button class="ghost" data-act="kglogin">导入酷狗 Cookie</button></div>';
-}
-
-function srcSectionBody(source, sec) {
-  if (sec.status === 'ok') {
-    const items = Array.isArray(sec.items) ? sec.items : [];
-    if (!items.length) return neMsg('这一栏暂时是空的。');
-    const cards = items.filter(x => x.kind === 'card');
-    const rows = items.filter(x => x.kind !== 'card');
-    const parts = [];
-    if (cards.length) {
-      parts.push('<div class="ne-recs">' + cards.map(c => srcCardHTML(c, source === 'netease' && sec.status === 'guest')).join('') + '</div>');
-    }
-    if (rows.length) parts.push(rows.map(srcPlRowHTML).join(''));
-    return parts.join('');
-  }
-  if (sec.status === 'guest') {
-    return neMsg(esc(sec.note || '登录后可用'), srcGuestBox(source));
-  }
-  if (sec.status === 'unsupported') {
-    const why = (sec.error && sec.error.message) || '上游未开放';
-    return neMsg(esc(sec.note || why) + '<br><span class="dim">原因：' + esc(why) + '</span>');
-  }
-  const msg = (sec.error && sec.error.message) || '加载失败';
-  return neMsg('加载失败：' + esc(msg),
-    '<div class="ne-act"><button class="ghost" data-act="refresh">重试</button></div>');
-}
-
-function renderSrcHome(source) {
-  const box = $('#neHome');
-  const list = $('#libList');
-  const cnt = $('#libCount');
-  const st = srcState(source);
-
-  list.innerHTML = '';            // 首页不用下面的曲目列表，清掉搜索/歌单残留
-  list.onclick = null;
-
-  if (st.status === 'loading' || st.status === 'idle') {
-    box.innerHTML = '<div class="ne-sec"><span>每日推荐</span></div>' + skeletonRows(1)
-      + '<div class="ne-sec"><span>推荐歌单</span></div>' + skeletonRows(2)
-      + '<div class="ne-sec"><span>我创建的歌单</span></div>' + skeletonRows(1);
-    cnt.textContent = SRC_LABEL[source];
-    return;
-  }
-  if (st.status === 'error') {
-    box.innerHTML = neMsg('曲库加载失败：' + esc(st.err),
-      '<div class="ne-act"><button class="ghost" data-act="refresh">重试</button></div>');
-    cnt.textContent = SRC_LABEL[source];
-    return;
-  }
-
-  const d = st.data || {};
-  const secs = d.sections || {};
-  const parts = [];
-  for (const key of ['daily', 'recommend', 'mine']) {
-    const sec = secs[key] || { title: key, status: 'error', error: { message: '缺少数据' } };
-    const n = Array.isArray(sec.items) ? sec.items.length : 0;
-    parts.push('<div class="ne-sec"><span>' + esc(sec.title) + '</span>'
-      + (sec.status === 'ok' && n ? '<em>' + n + (key === 'daily' ? ' 个入口' : ' 个') + '</em>' : '')
-      + '<button data-act="refresh">刷新</button></div>');
-    parts.push(srcSectionBody(source, sec));
-  }
-
-  box.innerHTML = parts.join('');
-  const rec = secs.recommend && secs.recommend.items;
-  cnt.textContent = rec ? rec.length + ' 个歌单' : SRC_LABEL[source];
-  fillCovers(box, source);
-}
-
-function renderSrcColl() {
-  const c = S.srcColl;
-  const box = $('#neHome');
-  const list = $('#libList');
-  const cnt = $('#libCount');
-  const fm = c.kind === 'fm';
-
-  box.innerHTML = '<button class="ne-back" data-act="back">'
-    + '<svg viewBox="0 0 16 16"><path d="M9.6 3.4L5 8l4.6 4.6"/></svg>返回曲库</button>'
-    + '<div class="ne-head"><div class="ne-title"><b>' + esc(c.name) + '</b><small>' + esc(c.sub || '') + '</small></div>'
-    + (fm ? '<button class="ne-mini" data-act="card" data-card="fm" data-src="netease" data-id="__fm__" data-name="私人FM">换一批</button>' : '')
-    + '</div>';
-
-  if (c.status === 'loading') {
-    list.innerHTML = emptyRow('正在读取…');
-    list.onclick = null;
-    cnt.textContent = SRC_LABEL[c.source];
-    return;
-  }
-  if (c.status === 'error') {
-    const auth = c.err && c.err.code === 'NE_LOGIN_REQUIRED';
-    list.innerHTML = emptyRow(auth
-      ? '登录已过期，重新扫码后再试。' + neLoginBox
-      : '读取失败：' + esc((c.err && c.err.message) || '未知原因') + '<br>返回后重新打开，或稍后再试。');
-    list.onclick = null;
-    cnt.textContent = SRC_LABEL[c.source];
-    return;
-  }
-  if (!c.tracks.length) {
-    list.innerHTML = emptyRow(fm ? '私人FM 这次没有返回曲目，点「换一批」再试。' : '这个歌单是空的。');
-    list.onclick = null;
-    cnt.textContent = SRC_LABEL[c.source];
-    return;
-  }
-
-  list.innerHTML = c.tracks.map(t => itemHTML(t, null)).join('')
-    + (c.hasMore && !fm ? '<div class="ne-more"><button class="ghost" data-act="more">加载更多</button></div>' : '');
-  fillThumbs(list);
-  cnt.textContent = `已加载 ${c.tracks.length} 首${c.hasMore ? ' · 还有更多' : ''}`;
-  list.onclick = e => {
-    const el = e.target.closest('.item');
-    if (!el) return;
-    const t = c.tracks.find(x => String(x.path) === el.dataset.path);
-    if (t) playSrcTrack(t);
-  };
-  markedEl = null;
-  markCurrent();
-}
-
-async function srcOpenColl(item) {
-  const source = item.source || curSrc();
-  const seq = ++S.srcSeq;
-  const kind = item.action === 'daily' ? 'daily' : item.action === 'fm' ? 'fm' : 'playlist';
-  S.srcColl = {
-    source, kind, id: String(item.id || ''), name: item.name || '歌单', sub: item.sub || '',
-    status: 'loading', err: null, tracks: [], page: 1, hasMore: false
-  };
-  renderSrcLib();
-
-  let r;
-  try {
-    if (kind === 'daily') r = await window.api.neDaily();
-    else if (kind === 'fm') r = await window.api.neFm(8);
-    else r = await window.api.srcPlaylist(source, S.srcColl.id, { page: 1 });
-  } catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
-  if (seq !== S.srcSeq) return;            // 期间返回/又开了别的，旧结果丢掉
-
-  if (!r || !r.ok) {
-    S.srcColl.status = 'error';
-    S.srcColl.err = (r && r.error) || { message: '读取失败' };
-    if (S.srcColl.err.code === 'NE_LOGIN_REQUIRED' && source === 'netease') {
-      /* 登录失效：顺手把首页也标成过期，否则用户会以为只是这个歌单坏了 */
-      S.ne.loggedIn = false;
-      paintNeNote();
-      const st = srcState('netease');
-      st.status = 'idle';
-      st.data = null;
-      srcHomeEnsure('netease', true);
-    }
-    renderSrcLib();
-    return;
-  }
-
-  const tracks = Array.isArray(r.tracks) ? r.tracks : (Array.isArray(r.items) ? r.items : []);
-  S.srcColl.tracks = tracks.map(t => ({ ...t, source: t.source || source }));
-  S.srcColl.page = r.page || 1;
-  S.srcColl.hasMore = !!r.hasMore;
-  S.srcColl.status = 'ready';
-  if (r.name) S.srcColl.name = r.name;
-  S.srcColl.sub = kind === 'playlist'
-    ? `${r.total || tracks.length} 首${r.hasMore ? ' · 已加载 ' + tracks.length : ''}`
-    : `${tracks.length} 首${kind === 'fm' ? ' · 每次换一批' : ' · ' + (r.day || '今天')}`;
-  renderSrcLib();
-}
-
-async function srcLoadMore() {
-  const c = S.srcColl;
-  if (!c || c.kind !== 'playlist' || !c.hasMore) return;
-  const seq = S.srcSeq;
-  const page = (c.page || 1) + 1;
-  const btn = $('#dLib .ne-more button');
-  if (btn) { btn.disabled = true; btn.textContent = '加载中…'; }
-  let r;
-  try { r = await window.api.srcPlaylist(c.source, c.id, { page }); }
-  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
-  if (seq !== S.srcSeq) return;
-  if (!r || !r.ok) {
-    if (btn) { btn.disabled = false; btn.textContent = '加载更多'; }
-    toast('加载失败：' + ((r && r.error && r.error.message) || '未知原因'));
-    return;
-  }
-  const more = (Array.isArray(r.items) ? r.items : []).map(t => ({ ...t, source: t.source || c.source }));
-  const seen = new Set(c.tracks.map(t => String(t.path)));
-  for (const t of more) if (!seen.has(String(t.path))) { seen.add(String(t.path)); c.tracks.push(t); }
-  c.page = page;
-  c.hasMore = !!r.hasMore;
-  c.sub = `${r.total || c.tracks.length} 首 · 已加载 ${c.tracks.length}`;
-  renderSrcColl();
-}
-
-function playSrcTrack(t) {
-  if (!t) return;
-  if (isKg(t)) return playKg(t);
-  return playNet(t);
-}
-
-function renderSrcLib() {
-  const source = curSrc();
-  if (source === 'local') return;
-  const searching = (source === 'netease' && S.ne.view === 'search')
-    || (source === 'kugou' && S.kg.view === 'search');
-  $('#neHome').classList.toggle('show', !searching);
-  if (searching) {
-    if (source === 'kugou') renderKgSearch();
-    else renderSearch();
-    return;
-  }
-  if (S.srcColl && S.srcColl.source === source) { renderSrcColl(); return; }
-  renderSrcHome(source);
-}
-
-/* 网易云账号面板（#neNote）与首页数据是两条线：这条只管「谁是账号」，
- * 曲库数据统一走上面的 srcHomeEnsure。保留原函数名，调用点不用改。 */
 async function neEnsureHome(force = false) {
-  /* 曲库数据统一走适配层（sources.js）：这里只保证账号文案是最新的，
-   * 然后把「曲库首页」这件事交给 srcHomeEnsure。 */
-  const st = srcState('netease');
-  const want = force || (st.status !== 'loading' && st.status !== 'ready');
-  if (!want) { paintNeNote(); return; }
-  await updateNeNote();
-  paintNeNote();
-  srcHomeEnsure('netease', force);
+  const h = S.ne.home;
+  if (!force && (h.status === 'loading' || h.status === 'ready')) return;
+  const seq = ++S.ne.homeSeq;
+  S.ne.home = { status: 'loading', err: '', data: null };
+  if (S.srcMode === 'net' && S.ne.view === 'home') renderNet();
+
+  let r;
+  try { r = await window.api.neHome(); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (seq !== S.ne.homeSeq) return;         // 期间又刷新/登录过，这次结果作废
+
+  if (!r || !r.ok) {
+    S.ne.home = { status: 'error', err: (r && r.error && r.error.message) || '加载失败', data: null };
+  } else {
+    S.ne.home = { status: 'ready', err: '', data: r };
+    S.ne.hasCookie = !!r.hasCookie;
+    S.ne.loggedIn = !!r.loggedIn;
+    S.ne.uid = r.uid || 0;
+    if (r.nickname) S.ne.nick = r.nickname;
+    paintNeNote();
+  }
+  if (S.srcMode === 'net' && S.ne.view === 'home') renderNet();
 }
 
 function renderNet() {
   if (S.srcMode !== 'net') return;
-  renderSrcLib();
+  // 顶部这块面板只在「首页 / 歌单详情」出现；搜索时让位给结果列表
+  $('#neHome').classList.toggle('show', S.ne.view !== 'search');
+  if (S.ne.view === 'coll' && S.ne.coll) return renderColl();
+  if (S.ne.view === 'search') return renderSearch();
+  return renderHome();
 }
 
 function renderSearch() {
@@ -2572,430 +2249,210 @@ function renderSearch() {
   markCurrent();
 }
 
-/* ------------------------------------------------------------------ 酷狗（免费曲）
- * 只有一条路径：搜索 → 点一首 → 播放。没有歌单/首页/专辑，是因为酷狗的移动端接口
- * 里这几类都需要登录态或额外签名；免费曲的搜索与取链已经够用，先把这条打通，
- * 登录接上之后再补歌单入口（接口位已经在 main/kugou.js 留好）。
- *
- * 可播性判据来自搜索结果本身：`pay_type === 0` 才是免费曲。付费曲照常列出
- * （用户可能已经登录过），点的时候由 kg:url 给出「需要会员」，然后按队列顺序跳过。
- */
-async function kgEnsureStatus() {
-  let st = null;
-  try { st = await window.api.kgStatus(); } catch {}
-  if (st && st.ok) S.kg.status = st;
-  paintKgNote();
-  paintKgAccount();
-}
-
-/* 账号条：未登录只显示「导入 Cookie」，登录后显示账号摘要 + 退出。
- * 所有文案都从 S.kg.status 派生，不在别处再拼第二套说法。 */
-function paintKgAccount() {
-  const box = $('#kgAccount');
-  if (!box) return;
-  const st = S.kg.status || {};
-  const who = $('#kgWho');
-  const inBtn = $('#kgLoginBtn');
-  const outBtn = $('#kgLogoutBtn');
-  if (!st.loggedIn) {
-    who.innerHTML = '未登录 · 仅能播放免费曲<small>导入浏览器里的酷狗 Cookie 后可播放账号有权限的曲目</small>';
-    if (inBtn) inBtn.textContent = '导入 Cookie';
-    if (outBtn) outBtn.style.display = 'none';
-    paintKgAuthState();
-    return;
-  }
-  const bits = [];
-  bits.push('已登录');
-  if (st.userid) bits.push('userid ' + st.userid);
-  if (st.vip) bits.push('会员');
-  else if (st.verified) bits.push('无会员权益');
-  else bits.push('未自检');
-  const when = st.checkedAt ? new Date(st.checkedAt) : null;
-  who.innerHTML = bits.join(' · ')
-    + '<small>' + esc(st.note || '')
-    + (when ? '（' + when.toTimeString().slice(0, 5) + ' 自检）' : '') + '</small>';
-  if (inBtn) inBtn.textContent = '更换 Cookie';
-  if (outBtn) outBtn.style.display = '';
-  paintKgAuthState();
-}
-
-/* ---- 设置页的酷狗登录：扫码（显式降级）+ Cookie 两种入口 ----
- *
- * 三态约定（设置页「登录状态」与扫码区共用一套文案，别处不再拼第二套）：
- *   未扫码 / 未登录 → 账号行写「未登录」，扫码区收起
- *   扫码中          → 二维码可见、state 写「请用手机酷狗扫码」，可取消
- *   已登录          → 账号行写「已登录 · userid · 会员/无权益」，扫码区收起
- *
- * 上游 qrcode 接口要 web 端签名，本版拿不到码：kgQrStart 收到 KG_QR_UNSIGNED 时
- * 不假装在轮询，直接把遮罩写成「扫码未开放」并露出「改用导入 Cookie」按钮 ——
- * 这就是需求里要求的「失败时显式降级回 Cookie 导入」。上游哪天放开（status===1
- * 且有 qrcode），这段代码不用改就会自动走轮询分支。
- */
-/* 扫码登录：酷狗自己的登录页里完成签名与轮询，主进程把二维码取出来（kugou-qr.js），
- * 这里只负责「把图贴出来 + 定时问一次状态」。任何一步失败都显式降级到「导入 Cookie」，
- * 不假装在轮询 —— 取不到码时遮罩直接写「扫码不可用」并露出降级按钮。
- */
-const KG_QR_POLL_MS = 2000;
-let kgQrTimer = 0, kgQrToken = 0, kgQrKey = '', kgQrDeadline = 0, kgQrKind = '';
-
-function paintKgAuthState() {
-  const el = $('#kgAuthState');
-  const out = $('#btnKgLogout');
-  const qr = $('#btnKgQr');
-  const st = S.kg.status || {};
-  if (el) {
-    el.textContent = st.loggedIn
-      ? '已登录' + (st.userid ? ' · ' + st.userid : '') + (st.vip ? ' · 会员' : '')
-      : '未登录';
-  }
-  if (out) out.style.display = st.loggedIn ? '' : 'none';
-  if (qr) qr.style.display = st.loggedIn ? 'none' : '';
-}
-
-function kgQrStateSet(text, kind) {
-  const el = $('#kgQrState');
-  if (!el) return;
-  el.textContent = text;
-  el.className = 'qrstate' + (kind ? ' ' + kind : '');
-  kgQrKind = kind || '';
-}
-
-function kgQrDead(dead, maskText) {
-  const box = $('#kgQrBox');
-  if (box) box.classList.toggle('dead', !!dead);
-  const mask = $('#kgQrMask');
-  if (mask) mask.textContent = maskText == null ? '' : maskText;
-}
-
-function kgQrStop(hide) {
-  clearTimeout(kgQrTimer);
-  kgQrTimer = 0;
-  kgQrToken++;                 // 让在途的轮询结果失效
-  if (kgQrKey) {
-    /* 主进程那边留着一个隐藏窗口，结束时要一起关掉，否则它会一直轮询登录页 */
-    try { window.api.kgQrCancel(); } catch (e) { /* 关窗失败不影响界面复位 */ }
-  }
-  kgQrKey = '';
-  kgQrDeadline = 0;
-  if (hide) {
-    const wrap = $('#kgQrWrap');
-    if (wrap) wrap.classList.remove('show');
-    const shot = $('#kgQrShot');
-    if (shot) shot.innerHTML = '';
-    kgQrDead(false, '');
-  }
-}
-
-async function kgQrStart() {
-  kgQrStop(false);
-  const token = ++kgQrToken;
-  const wrap = $('#kgQrWrap');
-  if (wrap) wrap.classList.add('show');
-  kgQrDead(false, '');
-  const shot = $('#kgQrShot');
-  if (shot) shot.innerHTML = '<div class="qrmask inline">正在取码…</div>';
-  kgQrStateSet('正在获取二维码…');
-
-  let r;
-  try { r = await window.api.kgQr(); }
-  catch (e) { r = { ok: false, error: { code: '', message: String((e && e.message) || e) } }; }
-  if (token !== kgQrToken) return;
-  if (!r || !r.ok) {
-    const msg = (r && r.error && r.error.message) || '二维码获取失败';
-    if (shot) shot.innerHTML = '';
-    kgQrDead(true, '扫码不可用');
-    kgQrStateSet(msg + '（可直接用「导入 Cookie」登录）', 'err');
-    return;
-  }
-  const qr = r.qr || {};
-  kgQrKey = String(qr.key || '');
-  kgQrDeadline = Number(qr.expiresAt) || (Date.now() + 5 * 60 * 1000);
-  if (shot) shot.innerHTML = qr.img ? '<img src="' + esc(qr.img) + '" alt="">' : '';
-  kgQrStateSet('请用手机酷狗扫码登录');
-  kgQrTimer = setTimeout(() => kgQrPoll(token), 800);
-}
-
-async function kgQrPoll(token) {
-  if (token !== kgQrToken || !kgQrKey) return;
-  if (Date.now() > kgQrDeadline) {
-    kgQrDead(true, '已超时');
-    kgQrStateSet('二维码已超时，请重新获取', 'err');
-    kgQrKey = '';
-    return;
-  }
-  let r;
-  try { r = await window.api.kgQrPoll(kgQrKey); }
-  catch (e) { r = { ok: false, error: { code: '', message: String((e && e.message) || e) } }; }
-  if (token !== kgQrToken) return;
-  if (!r || !r.ok) {
-    kgQrDead(true, '扫码已结束');
-    kgQrStateSet((r && r.error && r.error.message) || '扫码状态查询失败', 'err');
-    kgQrKey = '';
-    return;
-  }
-  /* confirmed = 登录页已经把 token 写进 cookie；拿它走「导入 Cookie」同一条保存路径 */
-  if (r.state === 'confirmed' && r.cookie) {
-    kgQrKey = '';
-    kgQrStateSet('已确认，正在保存登录状态…');
-    let saved = null;
-    try { saved = await window.api.kgLogin(r.cookie); }
-    catch (e) { saved = { ok: false, error: { message: String((e && e.message) || e) } }; }
-    if (token !== kgQrToken) return;
-    if (saved && saved.ok) {
-      kgQrStop(true);
-      S.kg.status = saved.auth || null;
-      paintKgAccount();
-      paintKgAuthState();
-      paintKgNote();
-      renderLibrary();
-      toast('已登录酷狗 · ' + (saved.auth && saved.auth.vip ? '会员曲可播放' : '账号没有会员权益'));
-      return;
-    }
-    kgQrDead(true, '保存失败');
-    kgQrStateSet((saved && saved.error && saved.error.message) || '登录状态保存失败', 'err');
-    return;
-  }
-  /* 二维码会自己刷新：每次把新图换上去，用户不用手动点刷新 */
-  if (r.img) {
-    const shot = $('#kgQrShot');
-    const img = shot && shot.querySelector('img');
-    if (img && img.getAttribute('src') !== r.img) img.setAttribute('src', r.img);
-  }
-  if (r.state === 'scanned') {
-    kgQrStateSet('已扫码，请在手机上确认');
-  } else if (r.state === 'expired') {
-    /* 实测：登录页的码约 5 分钟有效，到点后页面自己写「二维码已失效 请点击刷新」，
-     * 而且不会换图。所以这里不是「已刷新」，而是这张码已经废了 —— 盖住它、停掉轮询，
-     * 让用户点「重试扫码」重开一次会话换新码（继续拿旧码去扫只会一直没反应）。 */
-    kgQrKey = '';
-    clearTimeout(kgQrTimer);
-    kgQrTimer = 0;
-    try { window.api.kgQrCancel(); } catch (e) { /* 关窗失败不影响界面 */ }
-    kgQrDead(true, '二维码已失效');
-    kgQrStateSet('二维码已失效（约 5 分钟有效）· 点「重试扫码」换一张', 'err');
-    return;
-  } else {
-    /* 回到等待态时把上一次的错误样式清掉，避免提示一直挂在那儿 */
-    if (kgQrKind === 'err') kgQrStateSet('请用手机酷狗扫码登录');
-  }
-  kgQrTimer = setTimeout(() => kgQrPoll(token), KG_QR_POLL_MS);
-}
-
-function openKgAuth(anchor) {
-  const pop = $('#popKgAuth');
-  const ta = $('#kgCookie');
-  const msg = $('#kgMsg');
-  if (!pop) return;
-  if (ta) ta.value = '';            // 每次都从空开始：不在 DOM 里留上一次的凭证
-  if (msg) { msg.textContent = ''; msg.classList.remove('err'); }
-  /* 从设置页进来时 #kgLoginBtn 在曲库抽屉里（不可见），用它当锚点会贴到屏幕外，
-   * 所以让调用方指定锚点；曲库里点「导入 Cookie」时仍默认锚在账号条上。 */
-  openPop(pop, anchor || $('#kgLoginBtn') || $('#btnKgCookie'));
-  setTimeout(() => ta && ta.focus(), 60);
-}
-
-async function kgSaveAuth() {
-  const ta = $('#kgCookie');
-  const msg = $('#kgMsg');
-  const ok = $('#kgAuthSave');
-  const raw = ta ? String(ta.value || '').trim() : '';
-  const setMsg = (text, err) => {
-    if (!msg) return;
-    msg.textContent = text;
-    msg.classList.toggle('err', !!err);
-  };
-  if (!raw) { setMsg('先把 Cookie 粘进来', true); return; }
-  if (ok) { ok.disabled = true; ok.textContent = '验证中…'; }
-  setMsg('正在保存并验证…', false);
-  let r;
-  try { r = await window.api.kgLogin(raw); }
-  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
-  if (ok) { ok.disabled = false; ok.textContent = '保存并验证'; }
-  if (!r || !r.ok) {
-    const code = (r && r.error && r.error.code) || '';
-    const text = code === 'KG_AUTH_NO_IDENTITY' ? '这份 Cookie 里没有 token / userid，可能复制的是未登录页面'
-      : (r && r.error && r.error.message) || '保存失败';
-    setMsg(text, true);
-    return;
-  }
-  /* 保存成功：清空输入框里的明文，用主进程回的摘要刷新状态 */
-  if (ta) ta.value = '';
-  S.kg.status = Object.assign({ provider: 'kugou' }, r.auth || {});
-  paintKgNote();
-  paintKgAccount();
-  closePops();
-  const check = r.check || {};
-  if (check.vip) toast('已登录酷狗 · 会员曲可播放');
-  else if (check.reason === 'no-rights') toast('已登录酷狗 · 该账号没有会员权益，会员曲会跳过');
-  else toast('已保存酷狗凭证 · 未验证通过（' + (check.error || check.reason || '网络问题') + '）');
-  renderLibrary();
-}
-
-async function kgLogout() {
-  let r;
-  try { r = await window.api.kgLogout(); } catch (e) { r = null; }
-  S.kg.status = Object.assign({ provider: 'kugou', loggedIn: false }, (r && r.auth) || {});
-  paintKgNote();
-  paintKgAccount();
-  toast('已退出酷狗账号');
-  renderLibrary();
-}
-
-function paintKgNote() {
-  const el = $('#kgNote');
-  if (!el) return;
-  const st = S.kg.status || {};
-  el.textContent = st.loggedIn
-    ? '酷狗：' + (st.vip ? '会员曲可播' : '未检测到会员权益') + ' · 免费曲固定 128k mp3'
-    : '酷狗：未登录时只能播放免费曲（128k mp3）· 导入 Cookie 后可播放会员曲';
-}
-
-async function kgSearch() {
-  const q = ($('#q').value || '').trim();
-  const seq = ++S.kg.seq;
-  if (!q) {
-    S.kg.items = [];
-    S.kg.busy = false;
-    S.kg.err = '';
-    S.kg.view = 'idle';
-    renderKg();
-    return;
-  }
-  S.kg.view = 'search';
-  S.kg.busy = true;
-  S.kg.err = '';
-  renderKg();
-
-  let r;
-  try { r = await window.api.kgSearch(q, 40); }
-  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
-  if (seq !== S.kg.seq) return;         // 又有新输入，这次结果作废
-  S.kg.busy = false;
-  if (r && r.ok) S.kg.items = Array.isArray(r.tracks) ? r.tracks : [];
-  else {
-    S.kg.items = [];
-    S.kg.err = (r && r.error && r.error.message) || '搜索失败';
-  }
-  renderKg();
-}
-
-/* 酷狗标签页的入口：搜索态交给 renderKgSearch，其余统一走曲库首页。
- * 这样两家共用同一套「每日推荐 / 推荐歌单 / 我创建的歌单」结构。 */
-function renderKg() {
-  if (S.srcMode !== 'kg') return;
-  renderSrcLib();
-}
-
-/* 酷狗「搜索中 / 搜索失败 / 空结果 / 结果列表」这套画法保留原样，
- * 只是从 renderKg 里拆出来：非搜索态现在统一走 renderSrcLib（曲库首页）。 */
-function renderKgSearch() {
+function renderHome() {
+  const box = $('#neHome');
   const list = $('#libList');
-  const count = $('#libCount');
-  if (S.kg.busy) {
-    list.innerHTML = emptyRow('正在搜索酷狗…');
-    count.textContent = '搜索中…';
-    list.onclick = null;
-    return;
-  }
-  if (S.kg.err) {
-    list.innerHTML = emptyRow('搜索失败：' + esc(S.kg.err));
-    count.textContent = '搜索失败';
-    list.onclick = null;
+  const cnt = $('#libCount');
+  const h = S.ne.home;
+  const d = h.data;
+  const loading = h.status === 'loading' || h.status === 'idle';
+  const guest = !!d && !d.loggedIn;
+  const expired = guest && !!d.hasCookie;
+
+  list.innerHTML = '';          // 首页不使用下面的曲目列表，清掉搜索/歌单残留
+  list.onclick = null;
+
+  // 整页失败（账号接口都没通）：只留一条可读原因 + 重试，不要半截界面
+  if (h.status === 'error') {
+    box.innerHTML = neMsg('歌单加载失败：' + esc(h.err), '<div class="ne-act"><button class="ghost" data-act="refresh">重试</button></div>');
+    cnt.textContent = '网易云';
     return;
   }
 
-  if (!S.kg.items.length) {
-    list.innerHTML = emptyRow('没有找到匹配的曲目。<br>换个关键词试试。');
-    count.textContent = '无结果';
+  const parts = [];
+
+  // 1) 两个推荐入口：卡片常驻，未登录只是不可点
+  parts.push('<div class="ne-sec"><span>推荐</span><em>' + (guest ? '登录后可用' : '') + '</em></div>');
+  parts.push('<div class="ne-recs">'
+    + '<div class="rec' + (guest ? ' off' : '') + '" data-act="daily">'
+    + '<div class="ri">' + ICON_SUN + '</div><div class="rt">每日推荐</div>'
+    + '<div class="rd">' + (guest ? '扫码登录后每天更新' : '按你的口味生成 · 每天更新') + '</div></div>'
+    + '<div class="rec' + (guest ? ' off' : '') + '" data-act="fm">'
+    + '<div class="ri">' + ICON_FM + '</div><div class="rt">私人FM</div>'
+    + '<div class="rd">' + (guest ? '扫码登录后可用' : '无限流 · 每次加载一批') + '</div></div>'
+    + '</div>');
+
+  // 2) 推荐歌单：公开接口，未登录也能看，所以它单独成败
+  const picked = d && d.picked && d.picked.list;
+  parts.push('<div class="ne-sec"><span>推荐歌单</span>' + (picked && picked.length ? '<em>' + picked.length + ' 个</em>' : '') + '</div>');
+  if (loading) parts.push(skeletonRows(2));
+  else if (picked && picked.length) parts.push(picked.map(p => neRow(p, 'picked')).join(''));
+  else if (d && d.pickedError) parts.push(neMsg('推荐歌单加载失败：' + esc(d.pickedError.message)));
+  else if (d) parts.push(neMsg('暂时没有推荐歌单。'));
+
+  // 3) 我创建的歌单
+  const mineList = d && d.mine && d.mine.list;
+  parts.push('<div class="ne-sec"><span>我创建的歌单</span>'
+    + (mineList ? '<em>' + mineList.length + ' 个</em>' : '')
+    + '<button data-act="refresh">刷新</button></div>');
+
+  if (loading) {
+    parts.push(skeletonRows(3));
+  } else if (guest) {
+    parts.push(neMsg(
+      expired
+        ? '登录已过期，重新扫码后加载你的歌单。'
+        : '未登录。扫码后显示这个账号下你创建的歌单、每日推荐和私人FM。',
+      neLoginBox
+    ));
+  } else if (d.mineError) {
+    const e = d.mineError;
+    const auth = e.code === 'NE_LOGIN_REQUIRED';
+    parts.push(neMsg(
+      auth ? '登录已过期，重新扫码后加载你的歌单。' : '你的歌单加载失败：' + esc(e.message),
+      auth ? neLoginBox : '<div class="ne-act"><button class="ghost" data-act="refresh">重试</button></div>'
+    ));
+  } else if (mineList && mineList.length) {
+    parts.push(mineList.map(p => neRow(p, p.special === 'like' ? 'like' : 'mine')).join(''));
+    if (d.mine.subscribed) parts.push('<div class="ne-foot">已隐藏 ' + d.mine.subscribed + ' 个收藏的歌单 · 这里只列你自己创建的</div>');
+  } else {
+    parts.push(neMsg('这个账号还没有创建歌单，可以在网易云 App 里新建后再刷新。'));
+  }
+
+  box.innerHTML = parts.join('');
+  cnt.textContent = mineList ? mineList.length + ' 个歌单' : '网易云';
+  fillCovers(box);
+}
+
+function renderColl() {
+  const c = S.ne.coll;
+  const box = $('#neHome');
+  const list = $('#libList');
+  const cnt = $('#libCount');
+
+  box.innerHTML = '<button class="ne-back" data-act="back">'
+    + '<svg viewBox="0 0 16 16"><path d="M9.6 3.4L5 8l4.6 4.6"/></svg>返回歌单</button>'
+    + '<div class="ne-head"><div class="ne-title"><b>' + esc(c.name) + '</b><small>' + esc(c.sub || '') + '</small></div>'
+    + (c.kind === 'fm' ? '<button class="ne-mini" data-act="fm">换一批</button>' : '')
+    + '</div>';
+
+  if (c.status === 'loading') {
+    list.innerHTML = emptyRow('正在读取…');
     list.onclick = null;
+    cnt.textContent = '网易云';
     return;
   }
-  list.innerHTML = S.kg.items.map(t => itemHTML(t, null)).join('');
+  if (c.status === 'error') {
+    const auth = c.err && c.err.code === 'NE_LOGIN_REQUIRED';
+    list.innerHTML = emptyRow(auth
+      ? '登录已过期，重新扫码后再试。' + neLoginBox
+      : '读取失败：' + esc((c.err && c.err.message) || '未知原因') + '<br>返回后重新打开，或稍后再试。');
+    list.onclick = null;
+    cnt.textContent = '网易云';
+    return;
+  }
+  if (!c.tracks.length) {
+    list.innerHTML = emptyRow(c.kind === 'fm' ? '私人FM 这次没有返回曲目，点「换一批」再试。' : '这个歌单是空的。');
+    list.onclick = null;
+    cnt.textContent = '网易云';
+    return;
+  }
+
+  list.innerHTML = c.tracks.map(t => itemHTML(t, null)).join('');
   fillThumbs(list);
-  /* 可播条数：未登录只有免费曲；登录后所有曲目都「可能要得动」，
-   * 真实能不能播要到点播时由取链接口回答，这里不假装精确。 */
-  const st = S.kg.status || {};
-  const free = S.kg.items.filter(t => !t.vip).length;
-  count.textContent = st.loggedIn
-    ? `搜索到 ${S.kg.items.length} 条 · 免费 ${free} · 会员 ${S.kg.items.length - free}`
-    : `搜索到 ${S.kg.items.length} 条 · 可播 ${free} 条`;
+  cnt.textContent = '点击播放并加入曲库';    // 数量已经在标题下写了，这里不再重复
   list.onclick = e => {
     const el = e.target.closest('.item');
     if (!el) return;
-    const t = S.kg.items.find(x => x.kgHash === el.dataset.kg);
-    if (t) playKg(t);
+    const t = c.tracks.find(x => String(x.netId) === el.dataset.ne);
+    if (t) playNet(t);
   };
   markedEl = null;
   markCurrent();
 }
 
-/* 与 playNet 同一套动作：进曲库（这样封面/歌词/重启后都还认得）→ 交给队列播。
- * playIndex 收到曲库下标后会转成 playLibRow：不在播放列表里就插到当前曲之后。 */
-async function playKg(t) {
-  if (!t) return;
-  const st = S.kg.status || {};
-  if (t.vip) {
-    toast(st.loggedIn
-      ? `「${t.title}」是会员曲，正在用账号权限取链…`
-      : `「${t.title}」需要酷狗会员：导入登录 Cookie 后可播放`);
+const NE_ORIGIN = { like: '我喜欢的音乐', picked: '推荐歌单', mine: '我创建的歌单' };
+
+async function neOpenColl(kind, id, name, origin) {
+  const seq = ++S.ne.collSeq;
+  S.ne.view = 'coll';
+  S.ne.coll = {
+    kind, id,
+    name: name || (kind === 'daily' ? '每日推荐' : kind === 'fm' ? '私人FM' : '歌单'),
+    sub: kind === 'playlist' ? (NE_ORIGIN[origin] || '歌单') : '',
+    status: 'loading', err: null, tracks: []
+  };
+  renderNet();
+
+  let r;
+  try {
+    if (kind === 'daily') r = await window.api.neDaily();
+    else if (kind === 'fm') r = await window.api.neFm(8);
+    else r = await window.api.nePlaylist(id);
+  } catch (e) { r = { ok: false, error: { code: 'NE_ERROR', message: String((e && e.message) || e) } }; }
+  if (seq !== S.ne.collSeq) return;          // 期间返回/又开了别的，旧结果丢掉
+
+  if (!r || !r.ok) {
+    S.ne.coll.status = 'error';
+    S.ne.coll.err = (r && r.error) || { code: 'NE_ERROR', message: '读取失败' };
+    if (S.ne.coll.err.code === 'NE_LOGIN_REQUIRED') {
+      // 登录失效：顺手把首页也标成过期，否则用户会以为只是这个歌单坏了
+      S.ne.loggedIn = false;
+      paintNeNote();
+      S.ne.home = { status: 'idle', err: '', data: null };
+      neEnsureHome(true);
+    }
+    renderNet();
+    return;
   }
-  const fresh = !S.tracks.some(x => x.path === t.path);
-  const i = addTrack(t);
-  if (i < 0) return;
-  S.libDirty = true;
-  persistLibrary();
-  if (fresh) toast(`已加入曲库 · ${t.title}`);
-  await playIndex(i);
+
+  const tracks = r.tracks || [];
+  S.ne.coll.tracks = tracks;
+  S.ne.coll.status = 'ready';
+  if (kind === 'playlist') {
+    S.ne.coll.name = r.name || S.ne.coll.name;
+    S.ne.coll.id = r.id || id;
+    S.ne.coll.sub = `${r.count || tracks.length} 首 · ${NE_ORIGIN[origin] || '歌单'}`;
+  } else if (kind === 'daily') {
+    S.ne.coll.sub = `${tracks.length} 首 · ${r.day || '今天'}`;
+  } else {
+    S.ne.coll.sub = `${tracks.length} 首 · 每次换一批`;
+  }
+  renderNet();
 }
 
-/* 老的 renderHome / renderColl / neOpenColl 已由 renderSrcHome / renderSrcColl /
- * srcOpenColl 统一接管（两音源同一套 UI）。保留这些名字的空壳没有意义，
- * 直接删掉，避免以后有人改到死代码。 */
-
+/* 抽屉里所有带 data-act 的元素都从这里派发（首页与列表容器是兄弟节点，
+ * 必须在共同父级上委托，否则歌单详情里的按钮会收不到点击）。 */
 function onNeAction(e) {
   const el = e.target.closest('[data-act]');
   if (!el || !$('#dLib').contains(el)) return;
   const act = el.dataset.act;
-  const source = el.dataset.src || curSrc();
 
   if (act === 'login') { neGotoLogin(); return; }
-  if (act === 'kglogin') { openKgAuth($('#kgLoginBtn')); return; }
-  if (act === 'refresh') { srcHomeEnsure(source, true); return; }
-  if (act === 'more') { srcLoadMore(); return; }
+  if (act === 'refresh') { neEnsureHome(true); return; }
   if (act === 'back') {
-    S.srcSeq++;
-    S.srcColl = null;
-    if (source === 'netease') { S.ne.view = 'home'; S.ne.coll = null; }
-    else { S.kg.view = 'idle'; }
-    renderSrcLib();
+    S.ne.collSeq++;
+    S.ne.coll = null;
+    S.ne.view = 'home';
+    neEnsureHome();
+    renderNet();
     return;
   }
-  /* 每日推荐 / 私人FM 是卡片：未登录时先引导登录，登录了才真去拉曲目 */
-  if (act === 'card') {
-    const card = el.dataset.card;
-    if (card === 'daily' || card === 'fm') {
-      const st = srcState('netease');
-      if (!(st.data && st.data.loggedIn) && source === 'netease') {
-        toast('扫码登录后才能用' + (card === 'daily' ? '每日推荐' : '私人FM'));
-        neGotoLogin();
-        return;
-      }
-      if (card === 'fm' && S.srcColl && S.srcColl.kind === 'fm') {
-        srcOpenColl({ source: 'netease', action: 'fm', id: '__fm__', name: '私人FM' });
-        return;
-      }
-      srcOpenColl({
-        source: 'netease', action: card, id: card === 'daily' ? '__daily__' : '__fm__',
-        name: card === 'daily' ? '每日推荐' : '私人FM'
-      });
+  if (act === 'daily' || act === 'fm') {
+    const d = S.ne.home.data;
+    if (!d) { neEnsureHome(true); return; }            // 还没拿到数据（或刚好失败）
+    if (!d.loggedIn) {
+      toast('扫码登录后才能用' + (act === 'daily' ? '每日推荐' : '私人FM'));
+      neGotoLogin();
       return;
     }
+    neOpenColl(act, 0, act === 'daily' ? '每日推荐' : '私人FM', '');
     return;
   }
   if (act === 'pl') {
-    const id = String(el.dataset.id || '');
+    const id = Number(el.dataset.id);
     if (!id) return;
-    srcOpenColl({ source, id, name: el.dataset.name || '', sub: el.dataset.sub || '' });
+    neOpenColl('playlist', id, el.dataset.name || '', el.dataset.origin || 'mine');
   }
 }
 
@@ -3100,7 +2557,7 @@ function setLyrHint(k, ly) {
   const el = $('#lyrEmpty');
   if (!el) return;
   const note = (ly && ly.note) || '';
-  el.textContent = note || (isNet(k) || isKg(k) ? '该曲目暂无歌词' : '暂无歌词 · 同目录放置同名 .lrc 即可');
+  el.textContent = note || (isNet(k) ? '该曲目暂无歌词' : '暂无歌词 · 同目录放置同名 .lrc 即可');
 }
 
 /* 「开始播放」同样要有上限。
@@ -3141,7 +2598,6 @@ async function playAt(qi, opts) {
    * 「音频还在放上一首、状态栏已经指向新歌」的错位。现在失败时
    * 当前曲目与播放状态原样保留，只弹一条提示（必要时自动跳下一首）。 */
   let info = null;
-  const kg = isKg(k);
   if (net) {
     try { info = await window.api.neUrl(netIdOf(k), curQuality()); }
     catch (e) { info = { ok: false, error: { code: 'NE_NET', message: String((e && e.message) || e) } }; }
@@ -3162,29 +2618,6 @@ async function playAt(qi, opts) {
       } else if (S.i === qi) {
         paintMeta();          // 只有本来就停在这首上，才需要刷新它的状态显示
       }
-      return;
-    }
-    k.unavailable = '';
-  } else if (kg) {
-    /* 酷狗：取链预检同样要在改状态之前做 —— 会员曲拿不到地址时，
-     * 让上一首继续放着、只提示并跳过，而不是先把界面切过去再失败。 */
-    try { info = await window.api.kgUrl(kgHashOf(k)); }
-    catch (e) { info = { ok: false, error: { code: 'KG_NET', message: String((e && e.message) || e) } }; }
-    if (seq !== loadSeq) return;
-    if (!info || !info.ok) {
-      const code = (info && info.error && info.error.code) || '';
-      const signedIn = !!(S.kg.status && S.kg.status.loggedIn);
-      const reason = code === 'KG_PAID' ? (signedIn ? '账号无该曲权限' : '需登录酷狗会员')
-        : code === 'KG_UNAVAILABLE' ? '该曲目暂不可播'
-          : code === 'KG_TIMEOUT' ? '网络超时' : '暂时无法播放';
-      k.unavailable = reason;
-      if (S.settings.playMode === 'shuffle') markShufFail(k.path);
-      toast(`无法播放：${k.title}（${reason}）`);
-      if (S.q.length > 1 && errStreak < 3) {
-        errStreak++;
-        const ni = stepIndex(1, qi);
-        if (ni >= 0) playAt(ni);
-      } else if (S.i === qi) paintMeta();
       return;
     }
     k.unavailable = '';
@@ -3211,14 +2644,6 @@ async function playAt(qi, opts) {
     if (typeof info.lossless === 'boolean') k.lossless = info.lossless;
     k.level = info.level || '';
     k.downgraded = !!info.downgraded;
-    S.libDirty = true;
-    paintMeta();
-  } else if (kg) {
-    /* 酷狗免费曲只有 128k mp3，这里把真实码率写回曲目，「实测」那一栏就不是空的 */
-    if (info.codec) k.codec = String(info.codec).toLowerCase();
-    if (info.bitrate) k.bitrate = info.bitrate;
-    if (info.size) k.size = info.size;
-    k.lossless = false;
     S.libDirty = true;
     paintMeta();
   }
@@ -3271,9 +2696,7 @@ async function playAt(qi, opts) {
   // 封面 + 主色（每步都要确认自己还是"当前"的那次请求）
   try {
     let art = null;
-    if (net || isKg(k)) {
-      /* 网易云与酷狗都走 loadArt：远程封面，取不到就降级成中性色 + 占位文案。
-       * 酷狗没有本地文件可解析，不能落到下面 trackDetail 那条分支。 */
+    if (net) {
       art = await loadArt(k);
     } else {
       const detail = await window.api.trackDetail(k.path);
@@ -3869,9 +3292,6 @@ function bind() {
         return;
       }
       qTimer = setTimeout(neSearch, 380);
-    } else if (S.srcMode === 'kg') {
-      // 酷狗也是网络搜索，同样 380ms 防抖
-      qTimer = setTimeout(kgSearch, 380);
     } else {
       qTimer = setTimeout(renderLibrary, 110);
     }
@@ -3880,9 +3300,7 @@ function bind() {
     if (e.key !== 'Enter') return;
     e.preventDefault();
     clearTimeout(qTimer);
-    if (S.srcMode === 'net') neSearch();
-    else if (S.srcMode === 'kg') kgSearch();
-    else renderLibrary();
+    if (S.srcMode === 'net') neSearch(); else renderLibrary();
   };
 
   // 抽屉里所有 data-act（扫码登录 / 刷新 / 进歌单 / 返回）统一委托到抽屉根节点
@@ -3909,30 +3327,6 @@ function bind() {
   $('#btnPrev').onclick = prev;
 
   $('#btnMode').onclick = cycleMode;
-
-  // 酷狗登录（导入 Cookie）
-  const kgIn = $('#kgLoginBtn');
-  if (kgIn) kgIn.onclick = e => { e.stopPropagation(); openKgAuth(kgIn); };
-  const kgOut = $('#kgLogoutBtn');
-  if (kgOut) kgOut.onclick = e => { e.stopPropagation(); kgLogout(); };
-  const kgSave = $('#kgAuthSave');
-  if (kgSave) kgSave.onclick = () => kgSaveAuth();
-  const kgCancel = $('#kgAuthCancel');
-  if (kgCancel) kgCancel.onclick = () => closePops();
-
-  /* 设置页的酷狗登录：扫码（不可用时显式降级）与 Cookie 两条入口都在这 */
-  const kgQrBtn = $('#btnKgQr');
-  if (kgQrBtn) kgQrBtn.onclick = () => kgQrStart();
-  const kgQrRetry = $('#btnKgQrRetry');
-  if (kgQrRetry) kgQrRetry.onclick = () => kgQrStart();
-  /* 这两个按钮会开弹层：必须 stopPropagation，否则同一次点击冒泡到 document，
-   * 全局「点 .pop 外面就关弹层」立刻把它关掉（表现为点了没反应）。 */
-  const kgQrCookie = $('#btnKgQrCookie');
-  if (kgQrCookie) kgQrCookie.onclick = e => { e.stopPropagation(); kgQrStop(true); openKgAuth($('#btnKgCookie')); };
-  const kgCookieBtn = $('#btnKgCookie');
-  if (kgCookieBtn) kgCookieBtn.onclick = e => { e.stopPropagation(); openKgAuth(kgCookieBtn); };
-  const kgSetOut = $('#btnKgLogout');
-  if (kgSetOut) kgSetOut.onclick = () => kgLogout();
 
   // 弹层
   $('#btnVol').onclick = e => { e.stopPropagation(); openPop($('#popVol'), $('#btnVol')); };
@@ -4252,8 +3646,6 @@ function applyTransVisibility() {
   setSource('local');
   // 上次扫过码的话，开机就把歌单在后台取回来：等用户点开「网易云」时已经是现成的
   updateNeNote().then(() => { if (S.ne.loggedIn) neEnsureHome(); }).catch(() => {});
-  /* 酷狗账号状态也要在启动时拉一次：设置页的「登录状态」不能等用户点进曲库才有值 */
-  kgEnsureStatus().catch(() => {});
   setAccent(NEUTRAL, false);
   applyTheme();
   measureScrub();
