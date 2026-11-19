@@ -43,17 +43,27 @@ const S = {
     homeSeq: 0,
     coll: null,                                      // { kind, id, name, sub, status, err, tracks }
     collSeq: 0
+  },
+  /* 酷狗：只有「搜索免费曲」一条路径，没有歌单/首页，所以状态比网易云薄得多。
+   * stub 表示登录还没接（接口留了位置），界面上要说清楚，别让人以为登录坏了。 */
+  kg: {
+    items: [], busy: false, err: '', seq: 0,
+    status: null,                    // { loggedIn, hasCookie, stub, note }
+    view: 'idle'                     // idle / search
   }
 };
 
 /* ------------------------------------------------------------------ 音源 */
 /*
- * 网易云曲目的 path 是 `ne:<id>`，与本地路径共用同一个唯一键空间：
+ * 网易云曲目的 path 是 `ne:<id>`、酷狗是 `kg:<hash>`，与本地路径共用同一个唯一键空间：
  * 去重、封面缓存、排序后重定位、写盘全都沿用原有逻辑，不需要到处加 source 分支。
  */
 const NET_PREFIX = 'ne:';
 const isNet = k => !!k && k.source === 'netease';
 const netIdOf = k => (isNet(k) ? Number(k.netId || String(k.path).slice(NET_PREFIX.length)) : 0);
+const KG_PREFIX = 'kg:';
+const isKg = k => !!k && k.source === 'kugou';
+const kgHashOf = k => (isKg(k) ? String(k.kgHash || String(k.path).slice(KG_PREFIX.length)) : '');
 
 /* ------------------------------------------------------------------ 播放队列
  * 播放列表是唯一播放源：S.q 是 settings.playlist 的运行时投影，等长同序。
@@ -103,6 +113,22 @@ function rebuildQueue(keep) {
  * 以前它们被当成坏行交给 skipDead 按列表顺序往后找，随机播放就会老跳回那两三首可播的邻居。 */
 function synthNetTrack(item) {
   const id = String((item && item.id) || '');
+  if (id.startsWith(KG_PREFIX)) {
+    /* 酷狗同理：队列里的 kg:<hash> 不一定进过曲库（搜索后直接播），按 hash 现造一行。
+     * 码率等信息要等 kg:url 预检回来才知道，这里先留空。 */
+    const hash = id.slice(KG_PREFIX.length).toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(hash)) return null;
+    return {
+      path: id,
+      source: 'kugou',
+      kgHash: hash,
+      title: item.title || '',
+      artist: item.artist || '',
+      album: '',
+      duration: Number(item.duration) || 0,
+      codec: 'mp3', bitrate: 0, lossless: false, coverUrl: '', vip: !!item.vip
+    };
+  }
   if (!id.startsWith(NET_PREFIX)) return null;
   const netId = Number(id.slice(NET_PREFIX.length));
   if (!netId) return null;
@@ -449,6 +475,19 @@ async function loadArt(k) {
   if (!k) return null;
   const hit = getCover(k.path);
   if (hit) return hit;
+  /* 酷狗：搜索接口不带封面，主进程按 hash 从 playInfo 取（含专辑名那张）。
+   * 失败同样按 COVER_FAIL_TTL 记一笔，别在切歌时反复打接口。 */
+  if (isKg(k)) {
+    const at = coverFail.get(k.path);
+    if (at && Date.now() - at < COVER_FAIL_TTL) return null;
+    let r;
+    try { r = await window.api.kgCover(kgHashOf(k), 500); }
+    catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+    if (r && r.ok && r.dataUrl) { setCover(k.path, r.dataUrl); k.coverError = ''; return r.dataUrl; }
+    coverFail.set(k.path, Date.now());
+    k.coverError = (r && r.error && r.error.message) || '封面加载失败';
+    return null;
+  }
   if (!isNet(k)) return null;
 
   if (!k.coverUrl) {
@@ -1100,9 +1139,9 @@ function paintMeta() {
   $('#npT').textContent = k.title || '未知曲目';
   $('#npA').textContent = [k.artist, k.album].filter(Boolean).join(' · ') || '未知艺人';
 
-  if (isNet(k)) {
+  if (isNet(k) || isKg(k)) {
     const bits = [];
-    if (k.codec) bits.push(k.codec);
+    if (k.codec) bits.push(String(k.codec).toUpperCase());
     if (k.bitrate) bits.push(`${Math.round(k.bitrate / 1000)}kbps`);
     if (k.lossless) bits.push('无损');
     bits.push(k.duration ? fmt(k.duration) : '时长未知');
@@ -1124,7 +1163,7 @@ function paintMeta() {
     ? '解析失败'
     : k.unavailable
       ? '不可播放'
-      : k.lossless ? `${k.codec} 无损` : k.codec || (isNet(k) ? '网易云' : '音频'));
+      : k.lossless ? `${k.codec} 无损` : k.codec || (isNet(k) ? '网易云' : isKg(k) ? '酷狗' : '音频'));
 
   const cov = getCover(k.path);
   if (cov) {
@@ -1174,12 +1213,17 @@ function renderFmtPopover() {
     return;
   }
 
-  const rows = [['来源', isNet(k) ? '网易云' : '本地文件']];
+  const rows = [['来源', isNet(k) ? '网易云' : isKg(k) ? '酷狗（免费曲）' : '本地文件']];
   if (isNet(k)) {
     rows.push(['请求音质', QUALITY_NAME[curQuality()]]);
     rows.push(['实际码率', k.bitrate ? `${Math.round(k.bitrate / 1000)} kbps` : '—']);
     rows.push(['编码', k.codec || '—']);
     rows.push(['是否无损', k.lossless ? '是' : '否']);
+  } else if (isKg(k)) {
+    // 酷狗免费曲固定 128k mp3，没有档位可选，如实写出来
+    rows.push(['实际码率', k.bitrate ? `${Math.round(k.bitrate / 1000)} kbps` : '—']);
+    rows.push(['编码', String(k.codec || 'mp3').toUpperCase()]);
+    rows.push(['是否无损', '否']);
   } else {
     // 网易云接口不回采样率/位深，与其显示两行「—」，不如本地文件才列这两项
     rows.push(['编码', k.codec || '—']);
@@ -1198,11 +1242,13 @@ function renderFmtPopover() {
     .join('');
 
   if (note) {
-    note.textContent = !isNet(k)
-      ? '本地文件按文件本身播放，音质档位只作用于网易云曲目。'
-      : k.downgraded
-        ? `账号没有「${QUALITY_NAME[curQuality()]}」权限，已按实际可用的 ${Math.round((k.bitrate || 0) / 1000)} kbps 播放。`
-        : '显示的是接口实际返回的码率与格式，不是宣传参数。';
+    note.textContent = isKg(k)
+      ? '酷狗免费曲只有 128k mp3 一档，没有更高档位可选。'
+      : !isNet(k)
+        ? '本地文件按文件本身播放，音质档位只作用于网易云曲目。'
+        : k.downgraded
+          ? `账号没有「${QUALITY_NAME[curQuality()]}」权限，已按实际可用的 ${Math.round((k.bitrate || 0) / 1000)} kbps 播放。`
+          : '显示的是接口实际返回的码率与格式，不是宣传参数。';
   }
 }
 
@@ -1229,7 +1275,7 @@ async function setQuality(q) {
 
   const k = curTrack();
   if (!k || !isNet(k)) {
-    toast(`音质：${QUALITY_NAME[next]}` + (k ? ' · 本地文件按原文件播放' : ''));
+    toast(`音质：${QUALITY_NAME[next]}` + (k ? (isKg(k) ? ' · 酷狗免费曲固定 128k' : ' · 本地文件按原文件播放') : ''));
     return;
   }
   await applyQuality(k);
@@ -1293,15 +1339,20 @@ const subOf = t => {
 
 /* 本地与网易云共用一套行模板：只差右上角的来源角标和封面来源 */
 function itemHTML(t, i) {
-  const tag = isNet(t) ? `<span class="tag">${t.vip ? 'VIP' : '云'}</span>` : '';
+  /* 标签：网易云显示 云/VIP，酷狗显示 酷/VIP。酷狗的 VIP 标记来自搜索结果 pay_type，
+   * 只是提示，点播时仍会试一次（免费曲里也有 pay_type 偏保守的条目）。 */
+  const tag = isNet(t)
+    ? `<span class="tag">${t.vip ? 'VIP' : '云'}</span>`
+    : isKg(t) ? `<span class="tag">${t.vip ? 'VIP' : '酷'}</span>` : '';
   const idx = i == null ? '' : ` data-i="${i}"`;
   /* 封面：本地走 trackCover（主进程读内嵌图/同目录图，缩到 96px 再回传），
-   * 网易云走 neCover（同样按 96px 取）。没给封面地址就不挂 data-art，
-   * 直接留「首字磁贴」占位，不会去请求一个注定失败的地址。 */
+   * 网易云走 neCover（按 96px 取），酷狗走 kgCover（按 hash 取）。没给封面地址就不挂
+   * data-art，直接留「首字磁贴」占位，不会去请求一个注定失败的地址。 */
   const art = isNet(t)
     ? (t.coverUrl ? ` data-art="ne" data-key="${esc(t.coverUrl)}"` : '')
-    : (t.path ? ` data-art="file" data-key="${esc(t.path)}"` : '');
-  return `<div class="item"${idx} data-ne="${isNet(t) ? t.netId : ''}">
+    : isKg(t) ? ` data-art="kg" data-key="${esc(kgHashOf(t))}"`
+      : (t.path ? ` data-art="file" data-key="${esc(t.path)}"` : '');
+  return `<div class="item"${idx} data-ne="${isNet(t) ? t.netId : ''}" data-kg="${isKg(t) ? esc(kgHashOf(t)) : ''}">
       <div class="th"${art}><span>${esc((t.title || '?').slice(0, 1))}</span></div>
       <div class="ii"><div class="n">${esc(t.title || '未知曲目')}${tag}</div>
       <div class="d">${esc(subOf(t))}</div></div>
@@ -1355,7 +1406,9 @@ function thumbEnqueue(el) {
 async function fetchThumb(kind, key) {
   let r = null;
   try {
-    r = kind === 'ne' ? await window.api.neCover(key, 96) : await window.api.trackCover(key);
+    r = kind === 'ne' ? await window.api.neCover(key, 96)
+      : kind === 'kg' ? await window.api.kgCover(key, 96)
+        : await window.api.trackCover(key);
   } catch { r = null; }
   const url = r && r.ok && r.dataUrl ? r.dataUrl : '';
   if (url) {
@@ -1411,6 +1464,7 @@ function fillThumbs(root) {
  * 2000 首时单次渲染 120ms 以上，切歌/搜索都会卡一下。 */
 function renderLibrary() {
   if (S.srcMode === 'net') { renderNet(); return; }
+  if (S.srcMode === 'kg') { renderKg(); return; }
   const q = ($('#q').value || '').trim().toLowerCase();
   const rows = [];
   for (let i = 0; i < S.tracks.length; i++) {
@@ -1440,9 +1494,10 @@ function markCurrent() {
   const t = S.i >= 0 ? curTrack() : null;
   if (!t) { plSyncBadge(); return; }
   /* 曲库行按曲库下标定位（S.i 现在是队列下标，所以要先翻回曲库下标）；
-   * 网易云的搜索/歌单列表没有下标，只能按曲目 id 找。 */
+   * 网易云 / 酷狗的搜索列表没有下标，只能按曲目 id 找。 */
   const libIdx = S.tracks.indexOf(t);
   markedEl = (isNet(t) ? $(`#libList .item[data-ne="${t.netId}"]`) : null)
+    || (isKg(t) ? $(`#libList .item[data-kg="${esc(kgHashOf(t))}"]`) : null)
     || (libIdx >= 0 ? $(`#libList .item[data-i="${libIdx}"]`) : null);
   if (markedEl) markedEl.classList.add('on');
   if ($('#popPl').classList.contains('show') && PL.view === 'list') renderPlRows();
@@ -1919,23 +1974,32 @@ function plBind() {
  * 搜索结果不落盘，只有点过的曲目才进 S.tracks（和本地文件一起持久化）。
  */
 function setSource(mode) {
-  S.srcMode = mode === 'net' ? 'net' : 'local';
+  S.srcMode = mode === 'net' ? 'net' : mode === 'kg' ? 'kg' : 'local';
   const net = S.srcMode === 'net';
+  const kgMode = S.srcMode === 'kg';
   $$('#segSrc b').forEach(b => b.classList.toggle('on', b.dataset.s === S.srcMode));
-  $('#localActions').style.display = net ? 'none' : 'flex';
+  $('#localActions').style.display = net || kgMode ? 'none' : 'flex';
   $('#netActions').style.display = net ? 'flex' : 'none';
   $('#neNote').style.display = net ? 'block' : 'none';
+  const kgNote = $('#kgNote');
+  if (kgNote) kgNote.style.display = kgMode ? 'block' : 'none';
   if (!net) $('#neHome').classList.remove('show');
   const q = $('#q');
   q.value = '';
-  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑' : '搜索曲名 / 艺人 / 专辑';
+  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑' : kgMode ? '搜索酷狗免费曲：曲名 / 艺人' : '搜索曲名 / 艺人 / 专辑';
   if (net) {
     updateNeNote();
     if (S.ne.view !== 'coll') S.ne.view = 'home';
     neEnsureHome();          // 首次进来才真的打接口，之后复用缓存
   }
+  if (kgMode) {
+    kgEnsureStatus();
+    S.kg.view = 'idle';
+    S.kg.items = [];
+    S.kg.err = '';
+  }
   renderLibrary();
-  if (net) setTimeout(() => q.focus(), 60);
+  if (net || kgMode) setTimeout(() => q.focus(), 60);
 }
 
 /* 账号状态只在这里汇总成三个值（hasCookie / loggedIn / nick），
@@ -2249,6 +2313,114 @@ function renderSearch() {
   markCurrent();
 }
 
+/* ------------------------------------------------------------------ 酷狗（免费曲）
+ * 只有一条路径：搜索 → 点一首 → 播放。没有歌单/首页/专辑，是因为酷狗的移动端接口
+ * 里这几类都需要登录态或额外签名；免费曲的搜索与取链已经够用，先把这条打通，
+ * 登录接上之后再补歌单入口（接口位已经在 main/kugou.js 留好）。
+ *
+ * 可播性判据来自搜索结果本身：`pay_type === 0` 才是免费曲。付费曲照常列出
+ * （用户可能已经登录过），点的时候由 kg:url 给出「需要会员」，然后按队列顺序跳过。
+ */
+async function kgEnsureStatus() {
+  let st = null;
+  try { st = await window.api.kgStatus(); } catch {}
+  if (st && st.ok) S.kg.status = st;
+  paintKgNote();
+}
+
+function paintKgNote() {
+  const el = $('#kgNote');
+  if (!el) return;
+  const st = S.kg.status || {};
+  el.textContent = st.stub
+    ? '酷狗：仅支持免费曲目（128k mp3）· 登录接口已预留，暂未接入'
+    : '酷狗：已登录 · 可播放账号有权限的曲目';
+}
+
+async function kgSearch() {
+  const q = ($('#q').value || '').trim();
+  const seq = ++S.kg.seq;
+  if (!q) {
+    S.kg.items = [];
+    S.kg.busy = false;
+    S.kg.err = '';
+    S.kg.view = 'idle';
+    renderKg();
+    return;
+  }
+  S.kg.view = 'search';
+  S.kg.busy = true;
+  S.kg.err = '';
+  renderKg();
+
+  let r;
+  try { r = await window.api.kgSearch(q, 40); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (seq !== S.kg.seq) return;         // 又有新输入，这次结果作废
+  S.kg.busy = false;
+  if (r && r.ok) S.kg.items = Array.isArray(r.tracks) ? r.tracks : [];
+  else {
+    S.kg.items = [];
+    S.kg.err = (r && r.error && r.error.message) || '搜索失败';
+  }
+  renderKg();
+}
+
+function renderKg() {
+  const list = $('#libList');
+  const count = $('#libCount');
+  if (S.kg.busy) {
+    list.innerHTML = emptyRow('正在搜索酷狗…');
+    count.textContent = '酷狗';
+    list.onclick = null;
+    return;
+  }
+  if (S.kg.err) {
+    list.innerHTML = emptyRow('搜索失败：' + esc(S.kg.err));
+    count.textContent = '酷狗';
+    list.onclick = null;
+    return;
+  }
+  if (S.kg.view === 'idle') {
+    list.innerHTML = emptyRow('输入曲名或艺人，搜索酷狗的免费曲目。<br>付费/会员曲会标出来，点播时会提示需要会员。');
+    count.textContent = '酷狗';
+    list.onclick = null;
+    return;
+  }
+  if (!S.kg.items.length) {
+    list.innerHTML = emptyRow('没有找到匹配的曲目。<br>换个关键词试试。');
+    count.textContent = '酷狗 · 无结果';
+    list.onclick = null;
+    return;
+  }
+  list.innerHTML = S.kg.items.map(t => itemHTML(t, null)).join('');
+  fillThumbs(list);
+  const free = S.kg.items.filter(t => !t.vip).length;
+  count.textContent = `搜索到 ${S.kg.items.length} 条 · 可播 ${free} 条`;
+  list.onclick = e => {
+    const el = e.target.closest('.item');
+    if (!el) return;
+    const t = S.kg.items.find(x => x.kgHash === el.dataset.kg);
+    if (t) playKg(t);
+  };
+  markedEl = null;
+  markCurrent();
+}
+
+/* 与 playNet 同一套动作：进曲库（这样封面/歌词/重启后都还认得）→ 交给队列播。
+ * playIndex 收到曲库下标后会转成 playLibRow：不在播放列表里就插到当前曲之后。 */
+async function playKg(t) {
+  if (!t) return;
+  if (t.vip) toast(`「${t.title}」需要酷狗会员，正在尝试…`);
+  const fresh = !S.tracks.some(x => x.path === t.path);
+  const i = addTrack(t);
+  if (i < 0) return;
+  S.libDirty = true;
+  persistLibrary();
+  if (fresh) toast(`已加入曲库 · ${t.title}`);
+  await playIndex(i);
+}
+
 function renderHome() {
   const box = $('#neHome');
   const list = $('#libList');
@@ -2557,7 +2729,7 @@ function setLyrHint(k, ly) {
   const el = $('#lyrEmpty');
   if (!el) return;
   const note = (ly && ly.note) || '';
-  el.textContent = note || (isNet(k) ? '该曲目暂无歌词' : '暂无歌词 · 同目录放置同名 .lrc 即可');
+  el.textContent = note || (isNet(k) || isKg(k) ? '该曲目暂无歌词' : '暂无歌词 · 同目录放置同名 .lrc 即可');
 }
 
 /* 「开始播放」同样要有上限。
@@ -2598,6 +2770,7 @@ async function playAt(qi, opts) {
    * 「音频还在放上一首、状态栏已经指向新歌」的错位。现在失败时
    * 当前曲目与播放状态原样保留，只弹一条提示（必要时自动跳下一首）。 */
   let info = null;
+  const kg = isKg(k);
   if (net) {
     try { info = await window.api.neUrl(netIdOf(k), curQuality()); }
     catch (e) { info = { ok: false, error: { code: 'NE_NET', message: String((e && e.message) || e) } }; }
@@ -2618,6 +2791,28 @@ async function playAt(qi, opts) {
       } else if (S.i === qi) {
         paintMeta();          // 只有本来就停在这首上，才需要刷新它的状态显示
       }
+      return;
+    }
+    k.unavailable = '';
+  } else if (kg) {
+    /* 酷狗：取链预检同样要在改状态之前做 —— 会员曲拿不到地址时，
+     * 让上一首继续放着、只提示并跳过，而不是先把界面切过去再失败。 */
+    try { info = await window.api.kgUrl(kgHashOf(k)); }
+    catch (e) { info = { ok: false, error: { code: 'KG_NET', message: String((e && e.message) || e) } }; }
+    if (seq !== loadSeq) return;
+    if (!info || !info.ok) {
+      const code = (info && info.error && info.error.code) || '';
+      const reason = code === 'KG_PAID' ? '需酷狗会员'
+        : code === 'KG_UNAVAILABLE' ? '该曲目暂不可播'
+          : code === 'KG_TIMEOUT' ? '网络超时' : '暂时无法播放';
+      k.unavailable = reason;
+      if (S.settings.playMode === 'shuffle') markShufFail(k.path);
+      toast(`无法播放：${k.title}（${reason}）`);
+      if (S.q.length > 1 && errStreak < 3) {
+        errStreak++;
+        const ni = stepIndex(1, qi);
+        if (ni >= 0) playAt(ni);
+      } else if (S.i === qi) paintMeta();
       return;
     }
     k.unavailable = '';
@@ -2644,6 +2839,14 @@ async function playAt(qi, opts) {
     if (typeof info.lossless === 'boolean') k.lossless = info.lossless;
     k.level = info.level || '';
     k.downgraded = !!info.downgraded;
+    S.libDirty = true;
+    paintMeta();
+  } else if (kg) {
+    /* 酷狗免费曲只有 128k mp3，这里把真实码率写回曲目，「实测」那一栏就不是空的 */
+    if (info.codec) k.codec = String(info.codec).toLowerCase();
+    if (info.bitrate) k.bitrate = info.bitrate;
+    if (info.size) k.size = info.size;
+    k.lossless = false;
     S.libDirty = true;
     paintMeta();
   }
@@ -2696,7 +2899,9 @@ async function playAt(qi, opts) {
   // 封面 + 主色（每步都要确认自己还是"当前"的那次请求）
   try {
     let art = null;
-    if (net) {
+    if (net || isKg(k)) {
+      /* 网易云与酷狗都走 loadArt：远程封面，取不到就降级成中性色 + 占位文案。
+       * 酷狗没有本地文件可解析，不能落到下面 trackDetail 那条分支。 */
       art = await loadArt(k);
     } else {
       const detail = await window.api.trackDetail(k.path);
@@ -3292,6 +3497,9 @@ function bind() {
         return;
       }
       qTimer = setTimeout(neSearch, 380);
+    } else if (S.srcMode === 'kg') {
+      // 酷狗也是网络搜索，同样 380ms 防抖
+      qTimer = setTimeout(kgSearch, 380);
     } else {
       qTimer = setTimeout(renderLibrary, 110);
     }
@@ -3300,7 +3508,9 @@ function bind() {
     if (e.key !== 'Enter') return;
     e.preventDefault();
     clearTimeout(qTimer);
-    if (S.srcMode === 'net') neSearch(); else renderLibrary();
+    if (S.srcMode === 'net') neSearch();
+    else if (S.srcMode === 'kg') kgSearch();
+    else renderLibrary();
   };
 
   // 抽屉里所有 data-act（扫码登录 / 刷新 / 进歌单 / 返回）统一委托到抽屉根节点

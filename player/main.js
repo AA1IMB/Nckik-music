@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const { Readable } = require('node:stream');
 const ne = require('./netease');
+const kg = require('./kugou');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -37,12 +38,13 @@ const userDir = app.getPath('userData');
 const settingsPath = path.join(userDir, 'settings.json');
 const libraryPath = path.join(userDir, 'library.json');
 
-/* media 是本地文件；neaudio 是网易云音频（主进程代理，带 Range 透传）。
+/* media 是本地文件；neaudio 是网易云音频、kgaudio 是酷狗音频（都由主进程代理，带 Range 透传）。
  * 远程地址会过期，且 http/https 混杂，交给自建协议统一处理：
- * 渲染层始终只看到 neaudio://s/<id>，音频源换了服务器也不用改前端。 */
+ * 渲染层始终只看到 neaudio://s/<id> / kgaudio://s/<hash>，音频源换了服务器也不用改前端。 */
 protocol.registerSchemesAsPrivileged([
   { scheme: 'media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
-  { scheme: 'neaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
+  { scheme: 'neaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
+  { scheme: 'kgaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
 ]);
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -300,6 +302,74 @@ function registerNeProtocol() {
       return new Response(proxyBody(res, ctrl, id), { status: res.status, headers: h });
     }
     neTrace('give up', 'id=' + id, 'lastStatus=' + lastStatus, (Date.now() - tIn) + 'ms');
+    return new Response('upstream ' + lastStatus, { status: 410 });
+  });
+}
+
+/* ---------------- 酷狗音频代理 ----------------
+ * 与 neaudio 同一套路，差别只在两处：
+ *   1. 键是 32 位 hash（不是数字 id），渲染层看到 kgaudio://s/<hash>；
+ *   2. 酷狗的直链里带时间戳，过期后是 403 —— 命中就 invalidateUrl 换一条重试一次。
+ * 其余（Range 透传、响应头上限、响应体取消）直接复用上面那一套：
+ * 那三条是「切歌不卡加载态」的必要条件，没有必要为第二家再写一遍。
+ */
+function registerKgProtocol() {
+  protocol.handle('kgaudio', async (request) => {
+    let hash = '';
+    try {
+      const u = new URL(request.url);
+      hash = String((u.pathname || '').replace(/^\/+/, '') || u.searchParams.get('h') || '').toLowerCase();
+    } catch {}
+    if (!/^[0-9a-f]{32}$/.test(hash)) return new Response('bad hash', { status: 400 });
+
+    const range = request.headers.get('range');
+    let lastStatus = 0;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let info;
+      try {
+        info = await kg.songUrl(hash);
+      } catch (e) {
+        /* 会员曲 / 已下架：404，渲染层按既有「跳过并提示」处理，不当作网络故障 */
+        return new Response(String((e && e.message) || e), {
+          status: 404,
+          headers: { 'content-type': 'text/plain; charset=utf-8', 'x-kg-reason': (e && e.code) || 'KG_ERROR' }
+        });
+      }
+
+      const headers = {};
+      if (range) headers.Range = range;
+
+      const ctrl = new AbortController();
+      const headTimer = setTimeout(() => ctrl.abort(new Error('NE_HEAD_TIMEOUT')), NE_HEAD_TIMEOUT);
+      let res;
+      try {
+        res = await net.fetch(info.url, { headers, signal: ctrl.signal });
+      } catch (e) {
+        const timedOut = String((e && e.message) || e).includes('NE_HEAD_TIMEOUT');
+        return new Response(timedOut ? 'upstream timeout' : 'upstream failed', {
+          status: timedOut ? 504 : 502,
+          headers: { 'x-kg-reason': timedOut ? 'KG_UPSTREAM_TIMEOUT' : 'KG_UPSTREAM_FAIL' }
+        });
+      } finally {
+        clearTimeout(headTimer);
+      }
+      lastStatus = res.status;
+
+      if ((res.status === 401 || res.status === 403) && attempt === 0) {
+        ctrl.abort();
+        kg.invalidateUrl(hash);
+        continue;
+      }
+
+      const h = new Headers();
+      for (const k of PASSTHROUGH_HEADERS) {
+        const v = res.headers.get(k);
+        if (v) h.set(k, v);
+      }
+      if (!h.has('accept-ranges')) h.set('accept-ranges', 'bytes');
+      return new Response(proxyBody(res, ctrl, 'kg:' + hash), { status: res.status, headers: h });
+    }
     return new Response('upstream ' + lastStatus, { status: 410 });
   });
 }
@@ -704,14 +774,20 @@ ipcMain.handle('lib:scan', async (_e, { files = [], dirs = [] } = {}) => {
 });
 
 const isNeKey = p => typeof p === 'string' && p.startsWith('ne:');
+const isKgKey = p => typeof p === 'string' && p.startsWith('kg:');
 
 ipcMain.handle('track:detail', async (_e, file) => {
-  // 网易云的封面/时长在搜索与详情阶段已经拿到，没有本地文件可解析
+  // 网易云/酷狗的封面与时长在搜索与详情阶段已经拿到，没有本地文件可解析
   if (isNeKey(file)) return { source: 'netease' };
+  if (isKgKey(file)) return { source: 'kugou' };
   return readTrack(file, true);
 });
 
 ipcMain.handle('track:lyric', async (_e, file) => {
+  if (isKgKey(file)) {
+    try { return await kg.lyric(file.slice(3)); }
+    catch (e) { return { text: '', source: '', note: String((e && e.message) || e) }; }
+  }
   if (isNeKey(file)) {
     try { return await ne.lyric(Number(file.slice(3))); }
     catch (e) { return { text: '', source: '', note: String((e && e.message) || e) }; }
@@ -766,6 +842,7 @@ ipcMain.on('library:set-sync', (_e, list) => {
 ipcMain.handle('media:url', (_e, file) => {
   const s = String(file || '');
   if (isNeKey(s)) return 'neaudio://s/' + s.slice(3);
+  if (isKgKey(s)) return 'kgaudio://s/' + s.slice(3);
   return `media://f/?p=${encodeURIComponent(s)}`;
 });
 
@@ -815,6 +892,39 @@ ipcMain.handle('ne:url', (_e, id, quality) =>
     };
   }));
 
+/* ---------------- 酷狗 IPC ----------------
+ * 形状与 ne:* 一致（同样用 neCall 包一层 { ok, ... } / { ok:false, error }），
+ * 这样渲染层的错误处理不用为第二家再写一套。登录相关只有 status / logout 有实体，
+ * qrCreate / qrPoll 明确回 KG_LOGIN_STUB —— 先把位置留出来，不假装已经支持。
+ */
+const kgCall = async fn => {
+  try { return { ok: true, ...(await fn()) }; }
+  catch (e) {
+    return { ok: false, error: { code: (e && e.code) || 'KG_ERROR', message: String((e && e.message) || e) } };
+  }
+};
+
+ipcMain.handle('kg:search', (_e, { q, limit } = {}) =>
+  kgCall(async () => ({ tracks: await kg.searchSongs(q, limit) })));
+
+ipcMain.handle('kg:url', (_e, hash) =>
+  kgCall(async () => {
+    const i = await kg.songUrl(hash);
+    return { codec: String(i.type || 'mp3').toUpperCase(), bitrate: i.br, size: i.size, duration: i.duration, lossless: false };
+  }));
+
+ipcMain.handle('kg:cover', (_e, hash, size) =>
+  kgCall(async () => {
+    const c = await kg.coverData(hash, Number(size) || 300);
+    return { dataUrl: c.dataUrl, bytes: c.bytes };
+  }));
+
+ipcMain.handle('kg:lyric', (_e, hash) => kgCall(() => kg.lyric(hash)));
+ipcMain.handle('kg:status', () => kgCall(() => kg.status()));
+ipcMain.handle('kg:logout', () => kgCall(async () => { kg.logout(); return {}; }));
+ipcMain.handle('kg:qr', () => kgCall(() => kg.qrCreate()));
+ipcMain.handle('kg:qrPoll', (_e, key) => kgCall(() => kg.qrPoll(key)));
+
 /* ---------------- 列表缩略封面 ----------------
  * 曲库列表一屏十几行，每行都要封面：这里只返回「小图」，不把几 MB 的内嵌原图
  * 塞进 IPC。主进程按路径缓存缩略结果，来回滚动不会反复解析文件。
@@ -860,6 +970,7 @@ async function readThumb(file) {
 
 ipcMain.handle('track:cover', async (_e, file) => {
   if (isNeKey(file)) return { ok: false, error: { code: 'NE_NO_COVER', message: '网易云曲目请用 ne:cover' } };
+  if (isKgKey(file)) return { ok: false, error: { code: 'KG_NO_COVER', message: '酷狗曲目请用 kg:cover' } };
   const url = await readThumb(String(file || ''));
   return url ? { ok: true, dataUrl: url } : { ok: false, error: { code: 'NO_COVER', message: '没有内嵌封面' } };
 });
@@ -981,6 +1092,7 @@ app.whenReady().then(() => {
   migrateOldUserData();             // 改名后第一次启动：把老目录里的曲库/设置/凭证接过来
   registerMediaProtocol();
   registerNeProtocol();
+  registerKgProtocol();
   ne.setCookie(readNeCookie());     // 上次扫过的凭证在开窗前就位，首屏点歌即可用
   ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
   createWindow();
