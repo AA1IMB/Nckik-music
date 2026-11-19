@@ -930,9 +930,12 @@ function centerFrame() {
   if (S.lastLy >= 0) centerLine(S.lastLy);
 }
 
-function lockLyricMotion(hold = 220) {
+function lockLyricMotion(hold = 220, morph = false) {
   clearTimeout(centerTimer);          // 别让字号过渡的旧校正插入这一次
   document.body.classList.add('lyr-resize');
+  /* morph：进/出全屏时顺带把「换版」软化成一次 240ms 的推近 + 淡入
+   * （样式在 app.css 的 fsSettle）。正在拖窗口边时不加，拖动要跟手。 */
+  if (morph) document.body.classList.add('fs-swap');
   centerFrame();
   if (!lyrLockRAF) {
     const step = () => {
@@ -949,6 +952,7 @@ function lockLyricMotion(hold = 220) {
 
 function unlockLyricMotion() {
   document.body.classList.remove('lyr-resize');
+  document.body.classList.remove('fs-swap');
   clearTimeout(lyrLockTimer);
   if (lyrLockRAF) { cancelAnimationFrame(lyrLockRAF); lyrLockRAF = 0; }
   centerFrame();
@@ -3220,7 +3224,8 @@ function applyFs(on) {
   else { $('#fsExit').classList.remove('show'); clearTimeout(fsTimer); }
   // 封面与字号都随视口变了：先把歌词的过渡锁住并逐帧居中，等窗口尺寸稳定
   // 再交还过渡。锁得比尺寸变化久一点（520ms），避免最后一帧 resize 落在解锁之后。
-  lockLyricMotion(520);
+  // 第二个参数 true：这次是「换版」而不是拖动窗口，允许一次短促的推近 + 淡入。
+  lockLyricMotion(520, true);
 }
 
 function pokeFsHint() {

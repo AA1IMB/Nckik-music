@@ -53,20 +53,25 @@ const js = c => win.webContents.executeJavaScript(c, true);
 const SAMPLE = `(() => new Promise(res => {
   const col = document.querySelector('.lyrcol');
   const inner = document.querySelector('#lnInner');
+  const stage = document.querySelector('.stage');
   const out = [];
   const t0 = performance.now();
   const tick = () => {
-    const on = document.querySelector('.ln.on');
+    const on = document.querySelector('.ln.on') || document.querySelector('#lnInner .ln');
     const cr = col.getBoundingClientRect();
     const colMid = cr.top + cr.height / 2;
     const lr = on ? on.getBoundingClientRect() : null;
     const dev = lr ? (lr.top + lr.height / 2) - colMid : null;
     const tr = /translateY\\((-?[\\d.]+)px\\)/.exec(inner.style.transform || '');
+    const sc = getComputedStyle(stage);
     out.push({
       t: +(performance.now() - t0).toFixed(0),
       dev: dev === null ? null : +dev.toFixed(2),
       y: tr ? +tr[1] : 0,
+      fs: on ? +parseFloat(getComputedStyle(on).fontSize).toFixed(2) : null,
+      op: +parseFloat(sc.opacity).toFixed(3),
       lock: document.body.classList.contains('lyr-resize'),
+      morph: document.body.classList.contains('fs-swap'),
       dur: getComputedStyle(inner).transitionDuration
     });
     if (performance.now() - t0 < 700) requestAnimationFrame(tick); else res(out);
@@ -92,9 +97,18 @@ const metrics = (rows, label) => {
   const wobble = net > 1 ? +(travel / net).toFixed(2) : (travel > 1 ? 999 : 1);
   const lockFrames = rows.filter(r => r.lock).length;
   const durZero = rows.filter(r => r.lock && (r.dur === '0s')).length;
+  /* 字号的中间值个数：过渡生效时会有一串中间尺寸，直接跳变只有 2 个端点 */
+  const fsSet = new Set(rows.map(r => r.fs).filter(v => v !== null));
+  /* 舞台淡入：透明度离开 1 的帧数（软化动画真的跑了） */
+  const ops = rows.map(r => r.op).filter(v => v !== null);
+  const stageFade = ops.filter(v => v < 0.995).length;
   const m = {
     frames: rows.length, maxDev, travel: +travel.toFixed(1), net: +net.toFixed(1),
     wobble, reversals, lockFrames, lockDurZero: durZero,
+    morphFrames: rows.filter(r => r.morph).length,
+    fsSteps: fsSet.size,
+    stageFade,
+    minOp: ops.length ? +Math.min(...ops).toFixed(3) : null,
     lockAfter: rows[rows.length - 1].lock
   };
   log(label, JSON.stringify(m));
@@ -125,7 +139,10 @@ const say = (ok, name, extra) => { log(`  ${ok ? 'PASS' : 'FAIL'} ${name}`, JSON
   say(mFs.maxDev !== null && mFs.maxDev <= 3, '进全屏过程中当前句始终在中轴上', { dev: mFs.maxDev });
   say(mFs.wobble <= 1.25, '进全屏时位移没有来回抖', { wobble: mFs.wobble, reversals: mFs.reversals });
   say(mFs.lockFrames > 0, '切换期间确实挂上了 lyr-resize', { frames: mFs.lockFrames });
-  say(mFs.lockDurZero === mFs.lockFrames, '锁住期间字号/位移过渡是 0s', { zero: mFs.lockDurZero, lock: mFs.lockFrames });
+  say(mFs.lockDurZero === mFs.lockFrames, '锁住期间位移过渡是 0s', { zero: mFs.lockDurZero, lock: mFs.lockFrames });
+  /* 选 A 方案之后：换版要有 240ms 的「推近 + 淡入」，期间舞台透明度低于 1 */
+  say(mFs.morphFrames > 0, '进全屏时挂了 fs-swap（允许软化动画）', { frames: mFs.morphFrames });
+  say(mFs.stageFade > 0, '舞台做了一次淡入，换版不是啪一下', { faded: mFs.stageFade, minOp: mFs.minOp });
 
   console.log('\n=== 3. 回到窗口（视口 1707×1067 → 1100×700） ===');
   const toWin = js(SAMPLE);

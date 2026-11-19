@@ -238,12 +238,28 @@ body::before {
   transition: transform .55s var(--ease);
 }
 /* 窗口尺寸变化 / 进出自全屏的过程中（JS 挂 body.lyr-resize）：
- * 字号与位移两条过渡同时关掉，当前句被逐帧钉在中轴上。
- * 否则字号 0.4s 过渡期间行高还在变，位移却按中间值起了一段 0.55s 过渡，
- * 等 480ms 后再校一次 —— 看起来就是先抖一下、再滑一段。 */
+ * 位移与字号过渡都关掉 —— 字号 0.4s 过渡期间行高还在变，位移却按中间值起了
+ * 一段 0.55s 过渡，看起来就是先抖一下、再滑一段。JS 会在锁住期间逐帧居中。
+ *
+ * 「换版」的软化不用布局属性过渡（字号/宽度一旦过渡，居中就会和过渡抢跑，
+ * 实测会有一帧 20px 级的错位），而是在切换瞬间给整块舞台一次 240ms 的
+ * 「轻微推近 + 淡入」：transform/opacity 不影响 offsetTop，居中依然精确，
+ * 画面却从「啪一下换掉」变成「推一下对上」。 */
 body.lyr-resize .ln,
 body.lyr-resize .ln .tr { transition: none; }
 body.lyr-resize .ln-inner { transition: none; }
+
+body.fs-swap .stage {
+  animation: fsSettle .24s var(--ease) both;
+  transform-origin: 50% 50%;
+}
+@keyframes fsSettle {
+  from { opacity: .72; transform: scale(.996); }
+  to   { opacity: 1;   transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.fs-swap .stage { animation: none; }
+}
 /*
  * 进度高亮只有「一层文字」：用 background-clip:text 把渐变裁进字形里。
  * 早先的做法是两层文字叠着（白字打底 + 主色字 clip-path 擦除），
