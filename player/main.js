@@ -6,6 +6,7 @@ const fsp = require('node:fs/promises');
 const { Readable } = require('node:stream');
 const ne = require('./netease');
 const kg = require('./kugou');
+const { createQrLogin } = require('./kugou-qr');
 const src = require('./sources');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
@@ -981,8 +982,14 @@ ipcMain.handle('kg:logout', () =>
   }));
 
 ipcMain.handle('kg:authInfo', () => kgCall(async () => ({ auth: kg.authInfo() })));
-ipcMain.handle('kg:qr', () => kgCall(() => kg.qrCreate()));
-ipcMain.handle('kg:qrPoll', (_e, key) => kgCall(() => kg.qrPoll(key)));
+
+/* 扫码登录：真正的签名与轮询在酷狗自己的登录页里完成（见 kugou-qr.js），
+ * 我们只负责把一个隐藏窗口里的二维码取出来、并在出现 token 时把 cookie 交回去。
+ * 保存仍然走 kg:login，所以「导入 Cookie」这一条路径的校验、脱敏、自检全部复用。 */
+const kgQr = createQrLogin({ BrowserWindow, app });
+ipcMain.handle('kg:qr', () => kgCall(async () => ({ qr: await kgQr.start() })));
+ipcMain.handle('kg:qrPoll', (_e, key) => kgCall(() => kgQr.poll(key)));
+ipcMain.handle('kg:qrCancel', () => ({ ok: true, ...kgQr.stop('cancelled') }));
 
 /* ---------------- 音源适配层（曲库页共用） ----------------
  * 两家 provider 的返回在这一层就归一成同一套 Section / PlaylistItem，

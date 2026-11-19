@@ -18,7 +18,7 @@ const path = require('node:path');
  *   kg_mid / kg_dfid 是设备号，必须保留；
  *   token / userid（或 KugooID / KuGoo）才是账号身份。 */
 const DEVICE_KEYS = ['kg_mid', 'kg_dfid', 'kg_dfid_collect'];
-const AUTH_KEYS = ['token', 'userid', 'kugoo', 'kugoo_id', 'kg_userid'];
+const AUTH_KEYS = ['token', 'userid', 'kugoo', 'kugoo_id', 'kg_userid', 'uid'];
 
 function createStore({ filePath, safeStorage }) {
   const p = filePath;
@@ -75,7 +75,7 @@ function createStore({ filePath, safeStorage }) {
     }
     const cookie = [...kept.entries()].map(([k, v]) => k + '=' + v).join('; ');
     const token = kept.get('token') || kept.get('kugoo') || '';
-    const userid = Number(kept.get('userid') || kept.get('kugoo_id') || kept.get('kg_userid') || 0) || 0;
+    const userid = Number(kept.get('userid') || kept.get('kugoo_id') || kept.get('kg_userid') || kept.get('uid') || 0) || 0;
     return { cookie, token, userid, keys: [...kept.keys()] };
   }
 

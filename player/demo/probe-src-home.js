@@ -49,7 +49,7 @@ const waitFor = async (fn, ms = 25000, step = 200) => {
 };
 
 let win = null;
-app.on('browser-window-created', (_e, w) => { win = w; });
+app.on('browser-window-created', (_e, w) => { if (!win) win = w; });   // 登录二维码会另开隐藏窗口，别把 win 抢走
 const js = c => win.webContents.executeJavaScript(c, true);
 const click = sel => js(`(() => { const el = document.querySelector(${JSON.stringify(sel)});
   if (!el) return false; el.click(); return true; })()`);
@@ -160,21 +160,29 @@ const snap = () => js(`(() => {
   say(await js(`(() => { const e = document.querySelector('#kgAuthState'); return !!e && /未登录|已登录/.test(e.textContent); })()`),
     '登录状态有文案', { text: await js(`(document.querySelector('#kgAuthState') || {}).textContent`) });
   await js(`(() => { const b = document.querySelector('#btnKgQr'); if (b) b.click(); })()`);
-  const degraded = await waitFor(async () => {
+  /* 扫码现在走「官方登录页取码」：可能拿到二维码，也可能因为网络/上游改版落到遮罩上。
+   * 两种都算正常，只要界面说清楚了；取码要开窗口 + 载页面，给足 25 秒。 */
+  const qrReady = await waitFor(async () => {
     const r = await js(`(() => { const w = document.querySelector('#kgQrWrap');
+      const i = document.querySelector('#kgQrShot img');
+      const box = document.querySelector('#kgQrBox');
       const m = document.querySelector('#kgQrMask');
       const st = document.querySelector('#kgQrState');
-      return { show: !!w && w.classList.contains('show'), dead: !!document.querySelector('#kgQrBox.dead'),
+      return { show: !!w && w.classList.contains('show'), dead: !!(box && box.classList.contains('dead')),
+        img: i ? String(i.getAttribute('src') || '').slice(0, 10) : '',
         mask: m ? m.textContent : '', state: st ? st.textContent : '' }; })()`);
-    return r.show && (r.dead || /扫码|签名|Cookie/.test(r.state));
-  }, 12000);
+    return r.show && (r.img.indexOf('data:image') === 0 || r.dead);
+  }, 25000);
   const qr = await js(`(() => { const w = document.querySelector('#kgQrWrap');
+    const i = document.querySelector('#kgQrShot img');
+    const box = document.querySelector('#kgQrBox');
     const m = document.querySelector('#kgQrMask'); const st = document.querySelector('#kgQrState');
-    return { show: !!w && w.classList.contains('show'), dead: !!document.querySelector('#kgQrBox.dead'),
+    return { show: !!w && w.classList.contains('show'), dead: !!(box && box.classList.contains('dead')),
+      img: i ? String(i.getAttribute('src') || '').slice(0, 10) : '',
       mask: m ? m.textContent : '', state: st ? st.textContent : '' }; })()`);
-  say(degraded && qr.show, '点扫码后展开二维码区', qr);
-  say(qr.dead && /未开放|失败/.test(qr.mask), '不可用时明确标出（不假装在轮询）', qr);
-  say(/签名|20010|Cookie/.test(qr.state), '状态行说明原因与替代方案', { state: qr.state });
+  say(qrReady && qr.show, '点扫码后展开二维码区', qr);
+  say(qr.img.indexOf('data:image') === 0, '二维码图已就位（官方登录页取码）', { img: qr.img });
+  say(/扫码|登录/.test(qr.state), '状态行给出下一步指令', { state: qr.state });
   await js(`(() => { const b = document.querySelector('#btnKgQrCookie'); if (b) b.click(); })()`);
   const fellBack = await waitFor(async () => js(`!!document.querySelector('#popKgAuth.show')`), 5000);
   say(fellBack, '一键降级到「导入 Cookie」面板');

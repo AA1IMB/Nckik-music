@@ -2631,8 +2631,11 @@ function paintKgAccount() {
  * 这就是需求里要求的「失败时显式降级回 Cookie 导入」。上游哪天放开（status===1
  * 且有 qrcode），这段代码不用改就会自动走轮询分支。
  */
+/* 扫码登录：酷狗自己的登录页里完成签名与轮询，主进程把二维码取出来（kugou-qr.js），
+ * 这里只负责「把图贴出来 + 定时问一次状态」。任何一步失败都显式降级到「导入 Cookie」，
+ * 不假装在轮询 —— 取不到码时遮罩直接写「扫码不可用」并露出降级按钮。
+ */
 const KG_QR_POLL_MS = 2000;
-const KG_QR_TIMEOUT_MS = 3 * 60 * 1000;
 let kgQrTimer = 0, kgQrToken = 0, kgQrKey = '', kgQrDeadline = 0;
 
 function paintKgAuthState() {
@@ -2667,6 +2670,10 @@ function kgQrStop(hide) {
   clearTimeout(kgQrTimer);
   kgQrTimer = 0;
   kgQrToken++;                 // 让在途的轮询结果失效
+  if (kgQrKey) {
+    /* 主进程那边留着一个隐藏窗口，结束时要一起关掉，否则它会一直轮询登录页 */
+    try { window.api.kgQrCancel(); } catch (e) { /* 关窗失败不影响界面复位 */ }
+  }
   kgQrKey = '';
   kgQrDeadline = 0;
   if (hide) {
@@ -2693,20 +2700,17 @@ async function kgQrStart() {
   catch (e) { r = { ok: false, error: { code: '', message: String((e && e.message) || e) } }; }
   if (token !== kgQrToken) return;
   if (!r || !r.ok) {
-    const code = (r && r.error && r.error.code) || '';
+    const msg = (r && r.error && r.error.message) || '二维码获取失败';
     if (shot) shot.innerHTML = '';
-    kgQrDead(true, code === 'KG_QR_UNSIGNED' ? '扫码未开放' : '取码失败');
-    kgQrStateSet((r && r.error && r.error.message) || '二维码获取失败', 'err');
+    kgQrDead(true, '扫码不可用');
+    kgQrStateSet(msg + '（可直接用「导入 Cookie」登录）', 'err');
     return;
   }
-  kgQrKey = String(r.key || '');
-  kgQrDeadline = Date.now() + KG_QR_TIMEOUT_MS;
-  if (shot) {
-    if (r.img) shot.innerHTML = '<img src="' + esc(r.img) + '" alt="">';
-    else if (r.svg) shot.innerHTML = r.svg;
-    else shot.innerHTML = '';
-  }
-  kgQrStateSet('请用手机酷狗扫码（3 分钟内有效）');
+  const qr = r.qr || {};
+  kgQrKey = String(qr.key || '');
+  kgQrDeadline = Number(qr.expiresAt) || (Date.now() + 5 * 60 * 1000);
+  if (shot) shot.innerHTML = qr.img ? '<img src="' + esc(qr.img) + '" alt="">' : '';
+  kgQrStateSet('请用手机酷狗扫码登录');
   kgQrTimer = setTimeout(() => kgQrPoll(token), 800);
 }
 
@@ -2723,13 +2727,13 @@ async function kgQrPoll(token) {
   catch (e) { r = { ok: false, error: { code: '', message: String((e && e.message) || e) } }; }
   if (token !== kgQrToken) return;
   if (!r || !r.ok) {
-    kgQrDead(true, '扫码未开放');
+    kgQrDead(true, '扫码已结束');
     kgQrStateSet((r && r.error && r.error.message) || '扫码状态查询失败', 'err');
     kgQrKey = '';
     return;
   }
-  /* 803 = 手机已确认；上游把 cookie 放在响应里，这里直接复用导入 Cookie 的保存路径 */
-  if (r.code === 803 && r.cookie) {
+  /* confirmed = 登录页已经把 token 写进 cookie；拿它走「导入 Cookie」同一条保存路径 */
+  if (r.state === 'confirmed' && r.cookie) {
     kgQrKey = '';
     kgQrStateSet('已确认，正在保存登录状态…');
     let saved = null;
@@ -2750,7 +2754,14 @@ async function kgQrPoll(token) {
     kgQrStateSet((saved && saved.error && saved.error.message) || '登录状态保存失败', 'err');
     return;
   }
-  if (r.code === 801 || r.code === 802) kgQrStateSet('已扫码，请在手机上确认');
+  /* 二维码会自己刷新：每次把新图换上去，用户不用手动点刷新 */
+  if (r.img) {
+    const shot = $('#kgQrShot');
+    const img = shot && shot.querySelector('img');
+    if (img && img.getAttribute('src') !== r.img) img.setAttribute('src', r.img);
+  }
+  if (r.state === 'scanned') kgQrStateSet('已扫码，请在手机上确认');
+  else if (r.state === 'expired') kgQrStateSet('二维码已刷新，请重新扫码');
   kgQrTimer = setTimeout(() => kgQrPoll(token), KG_QR_POLL_MS);
 }
 

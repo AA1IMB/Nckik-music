@@ -572,12 +572,14 @@ async function rankSongs(rankid, page = 1, size = 50) {
   return { items, page: p, total, hasMore: total ? p * n < total : info.length >= n };
 }
 
-/* ---------------- 登录：扫码（显式降级） ----------------
+/* ---------------- 登录：旧版扫码接口（保留形状，实际走 kugou-qr.js） ----------------
  * `login-user.kugou.com/v1/qrcode` 对 appid/plat 的四种常见组合都回
  * `{"status":0,"error_code":20010,"data":"参数错误"}` —— 这套接口要 web 端那套
- * 签名（mid/dfid/clienttime + md5），本版不做逆向。所以扫码被实现成
- * 「试一次、拿不到就明确抛 KG_QR_UNSIGNED」，由界面降级到「导入 Cookie」，
- * 而不是转圈到超时或假装成功。 */
+ * 签名（mid/dfid/clienttime + md5）。
+ *
+ * 产品里真正的扫码登录不调这里：`player/kugou-qr.js` 直接加载官方登录页，
+ * 让页面自己完成签名、出码与轮询，我们只把二维码取出来、把 cookie 收回来。
+ * 这两个函数留着是为了接口形状完整（外部脚本 / 老代码引用），调用即抛可读错误。 */
 const QR_TARGET = () => 'https://login-user.kugou.com/v1/qrcode?' + new URLSearchParams({
   appid: '1005', plat: '4', srcappid: '2919', clientver: '2000', clienttime: String(Date.now())
 });
