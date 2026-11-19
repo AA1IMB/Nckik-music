@@ -854,6 +854,15 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .qrhelp { margin-top: 6px; text-align: center; font-size: 10.5px; color: var(--fg3); line-height: 1.55; }
 .qracts { margin-top: 12px; }
 .qracts .ghost { width: 100%; height: 32px; }
+/* 酷狗的扫码区多一个「改用导入 Cookie」的降级按钮，两个按钮并排更省高度 */
+#kgQrWrap .qracts { display: flex; gap: 8px; }
+#kgQrWrap .qracts .ghost { width: auto; flex: 1 1 0; }
+.qrimg img { display: block; width: 100%; height: 100%; object-fit: contain; }
+/* 取码过程中的占位（此时还没有码，用一行灰字顶住白卡高度） */
+.qrimg .qrmask.inline {
+  position: static; display: grid; inset: auto; height: 100%;
+  background: #fff; color: #8b8b93; font-size: 12px;
+}
 /* 昵称可能很长，不能把左侧说明挤成两行 */
 #neAuthState { max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .vin {

@@ -7,7 +7,7 @@
 #
 # Usage:
 #   .\启动开发版.ps1                 start the app
-#   .\启动开发版.ps1 -Probe brand    run one probe (brand|edge|quality-ui|home|myplaylists)
+#   .\启动开发版.ps1 -Probe brand    run one probe (brand|edge|quality-ui|src-home|myplaylists)
 #   .\启动开发版.ps1 -Probe all      run every GUI probe in sequence
 
 param(
@@ -34,7 +34,7 @@ New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 $env:TMP = $tmp
 $env:TEMP = $tmp
 
-$probes = @('brand', 'edge', 'quality-ui', 'home')
+$probes = @('brand', 'edge', 'quality-ui', 'src-home')
 
 # Electron is a GUI-subsystem binary: a plain `& $exe` returns immediately and
 # leaves $LASTEXITCODE stale, so wait explicitly and take the real exit code.
@@ -58,7 +58,7 @@ if ($Probe -eq 'myplaylists') {
   try { node demo\probe-myplaylists.js; exit $LASTEXITCODE } finally { Pop-Location }
 }
 
-if ($Probe -eq 'all') { $probes = @('myplaylists', 'brand', 'edge', 'quality-ui', 'home') }
+if ($Probe -eq 'all') { $probes = @('myplaylists', 'brand', 'edge', 'quality-ui', 'src-home') }
 elseif ($probes -notcontains $Probe) {
   throw "Unknown probe '$Probe'. Choose: $($probes -join ', '), or 'all'."
 }

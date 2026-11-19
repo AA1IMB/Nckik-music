@@ -6,6 +6,7 @@ const fsp = require('node:fs/promises');
 const { Readable } = require('node:stream');
 const ne = require('./netease');
 const kg = require('./kugou');
+const src = require('./sources');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -982,6 +983,19 @@ ipcMain.handle('kg:logout', () =>
 ipcMain.handle('kg:authInfo', () => kgCall(async () => ({ auth: kg.authInfo() })));
 ipcMain.handle('kg:qr', () => kgCall(() => kg.qrCreate()));
 ipcMain.handle('kg:qrPoll', (_e, key) => kgCall(() => kg.qrPoll(key)));
+
+/* ---------------- 音源适配层（曲库页共用） ----------------
+ * 两家 provider 的返回在这一层就归一成同一套 Section / PlaylistItem，
+ * 渲染层只写一套「每日推荐 / 推荐歌单 / 我创建的歌单」，不再分两个 UI。
+ * 失败同样是 { ok:false, error:{code,message} }，界面按 code 给出可读原因。 */
+const srcCall = async fn => {
+  try { return { ok: true, ...(await fn()) }; }
+  catch (e) { return { ok: false, error: src.errInfo(e) }; }
+};
+ipcMain.handle('src:caps', () => ({ ok: true, list: src.SOURCES.map(s => src.capsOf(s)) }));
+ipcMain.handle('src:home', (_e, source) => srcCall(() => src.home(source)));
+ipcMain.handle('src:playlist', (_e, source, id, opts) => srcCall(() => src.playlist(source, id, opts || {})));
+ipcMain.handle('src:cover', (_e, source, url, size) => srcCall(async () => ({ dataUrl: await src.cover(source, url, Number(size) || 240) })));
 
 /* ---------------- 列表缩略封面 ----------------
  * 曲库列表一屏十几行，每行都要封面：这里只返回「小图」，不把几 MB 的内嵌原图

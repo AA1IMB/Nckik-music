@@ -316,6 +316,35 @@ function invalidateUrl(hash) {
  * 按 hash 存 data URL：CSP 不用给每个 CDN 开域名，canvas 取色也不会跨域。 */
 const coverCache = new Map();   // hash -> { dataUrl, bytes, at }
 
+/* 很多地址里直接写着 `{size}` 占位符（`imge.kugou.com/stdmusic/{size}/…`），
+ * 不替换会 404；少数地址写的是具体边长，按同段替换成目标尺寸。 */
+function coverAt(raw, size = 240) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const px = size >= 400 ? 400 : 240;
+  return httpsify(s)
+    .replace(/\{size\}/gi, String(px))
+    .replace(/\/(?:150|240|320|400|480)\//, '/' + px + '/');
+}
+
+/* 曲库里的歌单/榜单封面只给地址，进图走这里；和 coverData 共用一份 URL 缓存，
+ * 所以同一张图在列表缩略图与详情里只下一次。 */
+async function coverByUrl(raw, size = 240) {
+  const u = coverAt(raw, size);
+  if (!u) throw new KgError('没有封面地址', 'KG_NO_COVER');
+  const hit = coverCache.get(u);
+  if (hit && Date.now() - hit.at < COVER_TTL) return hit.dataUrl;
+  const r = await request(u, { timeout: 15000, maxBytes: COVER_MAX, headers: { 'User-Agent': UA_DESKTOP, accept: 'image/*' } });
+  if (r.status !== 200) throw new KgError('封面请求失败（HTTP ' + r.status + '）', 'KG_COVER_HTTP');
+  const type = String(r.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (!/^image\//.test(type)) throw new KgError('封面返回的不是图片', 'KG_COVER_TYPE');
+  if (r.buf.length < 128) throw new KgError('封面内容为空', 'KG_COVER_EMPTY');
+  const dataUrl = 'data:' + type + ';base64,' + r.buf.toString('base64');
+  coverCache.set(u, { dataUrl, bytes: r.buf.length, at: Date.now() });
+  while (coverCache.size > COVER_CACHE_MAX) coverCache.delete(coverCache.keys().next().value);
+  return dataUrl;
+}
+
 async function coverData(hash, size = 300) {
   const h = String(hash || '').trim().toLowerCase();
   if (!/^[0-9a-f]{32}$/.test(h)) throw new KgError('曲目标识不对', 'KG_BAD_ID');
@@ -471,12 +500,126 @@ async function status() {
   });
 }
 
-async function qrCreate() {
-  throw new KgError('酷狗扫码接口需要签名，本版未接入；请用「导入 Cookie」登录', 'KG_LOGIN_UNSUPPORTED');
+/* ---------------- 曲库：榜单（充当「推荐歌单」） ----------------
+ * 实测（见 §14.20）：`everyday/recommend`、`personalized/recommend`、`user/playlist`
+ * 对匿名与 Cookie 登录都回纯文本 `Access Deny !!!`（服务端白名单 + 签名），
+ * 只有 `rank/list` 与 `rank/song` 能匿名取到。所以曲库页里：
+ *   每日推荐   → 不可用（能力矩阵 daily:false），界面给原因，不造数据
+ *   推荐歌单   → 由排行榜充当，rankid 就当歌单 id
+ *   我创建的歌单 → 不可用（mine:false），界面引导去登录/导入 Cookie
+ */
+const RANK_TTL = 10 * 60 * 1000;
+let rankMemo = { at: 0, items: [] };
+
+function mapRankSong(raw) {
+  if (!raw || !raw.hash) return null;
+  const hash = String(raw.hash).toLowerCase();
+  const authors = Array.isArray(raw.authors) ? raw.authors : [];
+  const artist = authors.map(a => deent(a && a.author_name)).filter(Boolean).join(' / ')
+    || deent(String(raw.filename || '').split(' - ')[0]) || '未知艺人';
+  const tp = raw.trans_param || {};
+  const pay = Number(raw.pay_type) || 0;
+  return {
+    source: 'kugou',
+    path: 'kg:' + hash,
+    kgHash: hash,
+    title: deent(raw.songname || raw.filename) || '未知曲目',
+    artist,
+    album: '',
+    duration: num(raw.duration) ? Math.round(num(raw.duration)) : 0,
+    coverUrl: coverAt(tp.union_cover || raw.album_sizable_cover || '', 240),
+    codec: 'mp3', sampleRate: 0, bitDepth: 0, bitrate: 0, lossless: false,
+    payType: pay,
+    vip: pay !== 0
+  };
 }
 
-async function qrPoll() {
-  throw new KgError('酷狗扫码接口需要签名，本版未接入；请用「导入 Cookie」登录', 'KG_LOGIN_UNSUPPORTED');
+/* 榜单本身每天只变一两次，缓存十分钟；切标签来回看不会反复打接口。 */
+async function ranks(page = 1, size = 30) {
+  const p = Math.max(1, Number(page) || 1);
+  const n = Math.min(60, Math.max(1, Number(size) || 30));
+  if (p === 1 && rankMemo.items.length >= n && Date.now() - rankMemo.at < RANK_TTL) {
+    return { items: rankMemo.items.slice(0, n), page: 1, hasMore: rankMemo.items.length > n };
+  }
+  const qs = new URLSearchParams({ format: 'json', page: String(p), pagesize: String(n), plat: '0', version: '8000' });
+  const j = await getJSON(API_MOBILE() + '/api/v3/rank/list?' + qs);
+  const info = (j && j.data && j.data.info) || [];
+  const items = info.map(r => ({
+    source: 'kugou',
+    id: String(r.rankid),
+    name: deent(r.rankname) || '未命名榜单',
+    coverUrl: coverAt(r.imgurl || r.img_cover || '', 240),
+    count: num(r.songcount || r.song_count),
+    playCount: num(r.play_times),
+    updateText: deent(r.update_frequency || ''),
+    desc: deent(r.intro || '')
+  }));
+  if (p === 1) rankMemo = { at: Date.now(), items };
+  const total = num(j && j.data && j.data.total);
+  return { items, page: p, hasMore: total ? p * n < total : info.length >= n };
+}
+
+async function rankSongs(rankid, page = 1, size = 50) {
+  const id = String(rankid || '').trim();
+  if (!/^\d+$/.test(id)) throw new KgError('榜单标识不对', 'KG_BAD_ID');
+  const p = Math.max(1, Number(page) || 1);
+  const n = Math.min(100, Math.max(1, Number(size) || 50));
+  const qs = new URLSearchParams({ format: 'json', rankid: id, page: String(p), pagesize: String(n), plat: '0', version: '8000' });
+  const j = await getJSON(API_MOBILE() + '/api/v3/rank/song?' + qs);
+  const info = (j && j.data && j.data.info) || [];
+  const total = num(j && j.data && j.data.total);
+  const items = info.map(mapRankSong).filter(Boolean);
+  return { items, page: p, total, hasMore: total ? p * n < total : info.length >= n };
+}
+
+/* ---------------- 登录：扫码（显式降级） ----------------
+ * `login-user.kugou.com/v1/qrcode` 对 appid/plat 的四种常见组合都回
+ * `{"status":0,"error_code":20010,"data":"参数错误"}` —— 这套接口要 web 端那套
+ * 签名（mid/dfid/clienttime + md5），本版不做逆向。所以扫码被实现成
+ * 「试一次、拿不到就明确抛 KG_QR_UNSIGNED」，由界面降级到「导入 Cookie」，
+ * 而不是转圈到超时或假装成功。 */
+const QR_TARGET = () => 'https://login-user.kugou.com/v1/qrcode?' + new URLSearchParams({
+  appid: '1005', plat: '4', srcappid: '2919', clientver: '2000', clienttime: String(Date.now())
+});
+
+async function qrCreate() {
+  /* 一次网络抖动不该让用户看到「需要签名」这种误导性结论：超时/断网先重试一次，
+   * 两次都拿不到才下结论；而且结论里要区分「接口拒绝」与「网络不通」。 */
+  let detail = '';
+  let netFail = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await request(QR_TARGET(), { timeout: 12000, maxBytes: 256 * 1024, headers: { accept: 'application/json' } });
+      let j = null;
+      try { j = JSON.parse(r.buf.toString('utf8')); } catch { j = null; }
+      if (j && j.status === 1 && j.data && j.data.qrcode) {
+        /* 上游哪天放开了就自动可用：这里不写死「永远失败」 */
+        return {
+          provider: 'kugou',
+          key: String(j.data.qrcode),
+          img: j.data.qrcode_img || j.data.img || '',
+          expiresAt: Date.now() + 120000
+        };
+      }
+      detail = j ? '（error_code ' + (j.error_code || j.status) + '）' : '（HTTP ' + r.status + '）';
+      netFail = null;
+      break;
+    } catch (e) {
+      netFail = (e && e.code) || 'KG_NET';
+      detail = '（' + netFail + '）';
+      if (attempt === 0) continue;          // 网络类错误重试一次
+      break;
+    }
+  }
+  if (netFail) {
+    throw new KgError('获取酷狗二维码失败' + detail + '：网络不通或接口不可达；可改用「导入 Cookie」登录', 'KG_QR_UNSIGNED');
+  }
+  throw new KgError('酷狗扫码接口需要签名，当前版本无法完成扫码' + detail + '；请改用「导入 Cookie」登录', 'KG_QR_UNSIGNED');
+}
+
+async function qrPoll(key) {
+  if (!key) throw new KgError('缺少二维码标识', 'KG_BAD_ID');
+  throw new KgError('酷狗扫码接口需要签名，当前版本无法轮询扫码状态；请改用「导入 Cookie」登录', 'KG_QR_UNSIGNED');
 }
 
 function logout() {
@@ -485,9 +628,10 @@ function logout() {
 
 module.exports = {
   KgError,
-  searchSongs, songUrl, invalidateUrl, coverData, lyric,
+  searchSongs, songUrl, invalidateUrl, coverData, coverAt, coverByUrl, lyric,
+  ranks, rankSongs,
   status, applyAuth, authInfo, verify, logout, setCookie, qrCreate, qrPoll, loggedIn,
   VIP_PROBE_HASH,
   // 纯函数，便于测试/排查
-  mapSong, deent, httpsify, readPlayInfo, BASE_COOKIE
+  mapSong, mapRankSong, deent, httpsify, readPlayInfo, BASE_COOKIE
 };

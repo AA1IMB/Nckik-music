@@ -41,6 +41,11 @@ contextBridge.exposeInMainWorld('api', {
   kgLogout: () => ipcRenderer.invoke('kg:logout'),
   kgQr: () => ipcRenderer.invoke('kg:qr'),
   kgQrPoll: (key) => ipcRenderer.invoke('kg:qrPoll', key),
+  /* 音源适配层：曲库页两家共用同一套形状（每日推荐 / 推荐歌单 / 我创建的歌单） */
+  srcCaps: () => ipcRenderer.invoke('src:caps'),
+  srcHome: (source) => ipcRenderer.invoke('src:home', source),
+  srcPlaylist: (source, id, opts) => ipcRenderer.invoke('src:playlist', source, id, opts),
+  srcCover: (source, url, size) => ipcRenderer.invoke('src:cover', source, url, size),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (s) => ipcRenderer.invoke('settings:set', s),
   setSettingsSync: (s) => ipcRenderer.send('settings:set-sync', s),

@@ -263,6 +263,31 @@
       <div class="line"><div class="k">音源适配<small>搜索 / 歌单 / 专辑 / 歌词 / 封面均走官方网页接口，非正式契约</small></div><div class="v dim">已接入</div></div>
     </div>
 
+    <div class="lbl">酷狗</div>
+    <div class="group">
+      <div class="line"><div class="k">登录状态<small>凭证加密保存于本机，只用于按账号权限取链</small></div><div class="v" id="kgAuthState">未登录</div></div>
+      <div class="line col">
+        <div class="authrow">
+          <button class="ghost" id="btnKgQr">扫码登录</button>
+          <button class="ghost mini" id="btnKgCookie">导入 Cookie</button>
+          <button class="ghost mini" id="btnKgLogout">退出</button>
+        </div>
+      </div>
+      <div class="qrwrap" id="kgQrWrap">
+        <div class="qrbox" id="kgQrBox">
+          <div class="qrimg" id="kgQrShot"></div>
+          <div class="qrmask" id="kgQrMask"></div>
+        </div>
+        <div class="qrstate" id="kgQrState">正在获取二维码…</div>
+        <div class="qrhelp">手机酷狗 App → 我的 → 扫一扫（酷狗扫码接口需客户端签名，未开放时请用「导入 Cookie」）</div>
+        <div class="qracts">
+          <button class="ghost" id="btnKgQrRetry">重试扫码</button>
+          <button class="ghost mini" id="btnKgQrCookie">改用导入 Cookie</button>
+        </div>
+      </div>
+      <div class="line"><div class="k">曲库能力<small>搜索 / 榜单 / 歌词 / 封面可用；每日推荐与我创建的歌单上游未开放</small></div><div class="v dim">部分接入</div></div>
+    </div>
+
     <div class="lbl">音频输出</div>
     <div class="group">
       <div class="line"><div class="k">输出设备</div><div class="v" id="setDev">默认设备</div></div>
