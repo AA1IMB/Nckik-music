@@ -40,7 +40,6 @@ contextBridge.exposeInMainWorld('api', {
   winClose: () => ipcRenderer.invoke('win:close'),
   winFullscreen: (on) => ipcRenderer.invoke('win:fullscreen', on),
   isFullscreen: () => ipcRenderer.invoke('win:fullscreen:get'),
-  winSnapshot: () => ipcRenderer.invoke('win:snapshot'),
   registerKeys: (list) => ipcRenderer.invoke('keys:register', list),
   clearKeys: () => ipcRenderer.invoke('keys:clear'),
   pathOf: (file) => { try { return webUtils.getPathForFile(file); } catch { return ''; } },

@@ -956,10 +956,6 @@ function unlockLyricMotion() {
   clearTimeout(lyrLockTimer);
   if (lyrLockRAF) { cancelAnimationFrame(lyrLockRAF); lyrLockRAF = 0; }
   centerFrame();
-  /* 解锁点就是「视口真的稳定了」的那一刻：换版遮罩要等到这里才淡出。
-   * 不能只按「resize 安静了多久」判断 —— 系统全屏动画里相邻两次 resize
-   * 可能隔 600ms，按 180ms 判静会提前撤掉遮罩，露出半成品排版。 */
-  if (typeof coverFadeOut === 'function' && $('#fsCover') && $('#fsCover').classList.contains('on')) coverFadeOut();
 }
 
 /* 逐字填充：算出「该填到第几个字、这个字填了几成」，只写变化的那几个 span。
@@ -3240,59 +3236,7 @@ function pokeFsHint() {
   fsTimer = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
-/* ---------------- 全屏切换的过渡遮罩（旧画面淡出、新画面淡入） ----------------
- * 窗口几何是系统改的：setFullScreen 之后窗口矩形十几毫秒就到终态，而渲染层要等
- * 几百毫秒才知道最终视口。中间这段时间屏幕上只有被 DWM 拉伸的旧帧，等新排版出来
- * 又是一次硬切，看起来就「割裂」。这里在切换前抓一张当前画面铺满窗口顶住，
- * 等视口稳定（unlockLyricMotion，即最后一次 resize + 520ms）再淡出 ——
- * 换到新排版的那一下就被藏进淡出里了。 */
-let coverBusy = false, coverHideTimer = 0, coverMaxTimer = 0;
-
-function coverReduced() {
-  return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-}
-
-async function shotSwapCover() {
-  const box = $('#fsCover');
-  if (!box || coverReduced() || coverBusy) return false;
-  coverBusy = true;
-  try {
-    const url = await window.api.winSnapshot();
-    if (!url) return false;
-    $('#fsCoverImg').src = url;
-    box.classList.remove('out');
-    box.classList.add('on');
-    /* 顶住的上限：系统的全屏动画可能一直发 resize，不能一直等它安静 ——
-     * 遮罩是静止的旧画面，盖太久会盖住本该在动的歌词。1600ms 之后一律淡出。 */
-    clearTimeout(coverMaxTimer);
-    coverMaxTimer = setTimeout(coverFadeOut, 1600);
-    return true;
-  } catch { return false; } finally { coverBusy = false; }
-}
-
-function coverFadeOut() {
-  const box = $('#fsCover');
-  clearTimeout(coverMaxTimer);
-  if (!box || !box.classList.contains('on') || box.classList.contains('out')) return;
-  /* 收尾挂在 transitionend 上而不是写死 320ms：淡出时长由 CSS 决定
-   * （主题或 prefers-reduced-motion 都可能改），写死会在慢速过渡里提前撤掉元素、
-   * 看起来像闪一下。定时器只作兜底（过渡被打断时 transitionend 不来）。 */
-  const finish = () => {
-    clearTimeout(coverHideTimer);
-    box.classList.remove('on', 'out');
-    /* 位图别留着：一张全屏截图压完也有几十 KB，下次切换再抓新的。 */
-    $('#fsCoverImg').removeAttribute('src');
-  };
-  box.addEventListener('transitionend', finish, { once: true });
-  box.classList.add('out');
-  coverHideTimer = setTimeout(finish, 600);
-}
-
 async function setFullscreen(on) {
-  if (on === isFs) return;
-  /* 必须先抓再切：抓图要几十毫秒，晚一步窗口就已经开始变尺寸。
-   * 遮罩的淡出由 shotSwapCover 里设的上限兜底，不需要在这里再补一个定时器。 */
-  await shotSwapCover();
   try {
     const state = await window.api.winFullscreen(on);
     applyFs(state);        // 以主进程回报的状态为准，连点也不会错位
@@ -3611,14 +3555,8 @@ function bind() {
   window.addEventListener('resize', () => {
     measureScrub();
     // 尺寸每变一次就重新锁一轮（逐帧居中、关掉字号与位移过渡）：
-    // 连续 resize（拖动窗口边、系统全屏动画）也不会让歌词在中间态里抖。
-    // 换版遮罩在的时候用长一点的持锁时间：解锁就是撤遮罩的时刻，宁可多顶半秒，
-    // 也不能在最后一次 resize 还没到时就露出半成品排版。
-    // coverBusy 那段也要算进来：抓图要一两百毫秒，这期间的 resize 已经在改了，
-    // 若按普通 resize 处理（220ms），遮罩会在抓完图后马上被撤掉。
-    const box = $('#fsCover');
-    const swapping = coverBusy || (box && box.classList.contains('on'));
-    lockLyricMotion(swapping ? 520 : 220);
+    // 连续 resize（拖动窗口边、系统全屏动画）也不会让歌词在中间态里抖
+    lockLyricMotion();
   });
   window.addEventListener('beforeunload', flushSettings);
 
