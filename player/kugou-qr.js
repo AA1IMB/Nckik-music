@@ -48,11 +48,25 @@ function guessState(tip, cookie) {
   return 'waiting';
 }
 
+/* 页面自己轮询 `v2/get_userinfo_qrcode`，返回体形如
+ *   {"status":1,"data":{"status":1}}                    等待扫码
+ *   {"status":1,"data":{"status":2,"pic":"…","nickname":"…"}}  已扫码待确认
+ *   {"status":1,"data":{"status":4,"userid":…,"token":"…"}}     手机上已确认
+ *   {"status":1,"data":{"status":0}}                    二维码失效
+ * 我们旁听它（DevTools 协议，只读不改），于是：
+ *   - 不必猜「页面文案」就能知道扫到哪一步；
+ *   - 拿到 status=4 的 token/userid 后，直接调页面自己的 `KgUser.QRCodeLogin`
+ *     去换会话 —— 这一步由官方页面完成签名/加密，我们只当“按键的人”。
+ * 这样即使页面自身的自动换会话在隐藏窗口里没跑起来，登录也能走完。 */
+const POLL_PATH = '*get_userinfo_qrcode*';
+
 function createQrLogin({ BrowserWindow, app }) {
   let win = null;
   let idSeq = 0;
   let current = null;   // { id, startedAt, timer }
   let lastCookie = '';  // 登录成功后暂存，等上层取走
+  let watch = { status: 0, userId: '', token: '', pic: '', nickname: '', exchanged: '' };
+  let watcher = null;   // { dbg, onMessage }
 
   const closed = () => !win || win.isDestroyed();
 
@@ -68,7 +82,9 @@ function createQrLogin({ BrowserWindow, app }) {
   async function readCookie(js) {
     if (closed()) return '';
     const { session } = win.webContents;
-    const list = await session.cookies.get({ domain: '.kugou.com' }).catch(() => []);
+    /* 不按域名挑：换会话的响应来自 loginservice.kugou.com，写下的可能是 host-only cookie，
+     * 用 '.kugou.com' 过滤会漏掉。这里是独立的隐藏分区，按名字白名单收就够了。 */
+    const list = await session.cookies.get({}).catch(() => []);
     const map = new Map();
     for (const c of list) {
       if (KEEP.has(c.name) && c.value) map.set(c.name, c.value);
@@ -87,9 +103,103 @@ function createQrLogin({ BrowserWindow, app }) {
     return { img: '', tip: '' };
   }
 
+  /* 旁听页面的轮询响应：只读，读完立刻放行，不拖慢页面自己的节奏 */
+  function attachWatcher(wc) {
+    if (!wc || wc.isDestroyed()) return;
+    const dbg = wc.debugger;
+    try {
+      if (!dbg.isAttached()) dbg.attach('1.3');
+    } catch (e) {
+      return;   // 附不上就退回「只看 cookie」的老路，不影响扫码本身
+    }
+
+    const onMessage = async (_e, method, params) => {
+      if (method !== 'Fetch.requestPaused') return;
+      const { requestId } = params;
+      try {
+        const body = await dbg.sendCommand('Fetch.getResponseBody', { requestId });
+        const text = body.base64Encoded
+          ? Buffer.from(body.body, 'base64').toString('utf8')
+          : String(body.body || '');
+        let j = null;
+        try { j = JSON.parse(text); } catch (e) { j = null; }
+        const d = j && j.data;
+        if (j && j.status === 1 && d && typeof d.status === 'number') {
+          if (d.status !== watch.status) trace('poll status=' + d.status);
+          watch.status = d.status;
+          if (d.pic) watch.pic = d.pic;
+          if (d.nickname) watch.nickname = d.nickname;
+          if (d.status === 4 && d.token) {
+            watch.token = String(d.token);
+            watch.userId = String(d.userid || '');
+          }
+        }
+      } catch (e) {
+        /* 读不到响应体不影响流程：cookie 兜底仍然有效 */
+      }
+      try { await dbg.sendCommand('Fetch.continueRequest', { requestId }); } catch (e) {}
+    };
+
+    dbg.on('message', onMessage);
+    dbg.sendCommand('Fetch.enable', {
+      patterns: [{ urlPattern: POLL_PATH, requestStage: 'Response' }],
+    }).catch(() => {});
+
+    watcher = { dbg, onMessage };
+  }
+
+  function detachWatcher() {
+    if (!watcher) return;
+    const { dbg, onMessage } = watcher;
+    watcher = null;
+    try {
+      if (!dbg.isAttached()) return;
+      dbg.removeListener('message', onMessage);
+      dbg.sendCommand('Fetch.disable').catch(() => {});
+      dbg.detach();
+    } catch (e) { /* 窗口已销毁时忽略 */ }
+  }
+
+  /* 拿到 status=4 的 token 后，用页面自己的函数换一次会话（只做一次） */
+  async function exchange(wc) {
+    if (!watch.token || watch.exchanged === watch.token) return false;
+    watch.exchanged = watch.token;
+    const args = JSON.stringify([1014, watch.userId || '0', watch.token]);
+    try {
+      await wc.executeJavaScript(`new Promise(r => {
+        const done = v => { try { r(String(v).slice(0, 120)); } catch (e) { r('cb-error'); } };
+        const t = setTimeout(() => r('timeout'), 8000);
+        try {
+          if (!window.KgUser || typeof KgUser.QRCodeLogin !== 'function') { clearTimeout(t); return r('no-fn'); }
+          const a = ${args};
+          KgUser.QRCodeLogin(a[0], a[1], a[2], function (res) { clearTimeout(t); done(res); });
+        } catch (e) { clearTimeout(t); done('throw ' + e.message); }
+      })`, true);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /* 诊断开关：NCKIK_TRACE_KGQR=1 时把每一步状态写进 userData/kgqr.log
+   * （只有状态码与时间，不含 token、不含 cookie，出问题时让用户回传这个文件即可定位） */
+  const TRACE = process.env.NCKIK_TRACE_KGQR === '1';
+  function trace(msg) {
+    if (!TRACE) return;
+    try {
+      const fs = require('node:fs');
+      const file = path.join(app.getPath('userData'), 'kgqr.log');
+      const line = new Date().toISOString() + ' ' + msg + '\n';
+      if (fs.existsSync(file) && fs.statSync(file).size > 64 * 1024) fs.truncateSync(file, 0);
+      fs.appendFileSync(file, line);
+    } catch (e) { /* 日志失败不影响流程 */ }
+  }
+
   async function start() {
     if (win && !win.isDestroyed()) { win.destroy(); win = null; }
+    detachWatcher();
     lastCookie = '';
+    watch = { status: 0, userId: '', token: '', pic: '', nickname: '', exchanged: '' };
 
     win = new BrowserWindow({
       show: false,
@@ -117,6 +227,8 @@ function createQrLogin({ BrowserWindow, app }) {
       err.code = 'KG_QR_LOAD';
       throw err;
     }
+
+    attachWatcher(wc);
 
     const got = await waitQr(js, QR_READY_TIMEOUT);
     if (!got.img) {
@@ -147,12 +259,28 @@ function createQrLogin({ BrowserWindow, app }) {
 
     const wc = win.webContents;
     const js = code => wc.executeJavaScript(code, true);
-    const cookie = await readCookie(js);
+
+    /* 页面已经自己换好会话（或 cookie 已被写入）：直接成功 */
+    let cookie = await readCookie(js);
     if (/\btoken=/.test(cookie)) {
+      trace('cookie has token (page path)');
       lastCookie = cookie;
-      const state = 'confirmed';
       stop('confirmed');
-      return { state, cookie, img: '' };
+      return { state: 'confirmed', cookie, img: '' };
+    }
+
+    /* 手机点了确认但页面没换会话：我们替它按一次「登录」（页面自己的函数，签名/加密都在页面里完成），
+     * 再读一次 cookie。成功与否都以 cookie 为准，不谎报状态。 */
+    if (watch.token && watch.token !== watch.exchanged) {
+      trace('status=4 captured, trying QRCodeLogin');
+      const ok = await exchange(wc);
+      cookie = await readCookie(js);
+      trace('exchange=' + ok + ' cookieToken=' + /\btoken=/.test(cookie));
+      if (/\btoken=/.test(cookie)) {
+        lastCookie = cookie;
+        stop('confirmed');
+        return { state: 'confirmed', cookie, img: '' };
+      }
     }
 
     if (Date.now() - current.startedAt > SESSION_TTL) {
@@ -163,15 +291,27 @@ function createQrLogin({ BrowserWindow, app }) {
     }
 
     const qr = await readQr(js);
-    const state = guessState(qr.tip, cookie);
+    /* 状态优先用页面轮询的真实返回，文案只作兜底 */
+    let state = 'waiting';
+    if (watch.status === 2) state = 'scanned';
+    else if (watch.status === 0 && Date.now() - current.startedAt > 5000) state = 'expired';
+    else state = guessState(qr.tip, cookie);
+    if (watch.status === 2 && state === 'waiting') state = 'scanned';
     /* 失效的码不再回传图：上层会把二维码盖住，避免用户去扫一张已经废掉的码 */
-    return { state, img: state === 'expired' ? '' : qr.img, tip: qr.tip, cookie: '' };
+    return {
+      state,
+      img: state === 'expired' ? '' : qr.img,
+      tip: qr.tip,
+      nickname: watch.nickname,
+      cookie: '',
+    };
   }
 
   function stop(reason) {
     if (current && current.timer) clearTimeout(current.timer);
     if (current) current.timer = 0;
     current = null;
+    detachWatcher();
     if (win && !win.isDestroyed()) win.destroy();
     win = null;
     return { ok: true, reason: reason || 'cancelled' };
@@ -184,10 +324,18 @@ function createQrLogin({ BrowserWindow, app }) {
   }
 
   function status() {
-    return { active: !!current, hasCookie: !!lastCookie };
+    return {
+      active: !!current,
+      hasCookie: !!lastCookie,
+      phase: watch.status,              // 1 等待 / 2 已扫码 / 4 已确认 / 0 失效
+      nickname: watch.nickname || '',
+    };
   }
 
-  app.on('before-quit', () => { if (win && !win.isDestroyed()) win.destroy(); });
+  app.on('before-quit', () => {
+    detachWatcher();
+    if (win && !win.isDestroyed()) win.destroy();
+  });
 
   return { start, poll, stop, takeCookie, status, LOGIN_URL };
 }
