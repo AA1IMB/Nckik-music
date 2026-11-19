@@ -912,6 +912,48 @@ function centerAfterGrow(i) {
   }, 430);
 }
 
+/* 窗口尺寸变化（含进/出全屏）期间的歌词稳定器
+ * ---------------------------------------------------------------------------
+ * 让歌词「抽搐」的是两组过渡撞在一起：`.ln` 的字号有 0.4s 过渡，行高在过渡
+ * 期间一直在变；`.ln-inner` 的位移又有 0.55s 过渡。改一次尺寸，我们按当时的
+ * 中间值算好位移并起一段过渡，字号却还在长，等 480ms 后再校正第二遍 ——
+ * 眼睛里就是先抖一下、再滑一段。全屏来回切时尺寸连变好几次，抖动被叠加得更明显。
+ *
+ * 做法：尺寸变化期间给 body 挂 `lyr-resize`（CSS 里把这两条过渡都关掉），
+ * 并逐帧把当前句钉在中轴上；最后一帧尺寸稳定后再等 hold 毫秒，摘掉类、
+ * 把过渡交还给正常切行。因为解锁时布局已经不动了，那一次 centerLine 的目标
+ * 与当前值相同，不会再产生可见位移。
+ */
+let lyrLockTimer = 0, lyrLockRAF = 0;
+
+function centerFrame() {
+  if (S.lastLy >= 0) centerLine(S.lastLy);
+}
+
+function lockLyricMotion(hold = 220) {
+  clearTimeout(centerTimer);          // 别让字号过渡的旧校正插入这一次
+  document.body.classList.add('lyr-resize');
+  centerFrame();
+  if (!lyrLockRAF) {
+    const step = () => {
+      lyrLockRAF = 0;
+      if (!document.body.classList.contains('lyr-resize')) return;
+      centerFrame();
+      lyrLockRAF = requestAnimationFrame(step);
+    };
+    lyrLockRAF = requestAnimationFrame(step);
+  }
+  clearTimeout(lyrLockTimer);
+  lyrLockTimer = setTimeout(unlockLyricMotion, hold);
+}
+
+function unlockLyricMotion() {
+  document.body.classList.remove('lyr-resize');
+  clearTimeout(lyrLockTimer);
+  if (lyrLockRAF) { cancelAnimationFrame(lyrLockRAF); lyrLockRAF = 0; }
+  centerFrame();
+}
+
 /* 逐字填充：算出「该填到第几个字、这个字填了几成」，只写变化的那几个 span。
  * 已完成 / 还没轮到的字只在字下标变化时批量刷一次，不每帧写几十个样式。 */
 function paintChars(i, chIdx, frac) {
@@ -3176,11 +3218,9 @@ function applyFs(on) {
   $('#wFs').title = isFs ? '退出全屏 (F11)' : '全屏 (F11)';
   if (isFs) pokeFsHint();
   else { $('#fsExit').classList.remove('show'); clearTimeout(fsTimer); }
-  // 封面尺寸与字号都变了，歌词的居中位移要重算；字号有 0.4s 过渡，过渡结束再补一次
-  if (S.lastLy >= 0) {
-    requestAnimationFrame(() => centerLine(S.lastLy));
-    setTimeout(() => { if (S.lastLy >= 0) centerLine(S.lastLy); }, 460);
-  }
+  // 封面与字号都随视口变了：先把歌词的过渡锁住并逐帧居中，等窗口尺寸稳定
+  // 再交还过渡。锁得比尺寸变化久一点（520ms），避免最后一帧 resize 落在解锁之后。
+  lockLyricMotion(520);
 }
 
 function pokeFsHint() {
@@ -3507,15 +3547,11 @@ function bind() {
     if (!qrShown()) setTimeout(qrStart, 80);   // 否则 openDrawer 里已经换过码了
   };
 
-  let rsTimer = 0;
   window.addEventListener('resize', () => {
     measureScrub();
-    if (S.lastLy < 0) return;
-    requestAnimationFrame(() => { if (S.lastLy >= 0) centerLine(S.lastLy); });
-    // 全屏下字号按 vw/vh 取，改尺寸时字号有 0.4s 过渡，过渡结束再对齐一次，
-    // 否则行高还在变，居中的位移会差几像素
-    clearTimeout(rsTimer);
-    rsTimer = setTimeout(() => { if (S.lastLy >= 0) centerLine(S.lastLy); }, 480);
+    // 尺寸每变一次就重新锁一轮（逐帧居中、关掉字号与位移过渡）：
+    // 连续 resize（拖动窗口边、系统全屏动画）也不会让歌词在中间态里抖
+    lockLyricMotion();
   });
   window.addEventListener('beforeunload', flushSettings);
 

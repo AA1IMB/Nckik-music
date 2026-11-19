@@ -237,6 +237,13 @@ body::before {
   will-change: transform;
   transition: transform .55s var(--ease);
 }
+/* 窗口尺寸变化 / 进出自全屏的过程中（JS 挂 body.lyr-resize）：
+ * 字号与位移两条过渡同时关掉，当前句被逐帧钉在中轴上。
+ * 否则字号 0.4s 过渡期间行高还在变，位移却按中间值起了一段 0.55s 过渡，
+ * 等 480ms 后再校一次 —— 看起来就是先抖一下、再滑一段。 */
+body.lyr-resize .ln,
+body.lyr-resize .ln .tr { transition: none; }
+body.lyr-resize .ln-inner { transition: none; }
 /*
  * 进度高亮只有「一层文字」：用 background-clip:text 把渐变裁进字形里。
  * 早先的做法是两层文字叠着（白字打底 + 主色字 clip-path 擦除），

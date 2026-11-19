@@ -23,6 +23,8 @@ const stale = [
   { source: 'netease', path: 'ne:483378330', netId: 483378330, title: '巫堵', artist: 'deca joins', album: '', duration: 0, coverUrl: '', albumId: 0, codec: '', sampleRate: 0, bitDepth: 0, bitrate: 0, lossless: false, fee: 0 }
 ];
 fs.writeFileSync(path.join(tmp, 'library.json'), JSON.stringify(stale, null, 2));
+/* 启动前先把写下去的老数据留在内存里：应用一起来就会把这份文件补写完整 */
+const seededAtStart = JSON.parse(fs.readFileSync(path.join(tmp, 'library.json'), 'utf8'));
 fs.writeFileSync(path.join(tmp, 'settings.json'), JSON.stringify({
   theme: 'dark', volume: 0, muted: true, globalKeys: false, playMode: 'seq',
   playlist: stale.map(t => ({ id: t.path, title: t.title, artist: t.artist, duration: t.duration }))
@@ -53,12 +55,12 @@ const js = c => win.webContents.executeJavaScript(c, true);
   for (let i = 0; i < 200 && !(await js('S.tracks.length')); i++) await sleep(100);
 
   console.log('\n=== 1. 启动前：三条老数据都没有封面地址 ===');
-  /* 断言要看的是「探针写进 library.json 的那份老数据」。
-   * 不能读 S.tracks：healNetCovers() 在 init 里后台跑，网络快的时候
-   * 等窗口就绪的这几百毫秒里就已经补完了，读到的会是补好的结果。 */
-  const seeded = JSON.parse(fs.readFileSync(path.join(tmp, 'library.json'), 'utf8'));
-  const before = seeded.map(t => ({ id: t.netId, coverUrl: t.coverUrl || '', albumId: t.albumId || 0 }));
-  say(before.length === 3 && before.every(t => !t.coverUrl), '老数据确实缺 coverUrl', before);
+  /* 断言要看的是「探针写进 library.json 的那份老数据」，而且在写完之后、
+   * 应用启动之前就要读出来自己存一份：healNetCovers() 在 init 里后台跑，
+   * 网络快的时候等窗口就绪的这几百毫秒里文件就已经被改写成补好的样子了，
+   * 那时再从磁盘读，读到的是「补完之后」的数据，这条断言就会假红。 */
+  const seeded = seededAtStart ? seededAtStart.map(t => ({ id: t.netId, coverUrl: t.coverUrl || '', albumId: t.albumId || 0 })) : [];
+  say(seeded.length === 3 && seeded.every(t => !t.coverUrl), '老数据确实缺 coverUrl', seeded);
 
   console.log('\n=== 2. 启动后自动补齐（healNetCovers） ===');
   const healed = await waitFor(async () => {
