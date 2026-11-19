@@ -159,17 +159,19 @@ async function probeTtl(url, samples) {
 
 const QQ_GUID = digits(10);
 
+/* QQ 的 comm 形状决定接口给不给数据：带 tmeAppID + platform=yqq.json 时
+ * 搜索才稳定返回 code 0（少了 platform 会退化成 2001 或空列表）。 */
 function qqComm(extra = {}) {
-  return { ct: '19', cv: '1859', uin: '0', format: 'json', ...extra };
+  return { ct: '19', cv: '1859', uin: '0', format: 'json', tmeAppID: 'qqmusic', platform: 'yqq.json', ...extra };
 }
 
-async function qqSearch() {
+async function qqSearch(query = QUERY) {
   const payload = {
     comm: qqComm(),
     req_1: {
       module: 'music.search.SearchCgiService',
       method: 'DoSearchForQQMusicDesktop',
-      param: { num_per_page: MAX, page_num: 1, query: QUERY, search_type: 0 }
+      param: { num_per_page: MAX, page_num: 1, query, search_type: 0 }
     }
   };
   const r = await json('https://u.y.qq.com/cgi-bin/musicu.fcg', {
@@ -213,7 +215,7 @@ async function qqUrls(mids) {
   const files = [];
   for (const m of mids) for (const f of qqFileNames(m)) files.push({ mid: m, ...f });
   const payload = {
-    comm: qqComm({ ct: '24', cv: '0' }),
+    comm: qqComm(),
     req_0: {
       module: 'vkey.GetVkeyServer',
       method: 'CgiGetVkey',
@@ -260,7 +262,7 @@ async function qqGuidTest(mids) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'User-Agent': UA_DESKTOP, Referer: 'https://y.qq.com/' },
     body: JSON.stringify({
-      comm: qqComm({ ct: '24', cv: '0' }),
+      comm: qqComm(),
       req_0: {
         module: 'vkey.GetVkeyServer', method: 'CgiGetVkey',
         param: {
@@ -351,8 +353,23 @@ async function runQQ() {
   }
   await sleep(400);
 
-  const mids = search.songs.map(s => s.mid).filter(Boolean);
-  const urls = await qqUrls(mids);
+  let mids = search.songs.map(s => s.mid).filter(Boolean);
+  let urls = await qqUrls(mids);
+
+  /* purl 只为「免费/已授权」的曲目返回：热门歌手整页都是 VIP，会得到 0 条。
+   * 这时换一个大概率有免费曲的词再搜一次，把「免费曲能不能放」与
+   * 「会员曲被授权挡住」区分开。 */
+  if (urls.files && urls.files.filter(f => f.purl).length === 0) {
+    const fallbackQuery = arg('fallback-query', '纯音乐');
+    say('qq.fallback', { reason: '主查询的结果全部没有 purl（多半是 VIP 曲）', query: fallbackQuery });
+    const second = await qqSearch(fallbackQuery);
+    if (second.ok) {
+      mids = second.songs.map(s => s.mid).filter(Boolean);
+      await sleep(300);
+      urls = await qqUrls(mids);
+      out.fallback = { query: fallbackQuery, count: mids.length };
+    }
+  }
   out.urls = { ok: urls.ok, sip: urls.sip, code: urls.code, errType: urls.errType, msg: urls.msg };
   say('qq.urls', out.urls);
   if (!urls.ok) {
