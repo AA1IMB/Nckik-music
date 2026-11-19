@@ -2636,7 +2636,7 @@ function paintKgAccount() {
  * 不假装在轮询 —— 取不到码时遮罩直接写「扫码不可用」并露出降级按钮。
  */
 const KG_QR_POLL_MS = 2000;
-let kgQrTimer = 0, kgQrToken = 0, kgQrKey = '', kgQrDeadline = 0;
+let kgQrTimer = 0, kgQrToken = 0, kgQrKey = '', kgQrDeadline = 0, kgQrKind = '';
 
 function paintKgAuthState() {
   const el = $('#kgAuthState');
@@ -2657,6 +2657,7 @@ function kgQrStateSet(text, kind) {
   if (!el) return;
   el.textContent = text;
   el.className = 'qrstate' + (kind ? ' ' + kind : '');
+  kgQrKind = kind || '';
 }
 
 function kgQrDead(dead, maskText) {
@@ -2760,8 +2761,23 @@ async function kgQrPoll(token) {
     const img = shot && shot.querySelector('img');
     if (img && img.getAttribute('src') !== r.img) img.setAttribute('src', r.img);
   }
-  if (r.state === 'scanned') kgQrStateSet('已扫码，请在手机上确认');
-  else if (r.state === 'expired') kgQrStateSet('二维码已刷新，请重新扫码');
+  if (r.state === 'scanned') {
+    kgQrStateSet('已扫码，请在手机上确认');
+  } else if (r.state === 'expired') {
+    /* 实测：登录页的码约 5 分钟有效，到点后页面自己写「二维码已失效 请点击刷新」，
+     * 而且不会换图。所以这里不是「已刷新」，而是这张码已经废了 —— 盖住它、停掉轮询，
+     * 让用户点「重试扫码」重开一次会话换新码（继续拿旧码去扫只会一直没反应）。 */
+    kgQrKey = '';
+    clearTimeout(kgQrTimer);
+    kgQrTimer = 0;
+    try { window.api.kgQrCancel(); } catch (e) { /* 关窗失败不影响界面 */ }
+    kgQrDead(true, '二维码已失效');
+    kgQrStateSet('二维码已失效（约 5 分钟有效）· 点「重试扫码」换一张', 'err');
+    return;
+  } else {
+    /* 回到等待态时把上一次的错误样式清掉，避免提示一直挂在那儿 */
+    if (kgQrKind === 'err') kgQrStateSet('请用手机酷狗扫码登录');
+  }
   kgQrTimer = setTimeout(() => kgQrPoll(token), KG_QR_POLL_MS);
 }
 

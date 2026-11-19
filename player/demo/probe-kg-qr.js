@@ -74,8 +74,7 @@ const snap = () => js(`(() => {
 
   console.log('\n=== 1. 设置页发起扫码：真的取到二维码 ===');
   await js("$('#btnSet').click()");
-  await sleep(600);
-  const before = BrowserWindow.getAllWindows().length;
+  await sleep(600);  const before = BrowserWindow.getAllWindows().length;
   await js("$('#btnKgQr').click()");
 
   const gotImg = await waitFor(async () => {
@@ -110,6 +109,20 @@ const snap = () => js(`(() => {
   console.log('\n=== 4. 未登录态未被污染 ===');
   const st = await js("(S.kg.status || {}).loggedIn");
   say(st === false, '扫码未完成时仍是未登录', { loggedIn: st });
+
+  /* 第 5 节直接验状态判定：登录页到点会把正文换成「二维码已失效 请点击刷新」，
+   * 且不会自动换图 —— 这一条曾被错读成「已刷新，请重新扫码」，用户拿着死码一直扫。
+   * 这里用真页面文案做字符串级回归，不需要等 5 分钟。 */
+  console.log('\n=== 5. 状态判定：失效不等于「已刷新」 ===');
+  const { guessState } = require(path.join(root, 'kugou-qr.js'));
+  const tipDead = '手机扫码，安全登录酷狗 二维码已失效 请点击刷新 打开手机酷狗音乐，扫一扫登录';
+  const tipLive = '手机扫码，安全登录酷狗 打开手机酷狗音乐，扫一扫登录';
+  say(guessState(tipLive, 'kg_mid=abc') === 'waiting', '正常等待态识别为 waiting', { got: guessState(tipLive, 'kg_mid=abc') });
+  say(guessState(tipDead, 'kg_mid=abc') === 'expired', '页面写「已失效」识别为 expired（不是已刷新）', { got: guessState(tipDead, 'kg_mid=abc') });
+  say(guessState(tipDead, 'kg_mid=abc; token=xyz') === 'confirmed', '有 token 时优先判 confirmed', { got: guessState(tipDead, 'kg_mid=abc; token=xyz') });
+  say(guessState('请在手机上确认登录正在登录', 'kg_mid=abc') === 'scanned', '「请在手机上确认」识别为 scanned', { got: guessState('请在手机上确认登录正在登录', 'kg_mid=abc') });
+  const help = await js("(document.querySelector('#kgQrWrap .qrhelp') || {}).textContent || ''");
+  say(/5 分钟/.test(help) && !/会自动刷新/.test(help), '帮助文案改成「5 分钟有效」而不是「自动刷新」', { help: help.trim().slice(0, 40) });
 
   console.log('\n通过 ' + pass + ' 项，失败 ' + fail + ' 项');
   app.exit(fail ? 1 : 0);

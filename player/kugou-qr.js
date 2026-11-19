@@ -36,6 +36,18 @@ const KEEP = new Set([
 const QR_READY_TIMEOUT = 15000;   // 等二维码出现
 const SESSION_TTL = 5 * 60 * 1000; // 一次扫码流程最多留这么久
 
+/* 从页面提示里判断状态。
+ * 实测（隐藏窗口每 15s 采样）：登录页的二维码约 5 分钟有效，到点后页面自己把正文换成
+ * 「二维码已失效 请点击刷新」，而且**不会自动换图**（img 的 src 一直不变）。
+ * 所以这里只做三态判定；「失效」意味着这张码已经废了，必须重开一次会话拿新码，
+ * 上层不能把它当成「已刷新、再扫一次」。 */
+function guessState(tip, cookie) {
+  if (/\btoken=/.test(cookie)) return 'confirmed';
+  if (/失效|过期|请点击刷新/.test(tip)) return 'expired';
+  if (/确认|已扫码|手机.*确认/.test(tip)) return 'scanned';
+  return 'waiting';
+}
+
 function createQrLogin({ BrowserWindow, app }) {
   let win = null;
   let idSeq = 0;
@@ -62,14 +74,6 @@ function createQrLogin({ BrowserWindow, app }) {
       if (KEEP.has(c.name) && c.value) map.set(c.name, c.value);
     }
     return [...map.entries()].map(([k, v]) => k + '=' + v).join('; ');
-  }
-
-  /* 从页面提示里判断「已扫码待确认」，只用来给界面加一句反馈，不影响判定 */
-  function guessState(tip, cookie) {
-    if (/\btoken=/.test(cookie)) return 'confirmed';
-    if (/确认|已扫码|手机.*确认/.test(tip)) return 'scanned';
-    if (/失效|刷新/.test(tip)) return 'expired';
-    return 'waiting';
   }
 
   async function waitQr(js, ms) {
@@ -159,7 +163,9 @@ function createQrLogin({ BrowserWindow, app }) {
     }
 
     const qr = await readQr(js);
-    return { state: guessState(qr.tip, cookie), img: qr.img, tip: qr.tip, cookie: '' };
+    const state = guessState(qr.tip, cookie);
+    /* 失效的码不再回传图：上层会把二维码盖住，避免用户去扫一张已经废掉的码 */
+    return { state, img: state === 'expired' ? '' : qr.img, tip: qr.tip, cookie: '' };
   }
 
   function stop(reason) {
@@ -186,4 +192,4 @@ function createQrLogin({ BrowserWindow, app }) {
   return { start, poll, stop, takeCookie, status, LOGIN_URL };
 }
 
-module.exports = { createQrLogin, LOGIN_URL, KEEP };
+module.exports = { createQrLogin, LOGIN_URL, KEEP, guessState };
