@@ -53,7 +53,11 @@ const js = c => win.webContents.executeJavaScript(c, true);
   for (let i = 0; i < 200 && !(await js('S.tracks.length')); i++) await sleep(100);
 
   console.log('\n=== 1. 启动前：三条老数据都没有封面地址 ===');
-  const before = await js('S.tracks.map(t => ({id: t.netId, coverUrl: t.coverUrl || "", albumId: t.albumId || 0}))');
+  /* 断言要看的是「探针写进 library.json 的那份老数据」。
+   * 不能读 S.tracks：healNetCovers() 在 init 里后台跑，网络快的时候
+   * 等窗口就绪的这几百毫秒里就已经补完了，读到的会是补好的结果。 */
+  const seeded = JSON.parse(fs.readFileSync(path.join(tmp, 'library.json'), 'utf8'));
+  const before = seeded.map(t => ({ id: t.netId, coverUrl: t.coverUrl || '', albumId: t.albumId || 0 }));
   say(before.length === 3 && before.every(t => !t.coverUrl), '老数据确实缺 coverUrl', before);
 
   console.log('\n=== 2. 启动后自动补齐（healNetCovers） ===');

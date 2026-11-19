@@ -89,13 +89,30 @@ body::before {
   /* 渐变之间无法用 transition 插值（会直接跳变），主色改由 JS 逐帧补间 --ac */
 }
 
+/* ---------------- 布局比例（窗口与全屏共用同一套） ----------------
+ * 几何只在这里定义一次，窗口模式与全屏模式跑的是同一套规则，基准是
+ * 1100×700 的窗口观感：封面 36.4vw / 54vh、左右留白 3.09vw、两列间距
+ * 4.18vw、歌词 2.09vw / 激活行 3.27vw、行距 3.14vh、页脚 21.43vh。
+ * 全屏只是把同一套比例放到更大的视口里 —— 所以封面与歌词在屏幕中所占的
+ * 位置和比例与窗口模式一致，不会「切个全屏封面突然变大、歌词整列右移」。
+ * 上下留白保留比例（8.86vh 的标题栏行 + 21.43vh 的页脚行）：全屏下标题栏
+ * 内容隐藏但行高还在，主区起点才不会往上跳。
+ */
 .app {
   position: relative;
   z-index: 1;
+  --padx: clamp(18px, 3.09vw, 120px);      /* 34 / 1100 */
+  --gapx: clamp(26px, 4.18vw, 160px);     /* 46 / 1100 */
+  --cov: clamp(180px, min(36.4vw, 54vh), 980px);
+  --lnfs: clamp(15px, 2.09vw, 56px);      /* 23 / 1100 */
+  --lnon: clamp(23px, 3.27vw, 92px);      /* 36 / 1100 */
+  --trfs: clamp(11px, 1.59vw, 44px);      /* 17.5 / 1100 */
+  --rowgap: clamp(14px, 3.14vh, 46px);    /* 22 / 700 */
+  --ctrlgap: clamp(10px, 2.29vh, 26px);   /* 16 / 700 */
   display: grid;
-  grid-template-rows: 62px 1fr 150px;
+  grid-template-rows: max(52px, 8.86vh) minmax(0, 1fr) max(126px, 21.43vh);
   height: 100vh;
-  padding: 0 34px;
+  padding: 0 var(--padx);
 }
 
 /* ---------------- 标题栏 ---------------- */
@@ -126,59 +143,17 @@ body::before {
 .wctrl button.cls:hover { background: #c42b1c; color: #fff; }
 
 /* ---------------- 全屏 ----------------
- * 垂直分配只由四个变量决定，任何窗口高度下间距都是同一套比例：
- *   --cov     封面边长 ＝ 歌词列的可见高度（两者同心，当前句永远落在封面中轴上）
- *   --metagap 封面与曲目信息的间距
- *   --meta    曲目信息块的高度（绝对定位，只用来在 .stage 底部预留空间）
- *   --fsx     左右留白
- * 早先封面被 62vh 卡住、页脚又写死 158px，封面下方到进度条之间会空出一大块；
- * 现在封面能吃满「窗口高度 − 页脚 − 曲目信息」的余量，页脚也改为按内容自适应。
+ * 几何比例与窗口模式完全相同（见 .app 顶部那组变量），全屏只做两件事：
+ *   1. 隐藏标题栏内容 —— 但保留它那一行的高度，主区起点才不会往上跳；
+ *   2. 露出右上角的「退出全屏」提示。
+ * 早先这里另有一套 --cov/字号/页脚规则（封面吃满 42vw 与 100vh−300、
+ * 激活行 2.5vw、页脚改内容高度），于是同一块屏幕切全屏时封面会突然放大、
+ * 歌词整列右移，和窗口模式对不上。现在不再覆盖任何比例。
  */
-.app.fs {
-  --fsx: clamp(28px, 4vw, 96px);
-  --metagap: clamp(14px, 1.8vh, 24px);
-  --meta: clamp(72px, 7.6vh, 96px);
-  --cov: clamp(200px, min(42vw, calc(100vh - 300px)), 980px);
-  grid-template-rows: 1fr auto;
-  padding: 0 var(--fsx);
-}
-.app.fs .bar { display: none; }
-
-.app.fs .stage {
-  grid-template-columns: var(--cov) minmax(0, 1fr);
-  gap: clamp(32px, 3.4vw, 72px);
-  align-items: center;
-  /* 曲目信息改为绝对定位后不再参与居中，否则它会把封面整体顶高；
-     这里在底部预留它的高度，封面与歌词就在同一块内容区里居中 */
-  padding-bottom: calc(var(--meta) + var(--metagap));
-}
-.app.fs .covercol { position: relative; gap: 0; }
-.app.fs .cover {
-  width: var(--cov); height: var(--cov);
-  border-radius: clamp(16px, 1.5vw, 28px);
-}
-.app.fs .meta {
-  position: absolute; left: 0; right: 0; top: calc(100% + var(--metagap));
-  padding-left: 2px;
-}
-.app.fs .mt { font-size: clamp(18px, 1.35vw, 26px); }
-.app.fs .ma { font-size: clamp(12px, .82vw, 15px); margin-top: clamp(4px, .7vh, 8px); }
-.app.fs .mf { font-size: clamp(10.5px, .66vw, 12.5px); margin-top: clamp(5px, .8vh, 8px); }
-
-/* 歌词列高度 ＝ 封面边长：两者的垂直中心重合 */
-.app.fs .lyrcol { height: var(--cov); padding-top: 0; padding-right: clamp(0px, 1.4vw, 32px); }
-.app.fs .ln-inner { gap: clamp(14px, 1.7vh, 28px); }
-.app.fs .ln { font-size: clamp(21px, 1.55vw, 38px); }
-.app.fs .ln.on { font-size: clamp(29px, 2.5vw, 62px); }
-
-/* 页脚改为内容高度：进度条与曲目信息之间不再有固定 158px 里挤出来的空档 */
-.app.fs .ctrl {
-  justify-content: flex-start;
-  gap: clamp(8px, 1.4vh, 18px);
-  padding-top: clamp(4px, 1vh, 14px);
-  padding-bottom: clamp(18px, 3vh, 40px);
-}
-
+/* 标题栏用 visibility 而不是 display:none：网格行是显式定义的，元素一旦
+ * 不参与布局，.stage 会自动往前占掉第一行，主区整体上移 8.86vh，全屏与
+ * 窗口模式的位置就对不上了。visibility:hidden 保留占位且不可点击。 */
+.app.fs .bar { visibility: hidden; pointer-events: none; }
 .fs-exit {
   position: fixed; top: 20px; right: 22px; z-index: 40;
   display: none; align-items: center; gap: 7px;
@@ -197,20 +172,21 @@ body::before {
 /* ---------------- 主区：左封面 右歌词 ---------------- */
 .stage {
   display: grid;
-  grid-template-columns: 400px minmax(0, 1fr);
-  gap: 46px;
+  /* 列宽与列间距都来自 .app 的比例变量：全屏只是视口变大，比例不变 */
+  grid-template-columns: var(--cov) minmax(0, 1fr);
+  gap: var(--gapx);
   align-items: center;
   min-height: 0;
   padding-bottom: 6px;
 }
 
-.covercol { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.covercol { display: flex; flex-direction: column; gap: clamp(12px, 2.86vh, 36px); min-width: 0; }
 
 .cover {
   position: relative;
-  /* 高度受限时封面跟着缩：460 + 标题栏 62 + 页脚 150 + 曲目信息 ≈ 只能给到 100vh − 316，
-     否则窗口压到最小（860×560）时歌名会压到进度条上 */
-  width: clamp(180px, min(400px, calc(100vh - 316px)), 400px);
+  /* 边长由 --cov 统一给：36.4vw 与 54vh 取小，所以封面永远在「窗口高度扣掉
+     标题栏与页脚」的余量之内，歌名不会压到进度条上；窗口与全屏同一套。 */
+  width: var(--cov);
   height: auto;
   aspect-ratio: 1 / 1;
   border-radius: 22px;
@@ -240,10 +216,10 @@ body::before {
 
 .meta { min-width: 0; padding-left: 2px; }
 .mt {
-  font-size: 21px; letter-spacing: -.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: clamp(15px, 1.91vw, 46px); letter-spacing: -.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ma { font-size: 13px; color: var(--fg2); margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mf { font-size: 11.5px; color: var(--fg3); margin-top: 7px; letter-spacing: .2px; }
+.ma { font-size: clamp(11px, 1.18vw, 30px); color: var(--fg2); margin-top: clamp(4px, .86vh, 11px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mf { font-size: clamp(10px, 1.05vw, 26px); color: var(--fg3); margin-top: clamp(5px, 1vh, 12px); letter-spacing: .2px; }
 
 /* ---------------- 歌词 ---------------- */
 .lyrcol {
@@ -257,7 +233,7 @@ body::before {
 }
 .ln-inner {
   position: relative;
-  display: flex; flex-direction: column; align-items: flex-start; gap: 22px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--rowgap);
   will-change: transform;
   transition: transform .55s var(--ease);
 }
@@ -273,7 +249,7 @@ body::before {
   position: relative;
   width: 100%;                /* 行宽交给 .ln-tx：译文不能把「…」推到右边去 */
   max-width: 100%;
-  font-size: 23px;
+  font-size: var(--lnfs);
   line-height: 1.45;
   letter-spacing: -.2px;
   white-space: pre-wrap;
@@ -296,7 +272,7 @@ body::before {
 .ln.on {
   --lc1: var(--acInk, #fff);
   --lc2: var(--fg);
-  font-size: 36px;
+  font-size: var(--lnon);
   filter: blur(0);
   opacity: 1;
 }
@@ -320,7 +296,7 @@ body::before {
 .ln .tr {
   display: block;
   margin-top: 6px;
-  font-size: 17.5px;
+  font-size: var(--trfs);
   line-height: 1.55;
   letter-spacing: .1px;
   color: var(--fg2);
@@ -380,7 +356,7 @@ body.no-tr .ln .tr { display: none; }
 .lyr-empty.show { display: block; }
 
 /* ---------------- 控制区 ---------------- */
-.ctrl { display: flex; flex-direction: column; justify-content: center; gap: 16px; padding-bottom: 12px; }
+.ctrl { display: flex; flex-direction: column; justify-content: center; gap: var(--ctrlgap); padding-bottom: 12px; }
 
 /* flex:none：页脚是列向 flex，进度条一旦允许收缩/扩张，按下时的任何
  * 弹性变化都会把下面的按钮行推走。它的高度只由这条 height 决定。 */
@@ -864,11 +840,9 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .drop-hint.show { display: grid; }
 
 @media (max-width: 980px) {
-  /* 窄窗口同样按高度收敛封面，否则 860×560 这种最小尺寸下歌名会压到进度条上 */
-  .stage { grid-template-columns: min(320px, calc(100vh - 316px)) minmax(0, 1fr); gap: 30px; }
-  .cover { width: 100%; height: auto; }
-  .ln.on { font-size: 30px; }
-  .ln { font-size: 20px; }
+  /* 窄窗口只收紧封面这一项比例，其余仍是同一套变量：
+     860×560 这种最小尺寸下，封面按高度收敛后歌名不会压到进度条上。 */
+  .app { --cov: clamp(150px, min(32vw, calc(100vh - 300px)), 340px); }
 }
 
 /* 歌词栏收起（L 键） */
