@@ -260,6 +260,37 @@ body.fs-swap .stage {
 @media (prefers-reduced-motion: reduce) {
   body.fs-swap .stage { animation: none; }
 }
+
+/* 全屏切换的过渡遮罩（B 方案）：窗口几何由系统接管，渲染层要等几百毫秒才知道
+ * 最终视口，这段时间屏幕上只有被 DWM 拉伸的旧帧。所以切换前先抓一张当前画面铺满
+ * 整个窗口（object-fit: cover 跟系统一样「铺开」），等新排版出来再 260ms 淡出 ——
+ * 换版就成了「旧画面淡出、新画面淡入」，而不是两次硬切。 */
+.fs-cover {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: none;
+  opacity: 1;
+  pointer-events: none;
+  background: #000;
+  transition: opacity .2s var(--ease);
+}
+.fs-cover.on { display: block; }
+.fs-cover.out { opacity: 0; }
+.fs-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 50%;
+  /* 淡出时旧画面极轻微地推回去一点，靠这点运动压住两张排版叠在一起的「重影感」 */
+  transform: scale(1.006);
+  transition: transform .2s var(--ease);
+}
+.fs-cover.out img { transform: scale(1); }
+@media (prefers-reduced-motion: reduce) {
+  .fs-cover { transition: none; }
+}
 /*
  * 进度高亮只有「一层文字」：用 background-clip:text 把渐变裁进字形里。
  * 早先的做法是两层文字叠着（白字打底 + 主色字 clip-path 擦除），

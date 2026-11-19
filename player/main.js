@@ -940,6 +940,21 @@ ipcMain.handle('win:max', () => {
 ipcMain.handle('win:close', () => { if (win && !win.isDestroyed()) win.close(); });
 ipcMain.handle('win:fullscreen', (_e, on) => setFullscreen(!!on));
 ipcMain.handle('win:fullscreen:get', () => !!win && !win.isDestroyed() && win.isFullScreen());
+/* 切换全屏时给渲染层一张「切换前」的画面。系统改窗口几何与渲染层按新视口重排
+ * 之间隔了几百毫秒，这期间屏幕上只有被 DWM 拉伸的旧帧；渲染层拿这张图铺成遮罩
+ * 顶住，等新排版出来再淡出（见 renderer 的 fsCover）。 */
+ipcMain.handle('win:snapshot', async () => {
+  if (!win || win.isDestroyed()) return '';
+  try {
+    const img = await win.webContents.capturePage();
+    if (!img || img.isEmpty()) return '';
+    /* 只是拿去铺一帧过渡，不需要原分辨率：缩到 1280 宽再压成 JPEG，
+     * 一张图从几 MB 降到几十 KB —— IPC 更快，遮罩释放时也不占内存。 */
+    const { width } = img.getSize();
+    const small = width > 1280 ? img.resize({ width: 1280 }) : img;
+    return 'data:image/jpeg;base64,' + small.toJPEG(85).toString('base64');
+  } catch { return ''; }
+});
 
 let keyTable = [];
 ipcMain.handle('keys:register', (_e, list) => {
