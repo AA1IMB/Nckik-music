@@ -12,6 +12,7 @@ const S = {
   q: [],                            // 播放队列：settings.playlist 的运行时投影，等长同序
   shufPool: new Set(),              // 随机播放「本轮还没播过」的 id 池（存 id 不存下标）
   shufDone: new Set(),              // 本轮已经播过的 id：列表增删重排时重建池也不许把它们放回来
+  shufFail: new Map(),              // id -> 本轮失败次数：连着放不出来的歌暂时别抽（避免两首坏歌来回跳）
   i: -1,                            // ★ 队列下标（不是曲库下标）；取当前曲目请用 curTrack()
   playing: false,
   lyrics: [],
@@ -96,10 +97,31 @@ function rebuildQueue(keep) {
   return at >= 0;
 }
 
+/* 队列里可能有一首「曲库里没有、但确实是网易云曲目」的歌：导入歌单时并没有把整张单子
+ * 塞进曲库（曲库是「我的收藏」，不是「当前歌单」），于是这些行的 id 在 S.tracks 里查不到。
+ * 这类行不是坏行 —— neaudio 只认 ne:<id>，按 id 现造一个最小 Track 就能播。
+ * 以前它们被当成坏行交给 skipDead 按列表顺序往后找，随机播放就会老跳回那两三首可播的邻居。 */
+function synthNetTrack(item) {
+  const id = String((item && item.id) || '');
+  if (!id.startsWith(NET_PREFIX)) return null;
+  const netId = Number(id.slice(NET_PREFIX.length));
+  if (!netId) return null;
+  return {
+    path: id,                        // 队列/持久化都以 path 为键，合成曲目也用同一个 id
+    source: 'netease',
+    netId,
+    title: item.title || '',
+    artist: item.artist || '',
+    album: '',
+    duration: Number(item.duration) || 0,
+    codec: '', bitrate: 0, lossless: false, coverUrl: ''
+  };
+}
+
 function qTrack(qi) {
   const row = S.q[qi];
   if (!row) return null;
-  if (!row.t) row.t = resolveTrack(row.id);
+  if (!row.t) row.t = resolveTrack(row.id) || synthNetTrack(row.item);
   return row.t;
 }
 
@@ -120,10 +142,19 @@ function resetShufPool(soft) {
 function shufNext() {
   if (!S.shufPool.size) {                 // 一轮播完 → 开新一轮（清空已播记录再洗）
     S.shufDone = new Set();
+    S.shufFail = new Map();               // 新一轮给坏歌一次机会
     resetShufPool(false);
   }
   if (!S.shufPool.size) return -1;        // 只有一首且就是当前曲
-  const ids = [...S.shufPool];
+  /* 只从「真的能播」的行里抽：本地文件被删掉之后那一行不该占掉本轮的名额，
+   * 否则一次随机可能连着跳好几次，听感就是卡顿、乱跳。
+   * 本轮已经失败过两次的歌也先别抽（网易云偶发 5xx 时，两首坏歌会互相弹回去）。 */
+  const live = [...S.shufPool].filter(id => {
+    if ((S.shufFail.get(id) || 0) >= 2) return false;
+    const qi = S.q.findIndex(x => x.id === id);
+    return qi >= 0 && !!qTrack(qi);
+  });
+  const ids = live.length ? live : [...S.shufPool];
   const pick = ids[Math.floor(Math.random() * ids.length)];
   S.shufPool.delete(pick);
   S.shufDone.add(pick);
@@ -131,6 +162,13 @@ function shufNext() {
   if (qi < 0) return -1;
   if (S.i >= 0) { S.hist.push(S.i); if (S.hist.length > 500) S.hist.shift(); }
   return qi;
+}
+
+/* 随机模式下「放不出来」记账：同一首连失两次就暂时踢出本轮候选。 */
+function markShufFail(path) {
+  if (!path) return;
+  const n = (S.shufFail.get(path) || 0) + 1;
+  S.shufFail.set(path, n);
 }
 
 function shufBack() {
@@ -2520,6 +2558,7 @@ async function playAt(qi, opts) {
         ? (k.fee === 1 || k.fee === 4 ? '需会员' : '无版权')
         : code === 'NE_TIMEOUT' ? '网络超时' : '暂时无法播放';
       k.unavailable = reason;
+      if (S.settings.playMode === 'shuffle') markShufFail(k.path);
       toast(`无法播放：${k.title}（${reason}）`);
       if (S.q.length > 1 && errStreak < 3) {
         errStreak++;
@@ -2688,10 +2727,19 @@ function stepIndex(dir = 1, from = S.i) {
   return ni;
 }
 
-/* 队列行指向一首曲库里没有的歌时（删了文件 / 没登录网易云）：
- * 顺序模式下继续往下找，最多绕一圈；找不到就停下并说明，不要静默卡住。 */
+/* 队列行指向一首曲库里没有的歌时（本地文件删了 / 挪走了）：
+ * 随机模式必须继续「随机」找下一首，不能按列表顺序往后扫 —— 顺序扫描会反复落到
+ * 同一批可播的邻居上，听感就是「在两三首之间来回跳」。顺序模式才按列表往下找，
+ * 最多绕一圈；都找不到就停下并说明，不要静默卡住。 */
 async function skipDead(qi, opts) {
   const n = S.q.length;
+  if (S.settings.playMode === 'shuffle') {
+    for (let i = 0; i < n; i++) {
+      const ni = shufNext();
+      if (ni < 0) break;
+      if (qTrack(ni)) return playAt(ni, opts);
+    }
+  }
   for (let step = 1; step <= n; step++) {
     const cand = (qi + step) % n;
     if (cand === qi) break;
@@ -3316,7 +3364,13 @@ function bind() {
   audio.addEventListener('play', () => { S.playing = true; syncPlayIcon(); });
   audio.addEventListener('pause', () => { S.playing = false; syncPlayIcon(); });
   audio.addEventListener('waiting', () => { clock.stalled = true; });
-  audio.addEventListener('playing', () => { clock.stalled = false; errStreak = 0; syncClock(); });
+  audio.addEventListener('playing', () => {
+    clock.stalled = false;
+    errStreak = 0;
+    const k = curTrack();
+    if (k) S.shufFail.delete(k.path);      // 这轮放出来了，把失败记录清掉
+    syncClock();
+  });
   /* 播完自动续：单曲循环重播当前；其余交给 stepIndex（顺序到末尾就停，随机一直有下一首） */
   audio.addEventListener('ended', () => {
     if (S.settings.playMode === 'one') { audio.currentTime = 0; audio.play().catch(() => {}); return; }
@@ -3334,6 +3388,7 @@ function bind() {
     const k = curTrack();
     const name = (k && k.title) || '该曲目';
     if (isNet(k)) k.unavailable = '加载失败';
+    if (k && S.settings.playMode === 'shuffle') markShufFail(k.path);   // 连着坏两次就先别抽它
     if (S.q.length > 1 && errStreak < 3) {
       errStreak++;
       toast(isNet(k) ? `跳过：${name}（网易云加载失败）` : `跳过无法播放的曲目：${name}`);
