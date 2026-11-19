@@ -648,6 +648,37 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .ne-note.linked { cursor: pointer; }
 .ne-note.linked:hover { color: var(--fg2); text-decoration: underline; text-underline-offset: 2px; }
 
+/* 酷狗账号条：只在「酷狗」来源下出现，占位高度与一条 ne-note 接近，不挤动列表 */
+.kg-account {
+  display: none; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 10px; margin: -2px 2px 12px;
+  border-radius: 9px; background: var(--card);
+}
+.kg-account .kg-who { font-size: 11px; color: var(--fg2); line-height: 1.5; min-width: 0; }
+.kg-account .kg-who b { color: var(--fg); font-weight: 600; }
+.kg-account .kg-who small { display: block; font-size: 10px; color: var(--fg3); margin-top: 2px; }
+.kg-account .kg-acts { display: flex; gap: 6px; flex: none; }
+.kg-account .ghost.mini { width: auto; padding: 0 9px; height: 24px; font-size: 11px; }
+
+/* 导入 Cookie 的面板 */
+.kgpop { width: 380px; max-width: calc(100vw - 24px); }
+.kgpop .kg-how {
+  margin: 0; padding: 0 10px 6px 26px; font-size: 10.5px; line-height: 1.7; color: var(--fg3);
+}
+.kgpop .kg-how code { color: var(--fg2); font-size: 10px; }
+.kgpop .kg-ta {
+  display: block; width: calc(100% - 20px); margin: 0 10px; height: 92px; resize: vertical;
+  padding: 8px 9px; border-radius: 9px; box-sizing: border-box;
+  background: var(--bg); color: var(--fg); border: .5px solid var(--line);
+  font: 10.5px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  word-break: break-all;
+}
+.kgpop .kg-ta:focus { outline: none; box-shadow: 0 0 0 1px var(--ctl); }
+.kgpop .kg-msg { min-height: 15px; padding: 6px 10px 0; font-size: 10.5px; line-height: 1.5; color: var(--fg3); }
+.kgpop .kg-msg.err { color: #ef7d6b; }
+.kgpop .row2 { display: flex; gap: 8px; padding: 8px 10px 0; }
+.kgpop .row2 .ghost.mini { flex: 1 1 0; width: auto; height: 28px; font-size: 11.5px; }
+
 /* ---------------- 网易云首页：推荐 + 我的歌单 ----------------
  * 抽屉只有 440px 宽，层级只靠「字号 + 灰度 + 间距」拉开，不引入第二种主色：
  *   分组标题 11px 灰 → 歌单名 12.5px 常规 → 副信息 10.5px 更灰。

@@ -892,10 +892,43 @@ ipcMain.handle('ne:url', (_e, id, quality) =>
     };
   }));
 
+/* ---------------- 酷狗凭证 ----------------
+ * 与 ne-auth.bin 同一套：只存浏览器里登录后复制的 Cookie 串，用系统密钥库加密落盘。
+ * 路径 userDir/kg-auth.bin；绝不写进 settings.json（那个文件会被导出/分享），
+ * 也绝不写日志（日志只出现 mask 之后的摘要）。 */
+const kgAuthStore = createKgAuthStore();
+
+function createKgAuthStore() {
+  const { createStore } = require('./kugou-auth');
+  return createStore({ filePath: path.join(userDir, 'kg-auth.bin'), safeStorage });
+}
+
+/* 读盘 → 解析 → 交给 provider。解析失败/密钥库不可用都只是「没登录」，不阻塞启动。 */
+function loadKgAuth() {
+  try {
+    const saved = kgAuthStore.readRaw();
+    if (!saved || !saved.cookie) return null;
+    const parsed = kgAuthStore.parseCookie(saved.cookie);
+    if (!kgAuthStore.hasIdentity(parsed)) return null;
+    kg.applyAuth({ cookie: parsed.cookie, token: parsed.token, userid: parsed.userid });
+    return parsed;
+  } catch { return null; }
+}
+
+function saveKgAuth(rawCookie) {
+  const parsed = kgAuthStore.parseCookie(rawCookie);
+  if (!parsed.cookie) throw Object.assign(new Error('没有识别到 Cookie 内容'), { code: 'KG_AUTH_EMPTY' });
+  if (!kgAuthStore.hasIdentity(parsed)) {
+    throw Object.assign(new Error('这份 Cookie 里没有 token / userid，可能复制的是未登录页面'), { code: 'KG_AUTH_NO_IDENTITY' });
+  }
+  kgAuthStore.writeRaw({ cookie: parsed.cookie, at: Date.now() });
+  kg.applyAuth({ cookie: parsed.cookie, token: parsed.token, userid: parsed.userid });
+  return parsed;
+}
+
 /* ---------------- 酷狗 IPC ----------------
- * 形状与 ne:* 一致（同样用 neCall 包一层 { ok, ... } / { ok:false, error }），
- * 这样渲染层的错误处理不用为第二家再写一套。登录相关只有 status / logout 有实体，
- * qrCreate / qrPoll 明确回 KG_LOGIN_STUB —— 先把位置留出来，不假装已经支持。
+ * 形状与 ne:* 一致（同样用 kgCall 包一层 { ok, ... } / { ok:false, error }），
+ * 这样渲染层的错误处理不用为第二家再写一套。
  */
 const kgCall = async fn => {
   try { return { ok: true, ...(await fn()) }; }
@@ -921,7 +954,32 @@ ipcMain.handle('kg:cover', (_e, hash, size) =>
 
 ipcMain.handle('kg:lyric', (_e, hash) => kgCall(() => kg.lyric(hash)));
 ipcMain.handle('kg:status', () => kgCall(() => kg.status()));
-ipcMain.handle('kg:logout', () => kgCall(async () => { kg.logout(); return {}; }));
+
+/* 登录只走「导入 Cookie」：扫码/短信要签名，本版不碰。
+ * 入参是用户从浏览器复制的整串 Cookie；返回只包含脱敏摘要，明文不回传渲染层。 */
+ipcMain.handle('kg:login', (_e, rawCookie) =>
+  kgCall(async () => {
+    const parsed = saveKgAuth(rawCookie);
+    /* 存下来之后立刻自检一次：拿会员探测曲试取链。
+     * 失败不算登录失败（凭证可能只是没有会员），把结论交给 UI 说明原因。 */
+    let check = null;
+    try { check = await kg.verify(); } catch (e) { check = { error: (e && e.code) || 'verify-failed' }; }
+    return {
+      auth: kg.authInfo(),
+      check,
+      /* 回给渲染层的都是摘要：token 仅前 4 位 + 长度 */
+      summary: kgAuthStore.maskSummary(parsed)
+    };
+  }));
+
+ipcMain.handle('kg:logout', () =>
+  kgCall(async () => {
+    kg.logout();
+    kgAuthStore.clear();
+    return { auth: kg.authInfo() };
+  }));
+
+ipcMain.handle('kg:authInfo', () => kgCall(async () => ({ auth: kg.authInfo() })));
 ipcMain.handle('kg:qr', () => kgCall(() => kg.qrCreate()));
 ipcMain.handle('kg:qrPoll', (_e, key) => kgCall(() => kg.qrPoll(key)));
 
@@ -1094,6 +1152,7 @@ app.whenReady().then(() => {
   registerNeProtocol();
   registerKgProtocol();
   ne.setCookie(readNeCookie());     // 上次扫过的凭证在开窗前就位，首屏点歌即可用
+  loadKgAuth();                     // 同理：酷狗凭证也从加密文件恢复，首屏就能播会员曲
   ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

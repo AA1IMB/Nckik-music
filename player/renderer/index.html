@@ -149,6 +149,23 @@
   <div class="pop-note" id="devNote"></div>
 </div>
 
+<!-- 酷狗登录：只收 Cookie，不收账号密码 -->
+<div class="pop kgpop" id="popKgAuth">
+  <div class="pop-head"><span>导入酷狗登录 Cookie</span></div>
+  <ol class="kg-how">
+    <li>浏览器打开 kugou.com 并登录</li>
+    <li>F12 → Network → 任选一个请求 → 复制请求头里的 <code>Cookie</code> 整行</li>
+    <li>粘贴到下面，保存后会立刻用一首会员曲自检</li>
+  </ol>
+  <textarea class="kg-ta" id="kgCookie" spellcheck="false" placeholder="kg_mid=…; kg_dfid=…; token=…; userid=…"></textarea>
+  <div class="kg-msg" id="kgMsg"></div>
+  <div class="row2">
+    <button class="ghost mini" id="kgAuthCancel">取消</button>
+    <button class="ghost mini" id="kgAuthSave">保存并验证</button>
+  </div>
+  <div class="pop-note">Cookie 只保存在本机（系统密钥库加密），不会写进设置、日志或曲库。</div>
+</div>
+
 <!-- 播放列表 -->
 <div class="pop plpop" id="popPl">
   <div class="pop-head"><span>播放列表</span><span class="pl-sub" id="plCount">0 首</span></div>
@@ -183,6 +200,13 @@
       <button class="ghost mini" id="btnNeOpen">打开</button>
     </div>
     <div class="ne-note" id="neNote"></div>
+    <div class="kg-account" id="kgAccount" style="display:none">
+      <div class="kg-who" id="kgWho">未登录 · 仅免费曲</div>
+      <div class="kg-acts">
+        <button class="ghost mini" id="kgLoginBtn">导入 Cookie</button>
+        <button class="ghost mini" id="kgLogoutBtn" style="display:none">退出</button>
+      </div>
+    </div>
     <div class="ne-note" id="kgNote" style="display:none"></div>
     <div class="ne-home" id="neHome"></div>
     <div class="dr-sub" id="libCount">0 首</div>

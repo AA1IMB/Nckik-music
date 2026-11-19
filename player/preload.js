@@ -29,12 +29,15 @@ contextBridge.exposeInMainWorld('api', {
   neHome: () => ipcRenderer.invoke('ne:home'),
   neDaily: () => ipcRenderer.invoke('ne:daily'),
   neFm: (n) => ipcRenderer.invoke('ne:fm', n),
-  /* 酷狗（免费曲）：搜索 / 取链 / 封面 / 歌词；登录只留接口，目前恒为未登录 */
+  /* 酷狗：搜索 / 取链 / 封面 / 歌词；登录走「导入 Cookie」 */
   kgSearch: (q, limit) => ipcRenderer.invoke('kg:search', { q, limit }),
   kgUrl: (hash) => ipcRenderer.invoke('kg:url', hash),
   kgCover: (hash, size) => ipcRenderer.invoke('kg:cover', hash, size),
   kgLyric: (hash) => ipcRenderer.invoke('kg:lyric', hash),
   kgStatus: () => ipcRenderer.invoke('kg:status'),
+  /* 登录：入参是用户粘贴的整串 Cookie；主进程只回脱敏摘要，明文不回渲染层。 */
+  kgLogin: (cookie) => ipcRenderer.invoke('kg:login', cookie),
+  kgAuthInfo: () => ipcRenderer.invoke('kg:authInfo'),
   kgLogout: () => ipcRenderer.invoke('kg:logout'),
   kgQr: () => ipcRenderer.invoke('kg:qr'),
   kgQrPoll: (key) => ipcRenderer.invoke('kg:qrPoll', key),

@@ -1983,10 +1983,12 @@ function setSource(mode) {
   $('#neNote').style.display = net ? 'block' : 'none';
   const kgNote = $('#kgNote');
   if (kgNote) kgNote.style.display = kgMode ? 'block' : 'none';
+  const kgAcc = $('#kgAccount');
+  if (kgAcc) kgAcc.style.display = kgMode ? 'flex' : 'none';
   if (!net) $('#neHome').classList.remove('show');
   const q = $('#q');
   q.value = '';
-  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑' : kgMode ? '搜索酷狗免费曲：曲名 / 艺人' : '搜索曲名 / 艺人 / 专辑';
+  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑' : kgMode ? '搜索酷狗：曲名 / 艺人' : '搜索曲名 / 艺人 / 专辑';
   if (net) {
     updateNeNote();
     if (S.ne.view !== 'coll') S.ne.view = 'home';
@@ -2326,15 +2328,103 @@ async function kgEnsureStatus() {
   try { st = await window.api.kgStatus(); } catch {}
   if (st && st.ok) S.kg.status = st;
   paintKgNote();
+  paintKgAccount();
+}
+
+/* 账号条：未登录只显示「导入 Cookie」，登录后显示账号摘要 + 退出。
+ * 所有文案都从 S.kg.status 派生，不在别处再拼第二套说法。 */
+function paintKgAccount() {
+  const box = $('#kgAccount');
+  if (!box) return;
+  const st = S.kg.status || {};
+  const who = $('#kgWho');
+  const inBtn = $('#kgLoginBtn');
+  const outBtn = $('#kgLogoutBtn');
+  if (!st.loggedIn) {
+    who.innerHTML = '未登录 · 仅能播放免费曲<small>导入浏览器里的酷狗 Cookie 后可播放账号有权限的曲目</small>';
+    if (inBtn) inBtn.textContent = '导入 Cookie';
+    if (outBtn) outBtn.style.display = 'none';
+    return;
+  }
+  const bits = [];
+  bits.push('已登录');
+  if (st.userid) bits.push('userid ' + st.userid);
+  if (st.vip) bits.push('会员');
+  else if (st.verified) bits.push('无会员权益');
+  else bits.push('未自检');
+  const when = st.checkedAt ? new Date(st.checkedAt) : null;
+  who.innerHTML = bits.join(' · ')
+    + '<small>' + esc(st.note || '')
+    + (when ? '（' + when.toTimeString().slice(0, 5) + ' 自检）' : '') + '</small>';
+  if (inBtn) inBtn.textContent = '更换 Cookie';
+  if (outBtn) outBtn.style.display = '';
+}
+
+function openKgAuth() {
+  const pop = $('#popKgAuth');
+  const ta = $('#kgCookie');
+  const msg = $('#kgMsg');
+  if (!pop) return;
+  if (ta) ta.value = '';            // 每次都从空开始：不在 DOM 里留上一次的凭证
+  if (msg) { msg.textContent = ''; msg.classList.remove('err'); }
+  openPop(pop, $('#kgLoginBtn'));
+  setTimeout(() => ta && ta.focus(), 60);
+}
+
+async function kgSaveAuth() {
+  const ta = $('#kgCookie');
+  const msg = $('#kgMsg');
+  const ok = $('#kgAuthSave');
+  const raw = ta ? String(ta.value || '').trim() : '';
+  const setMsg = (text, err) => {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.classList.toggle('err', !!err);
+  };
+  if (!raw) { setMsg('先把 Cookie 粘进来', true); return; }
+  if (ok) { ok.disabled = true; ok.textContent = '验证中…'; }
+  setMsg('正在保存并验证…', false);
+  let r;
+  try { r = await window.api.kgLogin(raw); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (ok) { ok.disabled = false; ok.textContent = '保存并验证'; }
+  if (!r || !r.ok) {
+    const code = (r && r.error && r.error.code) || '';
+    const text = code === 'KG_AUTH_NO_IDENTITY' ? '这份 Cookie 里没有 token / userid，可能复制的是未登录页面'
+      : (r && r.error && r.error.message) || '保存失败';
+    setMsg(text, true);
+    return;
+  }
+  /* 保存成功：清空输入框里的明文，用主进程回的摘要刷新状态 */
+  if (ta) ta.value = '';
+  S.kg.status = Object.assign({ provider: 'kugou' }, r.auth || {});
+  paintKgNote();
+  paintKgAccount();
+  closePops();
+  const check = r.check || {};
+  if (check.vip) toast('已登录酷狗 · 会员曲可播放');
+  else if (check.reason === 'no-rights') toast('已登录酷狗 · 该账号没有会员权益，会员曲会跳过');
+  else toast('已保存酷狗凭证 · 未验证通过（' + (check.error || check.reason || '网络问题') + '）');
+  renderLibrary();
+}
+
+async function kgLogout() {
+  let r;
+  try { r = await window.api.kgLogout(); } catch (e) { r = null; }
+  S.kg.status = Object.assign({ provider: 'kugou', loggedIn: false }, (r && r.auth) || {});
+  paintKgNote();
+  paintKgAccount();
+  toast('已退出酷狗账号');
+  renderLibrary();
 }
 
 function paintKgNote() {
   const el = $('#kgNote');
   if (!el) return;
   const st = S.kg.status || {};
-  el.textContent = st.stub
-    ? '酷狗：仅支持免费曲目（128k mp3）· 登录接口已预留，暂未接入'
-    : '酷狗：已登录 · 可播放账号有权限的曲目';
+  el.textContent = st.loggedIn
+    ? '酷狗：' + (st.vip ? '会员曲可播' : '未检测到会员权益') + ' · 免费曲固定 128k mp3'
+    : '酷狗：未登录时只能播放免费曲（128k mp3）· 导入 Cookie 后可播放会员曲';
 }
 
 async function kgSearch() {
@@ -2371,32 +2461,37 @@ function renderKg() {
   const count = $('#libCount');
   if (S.kg.busy) {
     list.innerHTML = emptyRow('正在搜索酷狗…');
-    count.textContent = '酷狗';
+    count.textContent = '搜索中…';
     list.onclick = null;
     return;
   }
   if (S.kg.err) {
     list.innerHTML = emptyRow('搜索失败：' + esc(S.kg.err));
-    count.textContent = '酷狗';
+    count.textContent = '搜索失败';
     list.onclick = null;
     return;
   }
   if (S.kg.view === 'idle') {
     list.innerHTML = emptyRow('输入曲名或艺人，搜索酷狗的免费曲目。<br>付费/会员曲会标出来，点播时会提示需要会员。');
-    count.textContent = '酷狗';
+    count.textContent = '';            // 标签页已经写着「酷狗」，这里再写一遍是废话
     list.onclick = null;
     return;
   }
   if (!S.kg.items.length) {
     list.innerHTML = emptyRow('没有找到匹配的曲目。<br>换个关键词试试。');
-    count.textContent = '酷狗 · 无结果';
+    count.textContent = '无结果';
     list.onclick = null;
     return;
   }
   list.innerHTML = S.kg.items.map(t => itemHTML(t, null)).join('');
   fillThumbs(list);
+  /* 可播条数：未登录只有免费曲；登录后所有曲目都「可能要得动」，
+   * 真实能不能播要到点播时由取链接口回答，这里不假装精确。 */
+  const st = S.kg.status || {};
   const free = S.kg.items.filter(t => !t.vip).length;
-  count.textContent = `搜索到 ${S.kg.items.length} 条 · 可播 ${free} 条`;
+  count.textContent = st.loggedIn
+    ? `搜索到 ${S.kg.items.length} 条 · 免费 ${free} · 会员 ${S.kg.items.length - free}`
+    : `搜索到 ${S.kg.items.length} 条 · 可播 ${free} 条`;
   list.onclick = e => {
     const el = e.target.closest('.item');
     if (!el) return;
@@ -2411,7 +2506,12 @@ function renderKg() {
  * playIndex 收到曲库下标后会转成 playLibRow：不在播放列表里就插到当前曲之后。 */
 async function playKg(t) {
   if (!t) return;
-  if (t.vip) toast(`「${t.title}」需要酷狗会员，正在尝试…`);
+  const st = S.kg.status || {};
+  if (t.vip) {
+    toast(st.loggedIn
+      ? `「${t.title}」是会员曲，正在用账号权限取链…`
+      : `「${t.title}」需要酷狗会员：导入登录 Cookie 后可播放`);
+  }
   const fresh = !S.tracks.some(x => x.path === t.path);
   const i = addTrack(t);
   if (i < 0) return;
@@ -2802,7 +2902,8 @@ async function playAt(qi, opts) {
     if (seq !== loadSeq) return;
     if (!info || !info.ok) {
       const code = (info && info.error && info.error.code) || '';
-      const reason = code === 'KG_PAID' ? '需酷狗会员'
+      const signedIn = !!(S.kg.status && S.kg.status.loggedIn);
+      const reason = code === 'KG_PAID' ? (signedIn ? '账号无该曲权限' : '需登录酷狗会员')
         : code === 'KG_UNAVAILABLE' ? '该曲目暂不可播'
           : code === 'KG_TIMEOUT' ? '网络超时' : '暂时无法播放';
       k.unavailable = reason;
@@ -3537,6 +3638,16 @@ function bind() {
   $('#btnPrev').onclick = prev;
 
   $('#btnMode').onclick = cycleMode;
+
+  // 酷狗登录（导入 Cookie）
+  const kgIn = $('#kgLoginBtn');
+  if (kgIn) kgIn.onclick = e => { e.stopPropagation(); openKgAuth(); };
+  const kgOut = $('#kgLogoutBtn');
+  if (kgOut) kgOut.onclick = e => { e.stopPropagation(); kgLogout(); };
+  const kgSave = $('#kgAuthSave');
+  if (kgSave) kgSave.onclick = () => kgSaveAuth();
+  const kgCancel = $('#kgAuthCancel');
+  if (kgCancel) kgCancel.onclick = () => closePops();
 
   // 弹层
   $('#btnVol').onclick = e => { e.stopPropagation(); openPop($('#popVol'), $('#btnVol')); };

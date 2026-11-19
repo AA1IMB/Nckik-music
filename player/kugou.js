@@ -47,7 +47,18 @@ const KG_MID = crypto.randomBytes(16).toString('hex');
 const KG_DFID = crypto.randomBytes(16).toString('hex');
 const BASE_COOKIE = `kg_mid=${KG_MID}; kg_dfid=${KG_DFID}; kg_dfid_collect=${KG_DFID}`;
 
-const state = { cookie: BASE_COOKIE, token: '', userid: 0 };
+const state = {
+  cookie: BASE_COOKIE,
+  token: '',
+  userid: 0,
+  /* 登录态的三个派生字段：
+   *   verified —— 有没有真的用凭证去问过一次「会员曲能不能取到链」；
+   *   vip      —— 上一次自检的结论（true 表示账号能取到付费曲的直链）；
+   *   checkedAt—— 自检时间，UI 用它显示「刚刚/几分钟前」。 */
+  verified: false,
+  vip: false,
+  checkedAt: 0
+};
 
 const UA_MOBILE = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36';
 const UA_DESKTOP = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -177,14 +188,76 @@ async function searchSongs(q, limit = 30) {
   return out;
 }
 
-/* ---------------- 直链 ---------------- */
-const urlCache = new Map();   // hash -> { url, br, type, size, at }
+/* ---------------- 直链 ----------------
+ * 取链不是一条路：同一个 hash，免费曲、会员曲、带不带凭证，命中的接口都不一样。
+ * 所以这里按「候选路径」依次试，谁先给出一条能用的地址就用谁，并把结论
+ * （是需要会员、还是接口本身不可用）汇总给上层，避免把「没权限」报成「网络错误」。 */
+const urlCache = new Map();   // hash -> { url, br, type, size, at, path }
 
-/**
- * 免费曲直链：移动端 playInfo 只要 hash，不需要签名。
- * 付费曲返回的是 `{status:0, error:'需要付费'}`，这里翻成 KG_PAID，
- * 让渲染层显示「需要酷狗会员」而不是「网络错误」。
- */
+const md5 = s => crypto.createHash('md5').update(String(s)).digest('hex');
+
+/* playInfo 家族的返回体：`url` 可能叫 `play_url` / `backup_url`，付费时全为空。 */
+function readPlayInfo(j) {
+  if (!j || typeof j !== 'object') return { miss: true, paid: false };
+  const url = httpsify(j.url || j.play_url || j.play_backup_url || j.backup_url || '');
+  if (url) {
+    return {
+      url,
+      // playInfo 的 bitRate 是 kbps（128），和 search 的 bitrate 字段单位不同，统一成 bps
+      br: num(j.bitRate) ? (num(j.bitRate) < 10000 ? num(j.bitRate) * 1000 : num(j.bitRate)) : 0,
+      type: String(j.extName || 'mp3').toLowerCase(),
+      size: num(j.fileSize),
+      duration: num(j.timeLength)
+    };
+  }
+  const pay = Number(j.pay_type) || 0;
+  const priv = Number(j.privilege) || 0;
+  const msg = String(j.error || '');
+  const paid = pay !== 0 || priv > 0 || /付费|会员|vip|购买/i.test(msg);
+  return { miss: true, paid, msg };
+}
+
+/* 1) 老 WAP playInfo：免费曲不需要凭证；登录后把 token/userid 一起带上，
+ *    部分账号在这条路上就能拿到会员曲的地址。 */
+async function resolveWap(h) {
+  const q = { cmd: 'playInfo', hash: h };
+  if (state.token || state.userid) {
+    if (state.token) q.token = state.token;
+    if (state.userid) q.userid = String(state.userid);
+  }
+  const j = await getJSON(WEB_MOBILE() + '/app/i/getSongInfo.php?' + new URLSearchParams(q));
+  return readPlayInfo(j);
+}
+
+/* 2) trackercdn v2：key = md5(hash + 'kgcloudv2')，必须带设备号与账号。
+ *    清晰度按 flac → hq → sq 试，账号有什么权限就拿到什么档。 */
+async function resolveCdn2(h, br) {
+  const params = {
+    hash: h, key: md5(h + 'kgcloudv2'), br: br || 'hq', appid: '1005', pid: '2',
+    mid: KG_MID, dfid: KG_DFID, version: '9108', cmd: '25', behavior: 'play'
+  };
+  if (state.token) params.token = state.token;
+  if (state.userid) params.userid = String(state.userid);
+  const j = await getJSON('https://trackercdn.kugou.com/i/v2/?' + new URLSearchParams(params));
+  const got = readPlayInfo(j);
+  if (got.url) return got;
+  /* v2 失败时 `error` 是英文的 "The Resource Needs to be Paid"，
+   * readPlayInfo 的付费判据吃不到，这里补一条。 */
+  if (!got.paid && /paid|privilege|purchase/i.test(String((j && (j.error || j.msg)) || ''))) {
+    return { miss: true, paid: true, msg: String(j.error || j.msg || '') };
+  }
+  return got;
+}
+
+/* 3) trackercdn v1：key = md5(hash + 'kgcloud')，老接口，少量曲目只有它给地址。 */
+async function resolveCdn1(h) {
+  const params = { hash: h, key: md5(h + 'kgcloud'), br: 'sq', appid: '1005', pid: '2', mid: KG_MID, dfid: KG_DFID };
+  if (state.token) params.token = state.token;
+  if (state.userid) params.userid = String(state.userid);
+  const j = await getJSON('https://trackercdn.kugou.com/i/?' + new URLSearchParams(params));
+  return readPlayInfo(j);
+}
+
 async function songUrl(hash) {
   const h = String(hash || '').trim().toLowerCase();
   if (!/^[0-9a-f]{32}$/.test(h)) throw new KgError('曲目标识不对', 'KG_BAD_ID');
@@ -192,26 +265,46 @@ async function songUrl(hash) {
   const hit = urlCache.get(h);
   if (hit && Date.now() - hit.at < URL_TTL) return hit;
 
-  const j = await getJSON(WEB_MOBILE() + '/app/i/getSongInfo.php?' + new URLSearchParams({ cmd: 'playInfo', hash: h }));
-  if (!j || Number(j.status) !== 1 || !j.url) {
-    const msg = String((j && j.error) || '');
-    if (/付费|会员|vip/i.test(msg) || Number(j && j.pay_type) !== 0) {
-      throw new KgError('该曲目需要酷狗会员，暂不支持播放', 'KG_PAID');
+  /* 顺序有讲究：免费曲走 wap 最快；登录后先试 v2 的 flac/hq（会员权益通常在这一档），
+   * 最后才回落到 v1。失败路径只在「可能要会员」时才多花几次请求。 */
+  const plan = [
+    { name: 'wap', run: () => resolveWap(h) },
+    { name: 'cdn2-flac', run: () => resolveCdn2(h, 'flac') },
+    { name: 'cdn2-hq', run: () => resolveCdn2(h, 'hq') },
+    { name: 'cdn1', run: () => resolveCdn1(h) }
+  ];
+
+  let paid = false;
+  let msg = '';
+  let netErr = null;
+  const tried = [];
+  for (const step of plan) {
+    let got;
+    try { got = await step.run(); }
+    catch (e) {
+      tried.push(step.name + ':err:' + ((e && e.code) || 'x'));
+      if (e && (e.code === 'KG_TIMEOUT' || e.code === 'KG_NET')) { netErr = e; continue; }
+      continue;                                    // 单条路径 404/非 JSON：换下一条，不中断
     }
-    throw new KgError(msg || '该曲目暂时无法播放', 'KG_UNAVAILABLE');
+    tried.push(step.name + ':' + (got && got.url ? 'ok' : 'miss'));
+    if (got && got.url) {
+      const out = Object.assign({}, got, { at: Date.now(), path: step.name });
+      urlCache.set(h, out);
+      while (urlCache.size > 400) urlCache.delete(urlCache.keys().next().value);
+      return out;
+    }
+    if (got && got.paid) paid = true;
+    if (got && got.msg) msg = got.msg;
   }
-  const out = {
-    url: httpsify(j.url),
-    // playInfo 的 bitRate 是 kbps（128），和 search 的 bitrate 字段单位不同，统一成 bps
-    br: num(j.bitRate) ? (num(j.bitRate) < 10000 ? num(j.bitRate) * 1000 : num(j.bitRate)) : 0,
-    type: String(j.extName || 'mp3').toLowerCase(),
-    size: num(j.fileSize),
-    duration: num(j.timeLength),
-    at: Date.now()
-  };
-  urlCache.set(h, out);
-  while (urlCache.size > 400) urlCache.delete(urlCache.keys().next().value);
-  return out;
+
+  if (!paid && netErr) throw netErr;
+  if (paid) {
+    throw new KgError(
+      loggedIn() ? '当前账号没有这首曲目的播放权限（可能需要更高等级的会员）' : '该曲目需要酷狗会员，登录后可播放',
+      'KG_PAID'
+    );
+  }
+  throw new KgError(msg || '该曲目暂时无法播放', 'KG_UNAVAILABLE');
 }
 
 function invalidateUrl(hash) {
@@ -295,46 +388,106 @@ async function lyric(hash) {
   return out;
 }
 
-/* ---------------- 登录（接口占位） ----------------
- * 扫码登录要按 web 端参数对齐（实测缺参数时 login-user 返回 20010「参数错误」），
- * 这一版先不接：接口保留成同形状，接入时只需要把这三个函数填上，
- * 上层（renderer / main）不用改。 */
-function setCookie(cookie, extra = {}) {
+/* ---------------- 登录 ----------------
+ * 采用「导入已登录 Cookie」：酷狗的扫码/短信接口都要签名（缺参数时 login-user 直接回
+ * 20010「参数错误」），而浏览器里登录后的 Cookie 本身就能被接口认作会话 —— 不需要
+ * 破任何签名，也不接触账号密码。取舍写在 §14 记录里。
+ *
+ * 凭证只经 applyAuth() 进内存；落盘由 main.js 用 safeStorage 加密到 kg-auth.bin，
+ * 这里不碰文件、不打印明文。 */
+const loggedIn = () => !!(state.token || state.userid);
+
+/* 会员自检用的探测曲：发如雪（付费曲，pay_type=3）。登录后拿它试一次取链，
+ * 能拿到地址就说明这个账号确实有会员权益；拿不到就只当「已登录但无权益」。 */
+const VIP_PROBE_HASH = '1f7e7659b9fff4fb6f71562a61bbc25f';
+
+function applyAuth({ cookie, token, userid } = {}) {
   state.cookie = String(cookie || '').trim() || BASE_COOKIE;
-  state.token = String(extra.token || '');
-  state.userid = num(extra.userid);
+  state.token = String(token || '');
+  state.userid = num(userid);
+  state.verified = false;
+  state.vip = false;
+  state.checkedAt = 0;
   urlCache.clear();
   lyricCache.clear();
 }
 
-async function status() {
+/* 账号摘要：只出现脱敏后的 token 与长度，渲染层/探针拿不到明文。 */
+function authInfo() {
+  const tok = String(state.token || '');
   return {
     provider: 'kugou',
-    loggedIn: !!state.token,
-    hasCookie: !!state.token,
-    nickname: '',
-    vip: false,
-    stub: !state.token,
-    note: '酷狗登录尚未接入：当前只支持免费曲目'
+    loggedIn: loggedIn(),
+    userid: Number(state.userid) || 0,
+    tokenMasked: tok ? tok.slice(0, 4) + '…(' + tok.length + ')' : '',
+    cookieLen: String(state.cookie || '').length,
+    verified: !!state.verified,
+    vip: !!state.vip,
+    checkedAt: Number(state.checkedAt) || 0
   };
 }
 
+/* 自检：拿会员探测曲试一次。返回 { loggedIn, vip, reason }，不改播放链路。
+ * reason 用于 UI/探针解释「登录了但还是播不了会员曲」的原因：
+ *   no-rights = 接口明确说需要权限（账号不是会员 / 会员等级不够）
+ *   其它值   = 网络或接口问题（KG_NET/KG_TIMEOUT/KG_UNAVAILABLE） */
+async function verify() {
+  if (!loggedIn()) {
+    state.verified = true;
+    state.vip = false;
+    state.checkedAt = Date.now();
+    return { loggedIn: false, vip: false, reason: 'anonymous' };
+  }
+  urlCache.delete(VIP_PROBE_HASH);
+  let vip = false;
+  let reason = '';
+  try { await songUrl(VIP_PROBE_HASH); vip = true; }
+  catch (e) { reason = e && e.code === 'KG_PAID' ? 'no-rights' : ((e && e.code) || 'error'); }
+  state.verified = true;
+  state.vip = vip;
+  state.checkedAt = Date.now();
+  return { loggedIn: true, vip, reason };
+}
+
+/* 兼容老名字：main.js 之前只调 setCookie/logout。 */
+function setCookie(cookie, extra = {}) {
+  applyAuth({ cookie, token: extra.token, userid: extra.userid });
+}
+
+async function status() {
+  const a = authInfo();
+  const note = !a.loggedIn
+    ? '未登录：只能播放免费曲（128k mp3）'
+    : !a.verified
+      ? '已登录：正在自检会员权益…'
+      : a.vip
+        ? '已登录：账号有会员权益，可播放会员曲'
+        : '已登录：账号没有会员权益，会员曲会提示后跳过';
+  return Object.assign({}, a, {
+    hasCookie: a.loggedIn,        // 与网易云同语义：有凭证（可能过期）
+    nickname: '',
+    stub: !a.loggedIn,
+    note
+  });
+}
+
 async function qrCreate() {
-  throw new KgError('酷狗登录尚未接入', 'KG_LOGIN_STUB');
+  throw new KgError('酷狗扫码接口需要签名，本版未接入；请用「导入 Cookie」登录', 'KG_LOGIN_UNSUPPORTED');
 }
 
 async function qrPoll() {
-  throw new KgError('酷狗登录尚未接入', 'KG_LOGIN_STUB');
+  throw new KgError('酷狗扫码接口需要签名，本版未接入；请用「导入 Cookie」登录', 'KG_LOGIN_UNSUPPORTED');
 }
 
 function logout() {
-  setCookie('');
+  applyAuth({});
 }
 
 module.exports = {
   KgError,
   searchSongs, songUrl, invalidateUrl, coverData, lyric,
-  status, setCookie, logout, qrCreate, qrPoll,
+  status, applyAuth, authInfo, verify, logout, setCookie, qrCreate, qrPoll, loggedIn,
+  VIP_PROBE_HASH,
   // 纯函数，便于测试/排查
-  mapSong, deent, httpsify, BASE_COOKIE
+  mapSong, deent, httpsify, readPlayInfo, BASE_COOKIE
 };
