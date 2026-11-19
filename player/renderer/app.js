@@ -1485,8 +1485,14 @@ function renderPl() {
   $('#plClear').disabled = !items.length;
 
   const body = $('#plBody');
-  if (PL.view === 'pick') return renderPlPick(body);
-  if (PL.view === 'add') return renderPlAdd(body);
+  /* 换视图前先把上一个视图留在 DOM 上的东西清掉，否则会串到新视图上：
+   * - `onscroll` 只有列表视图用（它重画的是播放列表那套歌曲行）。留在选择/插入
+   *   视图上，只要面板能滚动，滚一下就会把内容换回歌曲行——用户看到的就是
+   *   「点了选择歌单、一滚又跳回播放列表，再点一下就开始放歌」。
+   * - `#plAsk` 的确认条同理：从列表切到选择面板时不该还挂着上一步的确认。 */
+  body.onscroll = null;
+  if (PL.view === 'pick') { $('#plAsk').innerHTML = ''; return renderPlPick(body); }
+  if (PL.view === 'add') { $('#plAsk').innerHTML = ''; return renderPlAdd(body); }
 
   $('#plAsk').innerHTML = PL.ask
     ? '<div class="pl-ask"><div>' + esc(PL.ask.text) + '</div><div class="row2">'
@@ -1497,7 +1503,6 @@ function renderPl() {
   if (!items.length) {
     body.innerHTML = '<div class="pl-empty">播放列表是空的'
       + '<small>「选择歌单」整单载入 · 「插入歌曲」逐首添加</small></div>';
-    body.onscroll = null;
   } else {
     renderPlRows();
     body.onscroll = renderPlRows;       // 只重画可视窗口，滚动本身不再产生 DOM
