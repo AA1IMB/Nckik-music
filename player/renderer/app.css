@@ -823,6 +823,24 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .qrhelp { margin-top: 6px; text-align: center; font-size: 10.5px; color: var(--fg3); line-height: 1.55; }
 .qracts { margin-top: 12px; }
 .qracts .ghost { width: 100%; height: 32px; }
+
+/* 哔哩哔哩：扫码面板两个按钮并排，Cookie 弹层 */
+#bilQrWrap .qracts { display: flex; gap: 8px; }
+#bilQrWrap .qracts .ghost { width: auto; flex: 1 1 0; }
+.bilpop { width: 380px; }
+.bil-how { margin: 10px 2px 8px; font-size: 11px; color: var(--fg3); line-height: 1.75; }
+.bil-how code { font-size: 10.5px; color: var(--fg2); }
+.bil-ta {
+  width: 100%; height: 88px; box-sizing: border-box; resize: vertical;
+  padding: 9px 10px; border-radius: 9px; border: .5px solid var(--line);
+  background: var(--card); color: var(--fg); font: 10.5px/1.6 ui-monospace, Consolas, monospace;
+  outline: none;
+}
+.bil-ta:focus { border-color: var(--fg3); }
+.bil-msg { margin-top: 8px; min-height: 16px; font-size: 11px; color: var(--fg3); }
+.bil-msg.err { color: #ef7d6b; }
+.bilpop .row2 { display: flex; gap: 8px; margin-top: 10px; }
+.bilpop .row2 .ghost { flex: 1 1 0; width: auto; height: 30px; }
 /* 昵称可能很长，不能把左侧说明挤成两行 */
 #neAuthState { max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .vin {

@@ -169,7 +169,7 @@
     <button class="x" data-close>✕</button>
   </div>
   <div class="dr-body">
-    <div class="seg srcseg" id="segSrc"><b data-s="local" class="on">本地</b><b data-s="net">网易云</b></div>
+    <div class="seg srcseg" id="segSrc"><b data-s="local" class="on">本地</b><b data-s="net">网易云</b><b data-s="bil">哔哩哔哩</b></div>
     <div class="search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20 20"/></svg>
       <input id="q" placeholder="搜索曲名 / 艺人 / 专辑">
@@ -184,6 +184,8 @@
     </div>
     <div class="ne-note" id="neNote"></div>
     <div class="ne-home" id="neHome"></div>
+    <div class="ne-note" id="bilNote"></div>
+    <div class="ne-home" id="bilHome"></div>
     <div class="dr-sub" id="libCount">0 首</div>
     <div class="list" id="libList"></div>
   </div>
@@ -238,6 +240,31 @@
       <div class="line"><div class="k">音源适配<small>搜索 / 歌单 / 专辑 / 歌词 / 封面均走官方网页接口，非正式契约</small></div><div class="v dim">已接入</div></div>
     </div>
 
+    <div class="lbl">哔哩哔哩</div>
+    <div class="group">
+      <div class="line"><div class="k">登录状态<small>手机扫码登录；凭证加密保存在本机，只用于按账号权限取流</small></div><div class="v" id="bilAuthState">未登录</div></div>
+      <div class="line col">
+        <div class="authrow">
+          <button class="ghost" id="btnBilQr">扫码登录</button>
+          <button class="ghost mini" id="btnBilCookie">导入 Cookie</button>
+          <button class="ghost mini" id="btnBilLogout">退出</button>
+        </div>
+      </div>
+      <div class="qrwrap" id="bilQrWrap">
+        <div class="qrbox" id="bilQrBox">
+          <div class="qrimg" id="bilQrShot"></div>
+          <div class="qrmask" id="bilQrMask"></div>
+        </div>
+        <div class="qrstate" id="bilQrState">正在获取二维码…</div>
+        <div class="qrhelp">手机打开「哔哩哔哩」→ 我的 → 扫一扫。二维码约 3 分钟有效，失效后点「重新获取」。</div>
+        <div class="qracts">
+          <button class="ghost" id="btnBilQrRetry">重新获取</button>
+          <button class="ghost" id="btnBilQrCookie">改用导入 Cookie</button>
+        </div>
+      </div>
+      <div class="line"><div class="k">音源适配<small>搜索与取流走网页接口（需 WBI 签名），非正式契约；只取音频轨道</small></div><div class="v dim">已接入</div></div>
+    </div>
+
     <div class="lbl">音频输出</div>
     <div class="group">
       <div class="line"><div class="k">输出设备</div><div class="v" id="setDev">默认设备</div></div>
@@ -261,6 +288,24 @@
     </div>
   </div>
 </aside>
+
+<!-- 哔哩哔哩 Cookie 导入 -->
+<div class="pop bilpop" id="popBilAuth">
+  <div class="pop-head">导入哔哩哔哩 Cookie</div>
+  <div class="bil-how">
+    <div>1. 浏览器打开 bilibili.com 并登录</div>
+    <div>2. F12 → Application → Cookies → https://www.bilibili.com</div>
+    <div>3. 复制 <code>SESSDATA</code>（必需），可选 <code>bili_jct</code>、<code>DedeUserID</code>，粘贴成一行</div>
+  </div>
+  <textarea class="bil-ta" id="bilCookie" spellcheck="false"
+    placeholder="SESSDATA=xxxx%2Cyyyy; bili_jct=…; DedeUserID=…"></textarea>
+  <div class="bil-msg" id="bilMsg"></div>
+  <div class="row2">
+    <button class="ghost" id="bilAuthCancel">取消</button>
+    <button class="ghost" id="bilAuthSave">保存并验证</button>
+  </div>
+  <div class="pop-note">Cookie 只保存在本机（系统密钥库加密），不会写进设置、日志或曲库。</div>
+</div>
 
 <div class="scrim" id="scrim"></div>
 <div class="toast" id="toast"></div>

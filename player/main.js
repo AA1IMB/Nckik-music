@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const { Readable } = require('node:stream');
 const ne = require('./netease');
+const bil = require('./bilibili');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -37,12 +38,13 @@ const userDir = app.getPath('userData');
 const settingsPath = path.join(userDir, 'settings.json');
 const libraryPath = path.join(userDir, 'library.json');
 
-/* media 是本地文件；neaudio 是网易云音频（主进程代理，带 Range 透传）。
- * 远程地址会过期，且 http/https 混杂，交给自建协议统一处理：
- * 渲染层始终只看到 neaudio://s/<id>，音频源换了服务器也不用改前端。 */
+/* media 是本地文件；neaudio 是网易云音频，bilaudio 是哔哩哔哩音频（都由主进程代理，
+ * 带 Range 透传）。远程地址会过期，且 http/https 混杂，交给自建协议统一处理：
+ * 渲染层始终只看到 neaudio://s/<id> / bilaudio://s/<bvid>:<cid>，音频源换了服务器也不用改前端。 */
 protocol.registerSchemesAsPrivileged([
   { scheme: 'media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
-  { scheme: 'neaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
+  { scheme: 'neaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
+  { scheme: 'bilaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
 ]);
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -304,6 +306,99 @@ function registerNeProtocol() {
   });
 }
 
+/* ---------------- 哔哩哔哩音频代理 ----------------
+ * 与 neaudio 同一套骨架，差异只有三处：
+ *   1. 一次取流会拿到多条 CDN 地址（主地址 + 备份），主地址常是 mcdn（P2P 节点，
+ *      部分网络直接超时），所以这里按顺序逐个试，而不是只试一次；
+ *   2. 上游把 m4s 的 content-type 报成 application/octet-stream，直接透传会让
+ *      媒体元素不认，统一改写成 audio/mp4；
+ *   3. 401/403/404 都当成「这条链失效」换下一条，全部失败才回 5xx/404。
+ */
+const BIL_HEAD_TIMEOUT = 15000;
+
+function parseBilId(url) {
+  try {
+    const u = new URL(url);
+    const rest = decodeURIComponent((u.pathname || '').replace(/^\/+/, ''));
+    const id = /^BV/.test(rest) ? rest : '';
+    const [bvid, cid] = id.split(':');
+    return { bvid: bvid || '', cid: Number(cid) || 0 };
+  } catch { return { bvid: '', cid: 0 }; }
+}
+
+function registerBilProtocol() {
+  protocol.handle('bilaudio', async (request) => {
+    const { bvid, cid } = parseBilId(request.url);
+    if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) {
+      return new Response('bad id', { status: 400, headers: { 'x-bil-reason': 'BIL_BAD_ID' } });
+    }
+
+    let info;
+    try {
+      info = await bil.playUrl(bvid, cid);
+    } catch (e) {
+      // 需要会员 / 无音轨：回 404 + 原因，渲染层按 mediaErr 走「跳过并提示」
+      return new Response(String((e && e.message) || e), {
+        status: 404,
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'x-bil-reason': (e && e.code) || 'BIL_ERROR' }
+      });
+    }
+
+    const range = request.headers.get('range');
+    let last = 0;
+
+    for (const target of info.urls) {
+      const ctrl = new AbortController();
+      const headTimer = setTimeout(() => ctrl.abort(new Error('BIL_HEAD_TIMEOUT')), BIL_HEAD_TIMEOUT);
+      let res;
+      try {
+        res = await net.fetch(target, {
+          headers: {
+            // CDN 校验 Referer 与 UA，缺了直接 403 —— 这是 B 站取流最常见的坑
+            Referer: 'https://www.bilibili.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            Origin: 'https://www.bilibili.com',
+            ...(range ? { Range: range } : {})
+          },
+          signal: ctrl.signal
+        });
+      } catch (e) {
+        clearTimeout(headTimer);
+        last = 0;
+        continue;                        // 这条链连不上，换下一条
+      }
+      clearTimeout(headTimer);
+      last = res.status;
+
+      if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 410) {
+        try { ctrl.abort(); } catch {}
+        continue;                        // 地址过期 / 权限不足，试下一条
+      }
+      if (res.status >= 500) {
+        try { ctrl.abort(); } catch {}
+        continue;
+      }
+
+      const h = new Headers();
+      for (const k of PASSTHROUGH_HEADERS) {
+        const v = res.headers.get(k);
+        if (v) h.set(k, v);
+      }
+      if (!h.has('accept-ranges')) h.set('accept-ranges', 'bytes');
+      const ct = String(h.get('content-type') || '');
+      if (!/^audio\//i.test(ct) && !/^video\//i.test(ct)) {
+        h.set('content-type', info.fallback ? 'video/mp4' : 'audio/mp4');
+      }
+      return new Response(proxyBody(res, ctrl, 'bil:' + bvid + ':' + cid), { status: res.status, headers: h });
+    }
+
+    return new Response('upstream ' + last, {
+      status: last ? 502 : 504,
+      headers: { 'x-bil-reason': last ? 'BIL_UPSTREAM_FAIL' : 'BIL_UPSTREAM_TIMEOUT' }
+    });
+  });
+}
+
 /* ---------------- 网易云凭证 ----------------
  * 只存扫码登录换来的会话串（MUSIC_U / __csrf 等），不接收也不保存账号密码。
  * 用系统密钥库（Windows DPAPI / macOS Keychain）加密后落盘，settings.json 里不出现明文。
@@ -355,6 +450,33 @@ function writeNeCookie(cookie) {
     throw new Error('系统密钥库不可用，无法安全保存凭证');
   }
   fs.writeFileSync(neAuthPath, safeStorage.encryptString(v));
+  return true;
+}
+
+/* ---------------- 哔哩哔哩凭证 ----------------
+ * 与网易云同一套做法：只存会话串（SESSDATA / bili_jct / DedeUserID），
+ * 用系统密钥库加密后落盘；settings.json 与日志里都不出现明文。
+ * 单独一个文件是为了「删掉一个音源的登录」不会波及另一个。 */
+const bilAuthPath = path.join(userDir, 'bil-auth.bin');
+
+function readBilCookie() {
+  try {
+    if (!fs.existsSync(bilAuthPath)) return '';
+    if (!safeStorage.isEncryptionAvailable()) return '';
+    return safeStorage.decryptString(fs.readFileSync(bilAuthPath));
+  } catch { return ''; }
+}
+
+function writeBilCookie(cookie) {
+  const v = String(cookie || '').trim();
+  if (!v) {
+    try { fs.unlinkSync(bilAuthPath); } catch {}
+    return false;
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('系统密钥库不可用，无法安全保存凭证');
+  }
+  fs.writeFileSync(bilAuthPath, safeStorage.encryptString(v));
   return true;
 }
 
@@ -704,10 +826,18 @@ ipcMain.handle('lib:scan', async (_e, { files = [], dirs = [] } = {}) => {
 });
 
 const isNeKey = p => typeof p === 'string' && p.startsWith('ne:');
+/* 哔哩哔哩的键形如 bil:<bvid>:<cid>；cid 可能是 0（搜索阶段还没有），
+ * 取流前由 bil:url 补齐 —— 所以这里只校验前缀与 bvid。 */
+const isBilKey = p => typeof p === 'string' && p.startsWith('bil:') && /^bil:BV[0-9A-Za-z]{10}(:\d+)?$/.test(p);
+const bilParts = p => {
+  const [, bvid = '', cid = '0'] = String(p).split(':');
+  return { bvid, cid: Number(cid) || 0 };
+};
 
 ipcMain.handle('track:detail', async (_e, file) => {
-  // 网易云的封面/时长在搜索与详情阶段已经拿到，没有本地文件可解析
+  // 远程音源的封面/时长在搜索与详情阶段已经拿到，没有本地文件可解析
   if (isNeKey(file)) return { source: 'netease' };
+  if (isBilKey(file) || (typeof file === 'string' && file.startsWith('bil:'))) return { source: 'bilibili' };
   return readTrack(file, true);
 });
 
@@ -715,6 +845,10 @@ ipcMain.handle('track:lyric', async (_e, file) => {
   if (isNeKey(file)) {
     try { return await ne.lyric(Number(file.slice(3))); }
     catch (e) { return { text: '', source: '', note: String((e && e.message) || e) }; }
+  }
+  if (typeof file === 'string' && file.startsWith('bil:')) {
+    // 视频没有歌词接口：明确说「没有」，别让界面一直转圈等一个不会来的结果
+    return { text: '', source: '', note: '哔哩哔哩视频没有歌词' };
   }
   const side = findSidecarLrc(file);
   const trSide = findSidecarTrans(file);
@@ -766,6 +900,10 @@ ipcMain.on('library:set-sync', (_e, list) => {
 ipcMain.handle('media:url', (_e, file) => {
   const s = String(file || '');
   if (isNeKey(s)) return 'neaudio://s/' + s.slice(3);
+  if (isBilKey(s)) {
+    const { bvid, cid } = bilParts(s);
+    return 'bilaudio://s/' + bvid + ':' + cid;
+  }
   return `media://f/?p=${encodeURIComponent(s)}`;
 });
 
@@ -860,6 +998,9 @@ async function readThumb(file) {
 
 ipcMain.handle('track:cover', async (_e, file) => {
   if (isNeKey(file)) return { ok: false, error: { code: 'NE_NO_COVER', message: '网易云曲目请用 ne:cover' } };
+  if (typeof file === 'string' && file.startsWith('bil:')) {
+    return { ok: false, error: { code: 'BIL_NO_COVER', message: '哔哩哔哩曲目请用 bil:cover' } };
+  }
   const url = await readThumb(String(file || ''));
   return url ? { ok: true, dataUrl: url } : { ok: false, error: { code: 'NO_COVER', message: '没有内嵌封面' } };
 });
@@ -930,6 +1071,91 @@ ipcMain.handle('ne:logout', () => {
   return { hasCookie: false, loggedIn: false };
 });
 
+/* ---------------- 哔哩哔哩 IPC ----------------
+ * 与 neCall 同形：Error 过 IPC 会丢字段，可判断的原因必须显式带 code。
+ * 所有入口都返回 { ok }，渲染层据此给提示，不做「静默失败」。
+ */
+const bilCall = async fn => {
+  try { return { ok: true, ...(await fn()) }; }
+  catch (e) {
+    return { ok: false, error: { code: (e && e.code) || 'BIL_ERROR', message: String((e && e.message) || e) } };
+  }
+};
+
+ipcMain.handle('bil:search', (_e, { q, limit } = {}) =>
+  bilCall(async () => {
+    const r = await bil.searchVideos(q, { page: 1 });
+    const max = Number(limit) > 0 ? Number(limit) : 40;
+    return { tracks: r.items.slice(0, max), total: r.total };
+  }));
+
+ipcMain.handle('bil:view', (_e, bvid) => bilCall(() => bil.viewInfo(bvid)));
+
+/* 播放前预检：顺便把 cid 补齐（搜索结果里没有 cid）。
+ * 返回里带 cid，渲染层要把它写回曲目的 path，否则 media:url 拿不到正确地址。 */
+ipcMain.handle('bil:url', (_e, bvid, cid) =>
+  bilCall(async () => {
+    let useCid = Number(cid) || 0;
+    if (!useCid) {
+      const v = await bil.viewInfo(bvid);
+      useCid = (v.pages[0] && v.pages[0].cid) || 0;
+      if (!useCid) throw new bil.BilError('这个视频没有可用分 P', 'BIL_NO_PAGE');
+    }
+    const info = await bil.playUrl(bvid, useCid);
+    return {
+      cid: useCid,
+      codec: 'AAC',
+      bitrate: info.br,
+      trackId: info.trackId,
+      duration: info.duration,
+      lossless: false
+    };
+  }));
+
+ipcMain.handle('bil:cover', (_e, url, size) =>
+  bilCall(async () => ({ dataUrl: await bil.coverData(url, Number(size) || 300) })));
+
+ipcMain.handle('bil:status', () => bilCall(async () => ({ status: bil.status() })));
+
+ipcMain.handle('bil:qr', () =>
+  bilCall(async () => {
+    const q = await bil.qrCreate();
+    return { svg: bil.qrSvg(q.url), url: q.url, ttl: q.ttl };
+  }));
+
+ipcMain.handle('bil:qrPoll', () =>
+  bilCall(async () => {
+    const r = await bil.qrPoll();
+    if (r.code !== 0 || !r.cookie) return { loggedIn: false, code: r.code, state: r.state || '', message: r.message };
+    let saved = false, warn = '';
+    try { saved = writeBilCookie(r.cookie); }
+    catch (e) { warn = String(e.message || e); }
+    const v = await bil.verify().catch(() => ({ ok: false }));
+    return {
+      loggedIn: true, saved, code: 0, state: 'confirmed',
+      nickname: v.nickname || bil.authInfo().nickname || '',
+      warning: saved ? '' : (warn || '登录成功，但凭证没能落盘，重启后需要重新扫码')
+    };
+  }));
+
+/* 手工导入 Cookie：与扫码走同一条保存路径，只是没有「取码」这一段。 */
+ipcMain.handle('bil:login', (_e, cookie) =>
+  bilCall(async () => {
+    const raw = String(cookie || '').trim();
+    if (!raw) throw new bil.BilError('没有填写 Cookie', 'BIL_AUTH_EMPTY');
+    bil.applyAuth(raw);
+    if (!bil.loggedIn()) throw new bil.BilError('这份 Cookie 里没有 SESSDATA，可能复制的是未登录页面', 'BIL_AUTH_NO_IDENTITY');
+    writeBilCookie(raw);
+    const v = await bil.verify();
+    return { status: bil.status(), check: v };
+  }));
+
+ipcMain.handle('bil:logout', () => {
+  try { writeBilCookie(''); } catch {}
+  bil.logout();
+  return { ok: true, status: bil.status() };
+});
+
 ipcMain.handle('win:min', () => { if (win && !win.isDestroyed()) win.minimize(); });
 ipcMain.handle('win:max', () => {
   if (!win || win.isDestroyed()) return false;
@@ -981,7 +1207,9 @@ app.whenReady().then(() => {
   migrateOldUserData();             // 改名后第一次启动：把老目录里的曲库/设置/凭证接过来
   registerMediaProtocol();
   registerNeProtocol();
+  registerBilProtocol();
   ne.setCookie(readNeCookie());     // 上次扫过的凭证在开窗前就位，首屏点歌即可用
+  bil.applyAuth(readBilCookie());   // 哔哩哔哩同理由，两个音源的凭证互不影响
   ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

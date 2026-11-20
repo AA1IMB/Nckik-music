@@ -32,7 +32,7 @@ const S = {
   gapOp: -1,                       // 「…」上一帧的透明度，同上
   hist: [],
   libDirty: false,
-  srcMode: 'local',                 // 曲库抽屉的两条音轨：local / net
+  srcMode: 'local',                 // 曲库抽屉的音轨：local / net / bil
   ne: {
     items: [], busy: false, err: '', loggedIn: false, nick: '', seq: 0,
     hasCookie: false, uid: 0,
@@ -43,17 +43,29 @@ const S = {
     homeSeq: 0,
     coll: null,                                      // { kind, id, name, sub, status, err, tracks }
     collSeq: 0
+  },
+  /* 哔哩哔哩只有「搜索 → 点一首播」这一条路径（没有歌单/推荐），
+   * 所以状态也小：结果集、加载态、错误、登录态，外加一个在途请求令牌。 */
+  bil: {
+    items: [], busy: false, err: '', seq: 0, view: 'idle',   // idle / search / error
+    status: null, total: 0
   }
 };
 
 /* ------------------------------------------------------------------ 音源 */
 /*
- * 网易云曲目的 path 是 `ne:<id>`，与本地路径共用同一个唯一键空间：
- * 去重、封面缓存、排序后重定位、写盘全都沿用原有逻辑，不需要到处加 source 分支。
+ * 网易云曲目的 path 是 `ne:<id>`、哔哩哔哩的是 `bil:<bvid>:<cid>`，与本地路径
+ * 共用同一个唯一键空间：去重、封面缓存、排序后重定位、写盘全都沿用原有逻辑，
+ * 不需要到处加 source 分支 —— 只有「取封面 / 取流」这两处必须按音源分流。
  */
 const NET_PREFIX = 'ne:';
 const isNet = k => !!k && k.source === 'netease';
 const netIdOf = k => (isNet(k) ? Number(k.netId || String(k.path).slice(NET_PREFIX.length)) : 0);
+
+const BIL_PREFIX = 'bil:';
+const isBil = k => !!k && k.source === 'bilibili';
+const bilBvidOf = k => (isBil(k) ? String(k.bilBvid || String(k.path).split(':')[1] || '') : '');
+const bilCidOf = k => (isBil(k) ? Number(k.bilCid || String(k.path).split(':')[2] || 0) : 0);
 
 /* ------------------------------------------------------------------ 播放队列
  * 播放列表是唯一播放源：S.q 是 settings.playlist 的运行时投影，等长同序。
@@ -118,10 +130,35 @@ function synthNetTrack(item) {
   };
 }
 
+/* 哔哩哔哩同理：点「加入播放列表」时只拿到 bvid（搜索结果里没有 cid），
+ * 播放列表里这一行存的就是 bil:<bvid>:0。播放时 playAt 会把 cid 补进去并把
+ * 曲目与列表项一起改成 bil:<bvid>:<cid>；但重启后（或没播过就关掉）列表里仍是 :0，
+ * 这些行必须还能解析成可播曲目，否则会被当成坏行跳过。 */
+function synthBilTrack(item) {
+  const id = String((item && item.id) || '');
+  if (!id.startsWith(BIL_PREFIX)) return null;
+  const parts = id.slice(BIL_PREFIX.length).split(':');
+  const bvid = parts[0] || '';
+  const cid = Number(parts[1] || 0) || 0;
+  if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) return null;
+  return {
+    path: id,
+    source: 'bilibili',
+    bilBvid: bvid,
+    bilCid: cid,                     // 0 表示还没补，playAt 的预检会填
+    title: item.title || '',
+    artist: item.artist || '',
+    album: '哔哩哔哩',
+    duration: Number(item.duration) || 0,
+    codec: 'aac', bitrate: 0, lossless: false,
+    coverUrl: item.coverUrl || ''
+  };
+}
+
 function qTrack(qi) {
   const row = S.q[qi];
   if (!row) return null;
-  if (!row.t) row.t = resolveTrack(row.id) || synthNetTrack(row.item);
+  if (!row.t) row.t = resolveTrack(row.id) || synthNetTrack(row.item) || synthBilTrack(row.item);
   return row.t;
 }
 
@@ -449,6 +486,26 @@ async function loadArt(k) {
   if (!k) return null;
   const hit = getCover(k.path);
   if (hit) return hit;
+
+  /* 哔哩哔哩：封面就是搜索结果里的 pic，按 URL 向主进程要一次小图。
+   * 没有 pic 的稿件给 null，由调用方降级到中性色占位。 */
+  if (isBil(k)) {
+    if (!k.coverUrl) { k.coverError = ''; return null; }
+    const failAt = coverFail.get(k.path);
+    if (failAt && Date.now() - failAt < COVER_FAIL_TTL) return null;
+    let rb;
+    try { rb = await window.api.bilCover(k.coverUrl, 500); }
+    catch (e) { rb = { ok: false, error: { message: String((e && e.message) || e) } }; }
+    if (rb && rb.ok && rb.dataUrl) {
+      setCover(k.path, rb.dataUrl);
+      k.coverError = '';
+      return rb.dataUrl;
+    }
+    coverFail.set(k.path, Date.now());
+    k.coverError = (rb && rb.error && rb.error.message) || '封面加载失败';
+    return null;
+  }
+
   if (!isNet(k)) return null;
 
   if (!k.coverUrl) {
@@ -1291,17 +1348,25 @@ const subOf = t => {
   return t.unavailable ? bits + ' · ' + t.unavailable : bits;
 };
 
-/* 本地与网易云共用一套行模板：只差右上角的来源角标和封面来源 */
+/* 本地 / 网易云 / 哔哩哔哩共用一套行模板：只差右上角的来源角标与封面来源 */
 function itemHTML(t, i) {
-  const tag = isNet(t) ? `<span class="tag">${t.vip ? 'VIP' : '云'}</span>` : '';
+  const tag = isNet(t)
+    ? `<span class="tag">${t.vip ? 'VIP' : '云'}</span>`
+    : isBil(t)
+      ? `<span class="tag">${t.vip ? 'UP' : 'B'}</span>`
+      : '';
   const idx = i == null ? '' : ` data-i="${i}"`;
   /* 封面：本地走 trackCover（主进程读内嵌图/同目录图，缩到 96px 再回传），
-   * 网易云走 neCover（同样按 96px 取）。没给封面地址就不挂 data-art，
-   * 直接留「首字磁贴」占位，不会去请求一个注定失败的地址。 */
+   * 网易云走 neCover，哔哩哔哩走 bilCover（都按 URL 取小图）。没封面地址就不挂
+   * data-art，直接留「首字磁贴」占位，不会去请求一个注定失败的地址。 */
   const art = isNet(t)
     ? (t.coverUrl ? ` data-art="ne" data-key="${esc(t.coverUrl)}"` : '')
-    : (t.path ? ` data-art="file" data-key="${esc(t.path)}"` : '');
-  return `<div class="item"${idx} data-ne="${isNet(t) ? t.netId : ''}">
+    : isBil(t)
+      ? (t.coverUrl ? ` data-art="bil" data-key="${esc(t.coverUrl)}"` : '')
+      : (t.path ? ` data-art="file" data-key="${esc(t.path)}"` : '');
+  const neKey = isNet(t) ? t.netId : '';
+  const bilKey = isBil(t) ? bilBvidOf(t) : '';
+  return `<div class="item"${idx} data-ne="${neKey}" data-bil="${esc(bilKey)}">
       <div class="th"${art}><span>${esc((t.title || '?').slice(0, 1))}</span></div>
       <div class="ii"><div class="n">${esc(t.title || '未知曲目')}${tag}</div>
       <div class="d">${esc(subOf(t))}</div></div>
@@ -1355,7 +1420,9 @@ function thumbEnqueue(el) {
 async function fetchThumb(kind, key) {
   let r = null;
   try {
-    r = kind === 'ne' ? await window.api.neCover(key, 96) : await window.api.trackCover(key);
+    r = kind === 'ne' ? await window.api.neCover(key, 96)
+      : kind === 'bil' ? await window.api.bilCover(key, 160)
+        : await window.api.trackCover(key);
   } catch { r = null; }
   const url = r && r.ok && r.dataUrl ? r.dataUrl : '';
   if (url) {
@@ -1411,6 +1478,7 @@ function fillThumbs(root) {
  * 2000 首时单次渲染 120ms 以上，切歌/搜索都会卡一下。 */
 function renderLibrary() {
   if (S.srcMode === 'net') { renderNet(); return; }
+  if (S.srcMode === 'bil') { renderBil(); return; }
   const q = ($('#q').value || '').trim().toLowerCase();
   const rows = [];
   for (let i = 0; i < S.tracks.length; i++) {
@@ -1443,6 +1511,7 @@ function markCurrent() {
    * 网易云的搜索/歌单列表没有下标，只能按曲目 id 找。 */
   const libIdx = S.tracks.indexOf(t);
   markedEl = (isNet(t) ? $(`#libList .item[data-ne="${t.netId}"]`) : null)
+    || (isBil(t) ? $(`#libList .item[data-bil="${esc(bilBvidOf(t))}"]`) : null)
     || (libIdx >= 0 ? $(`#libList .item[data-i="${libIdx}"]`) : null);
   if (markedEl) markedEl.classList.add('on');
   if ($('#popPl').classList.contains('show') && PL.view === 'list') renderPlRows();
@@ -1919,23 +1988,35 @@ function plBind() {
  * 搜索结果不落盘，只有点过的曲目才进 S.tracks（和本地文件一起持久化）。
  */
 function setSource(mode) {
-  S.srcMode = mode === 'net' ? 'net' : 'local';
+  S.srcMode = mode === 'net' ? 'net' : mode === 'bil' ? 'bil' : 'local';
   const net = S.srcMode === 'net';
+  const bilMode = S.srcMode === 'bil';
   $$('#segSrc b').forEach(b => b.classList.toggle('on', b.dataset.s === S.srcMode));
-  $('#localActions').style.display = net ? 'none' : 'flex';
+  $('#localActions').style.display = net || bilMode ? 'none' : 'flex';
   $('#netActions').style.display = net ? 'flex' : 'none';
   $('#neNote').style.display = net ? 'block' : 'none';
+  const bilNote = $('#bilNote');
+  if (bilNote) bilNote.style.display = bilMode ? 'block' : 'none';
   if (!net) $('#neHome').classList.remove('show');
+  if (!bilMode) $('#bilHome').classList.remove('show');
   const q = $('#q');
   q.value = '';
-  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑' : '搜索曲名 / 艺人 / 专辑';
+  q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑'
+    : bilMode ? '搜索哔哩哔哩：视频标题 / UP 主'
+      : '搜索曲名 / 艺人 / 专辑';
   if (net) {
     updateNeNote();
     if (S.ne.view !== 'coll') S.ne.view = 'home';
     neEnsureHome();          // 首次进来才真的打接口，之后复用缓存
   }
+  if (bilMode) {
+    S.bil.items = [];
+    S.bil.err = '';
+    S.bil.view = 'idle';
+    updateBilNote();
+  }
   renderLibrary();
-  if (net) setTimeout(() => q.focus(), 60);
+  if (net || bilMode) setTimeout(() => q.focus(), 60);
 }
 
 /* 账号状态只在这里汇总成三个值（hasCookie / loggedIn / nick），
@@ -2204,6 +2285,291 @@ async function neEnsureHome(force = false) {
     paintNeNote();
   }
   if (S.srcMode === 'net' && S.ne.view === 'home') renderNet();
+}
+
+/* 播放前补到 cid 之后，所有「以曲目 id 为键」的地方都要一起改：曲库索引、队列行、
+ * 播放列表项、随机池。只改曲目对象的 path 是不够的 —— 播放列表里存的还是插入时的
+ * bil:<bvid>:0，下一次点同一条会因为 id 对不上而被当成新曲目再插一遍。 */
+function patchBilCid(qi, k, cid) {
+  const n = Number(cid) || 0;
+  if (!n || !k || n === Number(k.bilCid)) return;
+  const oldPath = k.path;
+  k.bilCid = n;
+  k.path = 'bil:' + k.bilBvid + ':' + n;
+  if (oldPath !== k.path && S.libIndex) {
+    S.libIndex.delete(oldPath);
+    S.libIndex.set(k.path, k);
+  }
+  const row = S.q[qi];
+  if (row) { row.id = k.path; row.t = k; }
+  const list = plItems();
+  const at = list.findIndex(x => x.id === oldPath);
+  if (at >= 0) { list[at] = plToItem(k); S.settings.playlist = list; plSave(); }
+  if (S.shufPool) {
+    if (S.shufPool.delete(oldPath)) S.shufPool.add(k.path);
+    if (S.shufDone && S.shufDone.delete(oldPath)) S.shufDone.add(k.path);
+  }
+  S.libDirty = true;
+}
+
+/* ------------------------------------------------------------------ 哔哩哔哩 */
+/*
+ * 与网易云共用同一套「搜索 → 点一条 → 加入曲库并播放」的交互，差别只有两点：
+ *   1. 没有歌单/推荐首页，进来就是一句「搜个标题或 UP 主」；
+ *   2. 播放前要补 cid（搜索结果只给 bvid），这一步在 playAt 的 bil 分支里做。
+ * 登录是可选的：不登录也能播公开稿件，只是收藏夹之类用不了 —— 所以未登录不拦搜索。
+ */
+function paintBilNote() {
+  const el = $('#bilNote');
+  if (!el) return;
+  const st = S.bil.status;
+  const ok = !!(st && st.loggedIn);
+  el.textContent = ok
+    ? `已登录${st.nickname ? ' · ' + st.nickname : ''}${st.userId ? ' (uid ' + st.userId + ')' : ''} · 播放按账号权限取流`
+    : (st && st.loggedIn === false && st.sessdataMasked
+      ? '登录已失效 · 点这里重新扫码'
+      : '未登录 · 只能播放公开稿件，点这里扫码登录');
+  el.classList.toggle('linked', !ok);
+  const ast = $('#bilAuthState');
+  if (ast) ast.textContent = ok ? (st.nickname || '已登录') : '未登录';
+}
+
+async function updateBilNote() {
+  try {
+    const r = await window.api.bilStatus();
+    if (r && r.ok) S.bil.status = r.status;
+  } catch { /* 网络异常不阻塞浏览：状态未知就按未登录显示 */ }
+  paintBilNote();
+}
+
+async function bilSearch() {
+  const q = ($('#q').value || '').trim();
+  if (!q) {
+    S.bil.items = [];
+    S.bil.view = 'idle';
+    S.bil.err = '';
+    renderBil();
+    return;
+  }
+  const seq = ++S.bil.seq;
+  S.bil.busy = true;
+  S.bil.err = '';
+  S.bil.view = 'search';
+  renderBil();
+
+  let r;
+  try { r = await window.api.bilSearch(q, 40); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (seq !== S.bil.seq) return;               // 又输入了新的关键词，这次结果作废
+
+  S.bil.busy = false;
+  if (!r || !r.ok) {
+    S.bil.err = (r && r.error && r.error.message) || '搜索失败';
+    S.bil.items = [];
+    S.bil.view = 'error';
+    S.bil.err = r && r.error && r.error.code === 'BIL_403'
+      ? '被 B 站风控拦了（-403/-352），过一会儿再试'
+      : S.bil.err;
+    renderBil();
+    return;
+  }
+  S.bil.items = r.tracks || [];
+  S.bil.total = r.total || S.bil.items.length;
+  S.bil.view = S.bil.items.length ? 'search' : 'idle';
+  if (!S.bil.items.length) S.bil.err = '';
+  renderBil();
+}
+
+function renderBil() {
+  if (S.srcMode !== 'bil') return;
+  const list = $('#libList');
+  const count = $('#libCount');
+  const home = $('#bilHome');
+  if (home) home.classList.remove('show');
+  const st = S.bil;
+
+  if (st.busy) {
+    list.innerHTML = emptyRow('正在搜索哔哩哔哩…');
+    count.textContent = '哔哩哔哩';
+    return;
+  }
+  if (st.view === 'error') {
+    list.innerHTML = emptyRow('搜索失败：' + esc(st.err || '未知原因')
+      + '<br>检查网络，或换个关键词再试。');
+    count.textContent = '哔哩哔哩 · 失败';
+    list.onclick = null;
+    return;
+  }
+  if (!st.items.length) {
+    list.innerHTML = emptyRow(
+      '搜一个视频标题或 UP 主。<br>点结果会加入播放列表并开始播放（只取音轨，不下载视频）。'
+    );
+    count.textContent = '哔哩哔哩';
+    list.onclick = null;
+    return;
+  }
+  list.innerHTML = st.items.map(t => itemHTML(t, null)).join('');
+  fillThumbs(list);
+  count.textContent = `搜索到 ${st.items.length} 条` + (st.total > st.items.length ? ` / 共 ${st.total}` : '')
+    + ' · 点击播放并加入曲库';
+  list.onclick = e => {
+    const el = e.target.closest('.item');
+    if (!el) return;
+    const bvid = el.dataset.bil;
+    const t = st.items.find(x => bilBvidOf(x) === bvid);
+    if (t) playBil(t);
+  };
+  markedEl = null;
+  markCurrent();
+}
+
+async function playBil(t) {
+  if (!t) return;
+  /* 搜索结果里没有 cid，点播放后 cid 会被补进曲目、path 跟着从 bil:BV…:0 变成
+   * bil:BV…:<cid>。所以再点同一条时不能只看 path —— 先按 bvid 找回已有曲目，
+   * 否则同一条视频会在播放列表里出现两次。 */
+  const known = S.tracks.find(x => isBil(x) && bilBvidOf(x) === bilBvidOf(t));
+  const fresh = !known;
+  const i = known ? S.tracks.indexOf(known) : addTrack(t);
+  if (i < 0) return;
+  S.libDirty = true;
+  if (fresh) toast(`已加入曲库 · ${t.title}`);
+  persistLibrary();
+  await playIndex(i);
+}
+
+/* ---------------- 哔哩哔哩登录 ----------------
+ * 两条路：扫码（默认，不接触账号密码）与手工导入 Cookie（浏览器里已登录过的人
+ * 直接复制一行就行）。两者最终都走同一个保存路径：bil:login / bil:qrPoll → 主进程。
+ */
+let bilQrTimer = 0;
+let bilQrToken = 0;
+
+function bilQrStop(hide) {
+  clearTimeout(bilQrTimer);
+  bilQrTimer = 0;
+  bilQrToken++;
+  if (hide) {
+    const w = $('#bilQrWrap');
+    if (w) w.classList.remove('show');
+    const img = $('#bilQrShot');
+    if (img) img.innerHTML = '';
+  }
+}
+
+function bilQrState(text, bad) {
+  const el = $('#bilQrState');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('err', !!bad);
+}
+
+async function bilQrStart() {
+  const wrap = $('#bilQrWrap');
+  const shot = $('#bilQrShot');
+  const box = $('#bilQrBox');
+  if (!wrap || !shot) return;
+  wrap.classList.add('show');
+  box.classList.remove('dead');
+  shot.innerHTML = '';
+  bilQrState('正在获取二维码…');
+  bilQrStop(false);
+
+  let r;
+  try { r = await window.api.bilQr(); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (!r || !r.ok) {
+    box.classList.add('dead');
+    bilQrState('获取二维码失败：' + ((r && r.error && r.error.message) || '未知原因')
+      + ' · 可以改用下面的「导入 Cookie」', true);
+    return;
+  }
+  shot.innerHTML = '<div class="qrimg">' + r.svg + '</div>';
+  bilQrState('请用哔哩哔哩手机客户端扫码');
+  const token = ++bilQrToken;
+  bilQrTimer = setTimeout(() => bilQrPoll(token), 1500);
+}
+
+async function bilQrPoll(token) {
+  if (token !== bilQrToken) return;
+  let r;
+  try { r = await window.api.bilQrPoll(); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (token !== bilQrToken) return;
+
+  if (!r || !r.ok) {
+    const code = (r && r.error && r.error.code) || '';
+    if (code === 'BIL_QR_GONE' || code === 'BIL_QR_EXPIRED') {
+      bilQrStop(false);
+      const box = $('#bilQrBox');
+      if (box) box.classList.add('dead');
+      bilQrState('二维码已失效（约 3 分钟）· 点「重新获取」', true);
+      return;
+    }
+    bilQrState('轮询失败：' + ((r && r.error && r.error.message) || '未知原因'), true);
+    bilQrTimer = setTimeout(() => bilQrPoll(token), 3000);
+    return;
+  }
+
+  if (r.loggedIn) {
+    bilQrStop(true);
+    await updateBilNote();
+    toast(`已登录哔哩哔哩${r.nickname ? ' · ' + r.nickname : ''}${r.warning ? '（' + r.warning + '）' : ''}`);
+    if (S.srcMode === 'bil') renderBil();
+    return;
+  }
+  if (r.state === 'scanned') bilQrState('已扫码，请在手机上确认');
+  else if (r.state === 'expired') {
+    bilQrStop(false);
+    const box = $('#bilQrBox');
+    if (box) box.classList.add('dead');
+    bilQrState('二维码已失效（约 3 分钟）· 点「重新获取」', true);
+    return;
+  } else bilQrState('请用哔哩哔哩手机客户端扫码');
+  bilQrTimer = setTimeout(() => bilQrPoll(token), 2000);
+}
+
+async function bilSaveAuth() {
+  const ta = $('#bilCookie');
+  const msg = $('#bilMsg');
+  const raw = (ta && ta.value || '').trim();
+  const say = (t, bad) => { if (msg) { msg.textContent = t; msg.classList.toggle('err', !!bad); } };
+  if (!raw) { say('先粘贴 Cookie', true); return; }
+  const btn = $('#bilAuthSave');
+  if (btn) btn.disabled = true;
+  say('正在验证…');
+  let r;
+  try { r = await window.api.bilLogin(raw); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (btn) btn.disabled = false;
+
+  if (!r || !r.ok) {
+    const code = (r && r.error && r.error.code) || '';
+    say(code === 'BIL_AUTH_NO_IDENTITY'
+      ? '这份 Cookie 里没有 SESSDATA，可能复制的是未登录页面'
+      : '保存失败：' + ((r && r.error && r.error.message) || '未知原因'), true);
+    return;
+  }
+  if (ta) ta.value = '';
+  S.bil.status = r.status;
+  paintBilNote();
+  closePops();
+  const chk = r.check || {};
+  const okVerify = !!chk.ok;
+  toast(okVerify
+    ? `已登录哔哩哔哩${chk.nickname ? ' · ' + chk.nickname : ''}`
+    : 'Cookie 已保存，但这台机器上没能验证通过（可能是网络或 Cookie 已过期）');
+  /* 面板已经关了，但这行字留着也有用：下次打开能立刻看出上次是「验过」还是「只存下」 */
+  say(okVerify ? `已保存并验证${chk.nickname ? ' · ' + chk.nickname : ''}` : '已保存（未通过验证，检查网络或 Cookie 是否过期）', !okVerify);
+  if (S.srcMode === 'bil') renderBil();
+}
+
+async function bilLogout() {
+  try { await window.api.bilLogout(); } catch {}
+  S.bil.status = { loggedIn: false };
+  paintBilNote();
+  toast('已退出哔哩哔哩');
+  if (S.srcMode === 'bil') renderBil();
 }
 
 function renderNet() {
@@ -2591,6 +2957,7 @@ async function playAt(qi, opts) {
   if (!k) return skipDead(qi, opts);
   const seq = ++loadSeq;
   const net = isNet(k);
+  const bilT = isBil(k);
   const autoplay = !opts || opts.autoplay !== false;
 
   /* 网易云：先在「不改任何状态」的前提下确认地址可用。
@@ -2621,6 +2988,32 @@ async function playAt(qi, opts) {
       return;
     }
     k.unavailable = '';
+  } else if (bilT) {
+    /* 哔哩哔哩：搜索阶段只有 bvid，cid 要在这里补。
+     * 补齐后立刻把 path 改成 bil:<bvid>:<cid>，下面 mediaUrl 才能拼出正确地址。 */
+    try { info = await window.api.bilUrl(k.bilBvid, k.bilCid); }
+    catch (e) { info = { ok: false, error: { code: 'BIL_NET', message: String((e && e.message) || e) } }; }
+    if (seq !== loadSeq) return;
+
+    if (!info || !info.ok) {
+      const code = (info && info.error && info.error.code) || '';
+      const reason = code === 'BIL_NO_AUDIO' ? '没有可用音轨'
+        : code === 'BIL_403' ? '接口被风控'
+          : code === 'BIL_TIMEOUT' ? '网络超时' : '暂时无法播放';
+      k.unavailable = reason;
+      if (S.settings.playMode === 'shuffle') markShufFail(k.path);
+      toast(`无法播放：${k.title}（${reason}）`);
+      if (S.q.length > 1 && errStreak < 3) {
+        errStreak++;
+        const ni = stepIndex(1, qi);
+        if (ni >= 0) playAt(ni);
+      } else if (S.i === qi) {
+        paintMeta();
+      }
+      return;
+    }
+    if (info.cid) patchBilCid(qi, k, info.cid);
+    k.unavailable = '';
   }
 
   S.i = qi;
@@ -2638,7 +3031,7 @@ async function playAt(qi, opts) {
   paintMeta();
   markCurrent();
 
-  if (net) {
+  if (net || bilT) {
     if (info.codec) k.codec = info.codec;
     if (info.bitrate) k.bitrate = info.bitrate;
     if (typeof info.lossless === 'boolean') k.lossless = info.lossless;
@@ -2696,7 +3089,7 @@ async function playAt(qi, opts) {
   // 封面 + 主色（每步都要确认自己还是"当前"的那次请求）
   try {
     let art = null;
-    if (net) {
+    if (net || bilT) {
       art = await loadArt(k);
     } else {
       const detail = await window.api.trackDetail(k.path);
@@ -3292,6 +3685,18 @@ function bind() {
         return;
       }
       qTimer = setTimeout(neSearch, 380);
+    } else if (S.srcMode === 'bil') {
+      const v = ($('#q').value || '').trim();
+      if (!v) {
+        S.bil.seq++;
+        S.bil.items = [];
+        S.bil.busy = false;
+        S.bil.err = '';
+        S.bil.view = 'idle';
+        renderBil();
+        return;
+      }
+      qTimer = setTimeout(bilSearch, 380);   // B 站接口有频控，比本地列表等得更久
     } else {
       qTimer = setTimeout(renderLibrary, 110);
     }
@@ -3300,7 +3705,9 @@ function bind() {
     if (e.key !== 'Enter') return;
     e.preventDefault();
     clearTimeout(qTimer);
-    if (S.srcMode === 'net') neSearch(); else renderLibrary();
+    if (S.srcMode === 'net') neSearch();
+    else if (S.srcMode === 'bil') bilSearch();
+    else renderLibrary();
   };
 
   // 抽屉里所有 data-act（扫码登录 / 刷新 / 进歌单 / 返回）统一委托到抽屉根节点
@@ -3550,6 +3957,39 @@ function bind() {
     if (S.ne.loggedIn) return;
     openDrawer($('#dSet'));
     if (!qrShown()) setTimeout(qrStart, 80);   // 否则 openDrawer 里已经换过码了
+  };
+
+  // 哔哩哔哩：扫码 / 导入 Cookie / 退出
+  $('#btnBilQr').onclick = () => {
+    const w = $('#bilQrWrap');
+    if (w && w.classList.contains('show')) { bilQrStop(true); return; }
+    bilQrStart();
+  };
+  $('#btnBilQrRetry').onclick = () => bilQrStart();
+  $('#btnBilQrCookie').onclick = e => {
+    e.stopPropagation();                    // 别让全局「点弹层外面就关」把刚开的面板关掉
+    bilQrStop(true);
+    openPop($('#popBilAuth'), $('#btnBilCookie'));
+  };
+  $('#btnBilCookie').onclick = e => {
+    e.stopPropagation();
+    openPop($('#popBilAuth'), e.currentTarget);
+  };
+  $('#btnBilLogout').onclick = () => { bilQrStop(true); bilLogout(); };
+  $('#bilAuthSave').onclick = () => bilSaveAuth();
+  $('#bilAuthCancel').onclick = () => closePops();
+  $('#bilCookie').onkeydown = e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); bilSaveAuth(); }
+  };
+  // 曲库里那句「点这里扫码登录」也走同一条路：先开设置抽屉，再开扫码面板
+  $('#bilNote').onclick = () => {
+    const st = S.bil.status;
+    if (st && st.loggedIn) return;
+    openDrawer($('#dSet'));
+    setTimeout(() => {
+      const w = $('#bilQrWrap');
+      if (w && !w.classList.contains('show')) bilQrStart();
+    }, 80);
   };
 
   window.addEventListener('resize', () => {
