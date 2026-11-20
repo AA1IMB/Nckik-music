@@ -49,6 +49,9 @@ const state = {
   nickname: '',
   verified: false,
   expired: false,     // 凭证过期/失效：界面据此引导重新扫码，而不是当成「未登录」或「正常」
+  /* 设备指纹：B 站的账号接口会看 buvid3/buvid4。扫码那一段必须和后面取数据
+   * 用同一对值，否则 SESSDATA 会被判「不是这台机器登的」（nav 回 -101）。 */
+  device: { buvid3: '', buvid4: '' },
   qr: null
 };
 
@@ -465,7 +468,12 @@ function qrSvg(text) {
 }
 
 async function qrCreate() {
-  const { json } = await getJSON(PASSPORT + '/x/passport-login/web/qrcode/generate');
+  /* 先备好设备指纹，并让 generate/poll 都带着它 —— B 站把 SESSDATA 绑在 buvid3 上，
+   * 换一对新 buvid3 再取数据会被判 -101（这就是「扫码成功但收藏夹打不开」的真因）。 */
+  await ensureDeviceCookie();
+  const dev = deviceCookieHeader();
+  const { json } = await getJSON(PASSPORT + '/x/passport-login/web/qrcode/generate',
+    dev ? { headers: { Cookie: dev } } : {});
   const d = (json && json.data) || {};
   if (json.code !== 0 || !d.url || !d.qrcode_key) {
     throw new BilError('没能取到二维码（code=' + json.code + '）', 'BIL_QR_KEY');
@@ -496,8 +504,10 @@ async function qrPoll() {
     state.qr = null;
     throw new BilError('二维码已过期，请重新获取', 'BIL_QR_EXPIRED');
   }
+  const dev = deviceCookieHeader();
   const { json, headers } = await getJSON(
-    PASSPORT + '/x/passport-login/web/qrcode/poll?qrcode_key=' + encodeURIComponent(q.key)
+    PASSPORT + '/x/passport-login/web/qrcode/poll?qrcode_key=' + encodeURIComponent(q.key),
+    dev ? { headers: { Cookie: dev } } : {}
   );
   const d = (json && json.data) || {};
   const code = Number(d.code);
@@ -509,8 +519,11 @@ async function qrPoll() {
     if (!/(^|;\s*)SESSDATA=/.test(cookie)) {
       throw new BilError('登录成功但没拿到 SESSDATA，请重新扫码', 'BIL_QR_NO_COOKIE');
     }
-    applyAuth(cookie);
-    out.cookie = cookie;
+    /* 把同一对 buvid 拼进会话串：以后取数据必须用这一对，否则又会被判异地 */
+    const withDev = deviceCookieHeader();
+    const merged = withDev ? (/\bbuvid3=/.test(cookie) ? cookie : withDev + '; ' + cookie) : cookie;
+    applyAuth(merged);
+    out.cookie = merged;
   } else if (code === 86101) out.state = 'waiting';
   else if (code === 86090) out.state = 'scanned';
   else if (code === 86038) out.state = 'expired';
@@ -548,6 +561,24 @@ function applyAuth(rawCookie) {
 
 function loggedIn() { return !!state.sessdata; }
 
+/* SESSDATA 的「形状」诊断：只看长度、分隔符个数与字符类别，不暴露值本身。
+ * B 站的值是 `xxx%2C<时间戳>%2C<校验>` 三段；逗号数与长度不对就说明取回来时被
+ * 解码/拼接坏了，这跟「登录态过期」是两回事，日志里必须能分开。 */
+function sessdataShape() {
+  const v = String(state.sessdata || '');
+  if (!v) return { len: 0 };
+  const pct2c = (v.match(/%2C/gi) || []).length;
+  return {
+    len: v.length,
+    pct2c,
+    realComma: (v.match(/,/g) || []).length,
+    pctAny: (v.match(/%/g) || []).length,
+    head4: v.slice(0, 4),
+    hasUpper: /[A-Z]/.test(v),
+    hasDash: /[-_]/.test(v)
+  };
+}
+
 function authInfo() {
   return {
     provider: 'bilibili',
@@ -565,15 +596,27 @@ function authInfo() {
  * 需要鉴权的请求前向 /x/frontend/finger/spi 要一对，补进 Cookie 里缓存住。 */
 let deviceCookieAt = 0;
 async function ensureDeviceCookie() {
-  if (/\bbuvid3=/.test(state.cookie)) return;
-  if (Date.now() - deviceCookieAt < 10 * 60 * 1000) return;   // 刚试过，别连着打
+  const m = /\bbuvid3=([^;]*)/.exec(state.cookie);
+  if (m && m[1]) { state.device.buvid3 = m[1]; return state.device; }
+  if (!state.device.buvid3 && Date.now() - deviceCookieAt < 10 * 60 * 1000) return state.device;  // 刚试过，别连着打
   deviceCookieAt = Date.now();
   try {
     const { json } = await getJSON(API + '/x/frontend/finger/spi');
     const d = (json && json.data) || {};
-    if (!d.b_3) return;
+    if (!d.b_3) return state.device;
+    state.device = { buvid3: d.b_3, buvid4: d.b_4 || '' };
     state.cookie = state.cookie + '; buvid3=' + d.b_3 + (d.b_4 ? '; buvid4=' + d.b_4 : '');
   } catch { /* 拿不到就照旧，不影响主流 */ }
+  return state.device;
+}
+
+/* 只带设备指纹的 Cookie 头：扫码那两步要它，才不会让会话绑到一个「无设备」上 */
+function deviceCookieHeader() {
+  const d = state.device || {};
+  const parts = [];
+  if (d.buvid3) parts.push('buvid3=' + d.buvid3);
+  if (d.buvid4) parts.push('buvid4=' + d.buvid4);
+  return parts.join('; ');
 }
 
 /* 校验：nav 带 Cookie 请求，code=0 且 isLogin=true 才算真的登录上了。
@@ -588,7 +631,12 @@ async function verify() {
     if (Number(json.code) === -101 || (json.code === 0 && !d.isLogin)) state.expired = true;
     state.nickname = String(d.uname || '');
     state.userId = Number(d.mid || state.userId) || state.userId;
-    return { loggedIn: state.verified, ok: state.verified, nickname: state.nickname, userId: state.userId, vip: Number((d.vipStatus || 0)) > 0 };
+    return {
+      loggedIn: state.verified, ok: state.verified, nickname: state.nickname,
+      userId: state.userId, vip: Number((d.vipStatus || 0)) > 0,
+      /* 诊断用：nav 的原话与「有没有带设备指纹」，出问题时一眼看出卡在哪 */
+      navCode: Number(json.code), isLogin: !!d.isLogin, hasBuvid3: !!state.device.buvid3
+    };
   } catch (e) {
     state.verified = false;
     return { loggedIn: false, ok: false, reason: (e && e.code) || 'BIL_NET', message: String((e && e.message) || e) };
@@ -612,6 +660,7 @@ function logout() {
 }
 
 module.exports = {
+  sessdataShape,
   BilError, request, getJSON,
   searchVideos, viewInfo, playUrl, invalidateUrl, coverData,
   sortPinned, isPinnedUp, favFolders, favList, mapFavItem,

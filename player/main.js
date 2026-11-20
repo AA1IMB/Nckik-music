@@ -1145,7 +1145,14 @@ ipcMain.handle('bil:favs', () => bilCall(async () => {
     bilFavLog('favFolders', { ok: true, folders: r.items.length, userId: r.userId });
     return r;
   } catch (e) {
-    bilFavLog('favFolders', { ok: false, code: e && e.code, message: String((e && e.message) || e) });
+    /* 失败时再补一次 nav 的诊断：navCode / isLogin / 有没有携带设备指纹，
+     * 这三个值能区分「凭证过期」「设备指纹不匹配」「上游风控」。 */
+    let check = null;
+    try { check = await bil.verify(); } catch (err) { check = { err: String((err && err.message) || err) }; }
+    bilFavLog('favFolders', {
+      ok: false, code: e && e.code, message: String((e && e.message) || e),
+      navCode: check && check.navCode, isLogin: check && check.isLogin, hasBuvid3: check && check.hasBuvid3
+    });
     throw e;
   }
 }));
@@ -1181,6 +1188,11 @@ ipcMain.handle('bil:qrPoll', () =>
     try { saved = writeBilCookie(r.cookie); }
     catch (e) { warn = String(e.message || e); }
     const v = await bil.verify().catch(() => ({ ok: false }));
+    /* 扫码当刻就把「会话到底被不被认可」记下来：navCode=-101 就是设备指纹没绑上 */
+    bilFavLog('qrLogin', {
+      ok: !!(v && v.ok), navCode: v && v.navCode, isLogin: v && v.isLogin,
+      hasBuvid3: v && v.hasBuvid3, saved
+    });
     return {
       loggedIn: true, saved, code: 0, state: 'confirmed',
       nickname: v.nickname || bil.authInfo().nickname || '',
@@ -1264,7 +1276,8 @@ app.whenReady().then(() => {
   /* 记一行「凭证到底读到没有」：收藏夹出问题时，这一步是最容易出错又最难看出来的 */
   bilFavLog('startup', {
     cookieLen: savedBil.length,
-    keys: parseBilCookieKeys(savedBil)
+    keys: parseBilCookieKeys(savedBil),
+    sessdata: bil.sessdataShape()
   });
   ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
   createWindow();
