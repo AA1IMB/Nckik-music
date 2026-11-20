@@ -23,12 +23,14 @@ function createQrLogin({ BrowserWindow, app }) {
   let win = null;
   let session = null;
   let idSeq = 0;
-  let current = null;                // { id, at, ttl, img, timer }
+  let current = null;                // { id, at, ttl, img, timer, sessdata }
   let lastCookie = '';               // 刚确认过的会话：容忍渲染层在确认后又多问一次
+  let unwatchCookie = null;          // 取消 cookies.on('changed') 监听
 
   function destroy() {
     if (current && current.timer) clearTimeout(current.timer);
     current = null;
+    if (unwatchCookie) { try { unwatchCookie(); } catch (e) { /* 退订失败不影响关窗 */ } unwatchCookie = null; }
     if (win && !win.isDestroyed()) win.destroy();
     win = null;
     session = null;
@@ -64,11 +66,13 @@ function createQrLogin({ BrowserWindow, app }) {
   }
 
   async function readCookie() {
-    if (!session) return '';
+    /* 每轮都从窗口拿会话：页面跳转/新开窗口后旧的 session 引用可能已经不代表当前罐 */
+    const jar = (win && !win.isDestroyed()) ? win.webContents.session : session;
+    if (!jar) return '';
     /* 不按 domain 过滤：登录页会把 SESSDATA 写到 www./passport./.bilibili.com 等
      * 不同作用域上，用 domain 过滤很容易「看漏」（酷狗那版就踩过这个坑）。
      * 这里取全部 cookie，再按名字白名单挑，看到同名取最后一个非空值。 */
-    const all = await session.cookies.get({});
+    const all = await jar.cookies.get({});
     const map = new Map();
     for (const c of all) {
       if (!KEEP.includes(c.name)) continue;
@@ -102,6 +106,21 @@ function createQrLogin({ BrowserWindow, app }) {
     });
     win.webContents.setUserAgent(UA);
     session = win.webContents.session;
+    /* 登录完成后官方页面可能 window.open 一个回调页：那个窗口虽然也用同一个分区，
+     * 但我们读罐的时机与它的生命周期对不上。直接拒掉，并把地址在当前隐藏窗口里
+     * 走一遍，让 Set-Cookie 落在我们正在读的这个会话上。 */
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:/i.test(url)) win.loadURL(url).catch(() => { /* 打不开就把地址丢掉 */ });
+      return { action: 'deny' };
+    });
+    /* 会话层监听：登录成功那一下 Set-Cookie 可能跟着一次跳转到来，页面马上就走了，
+     * 单靠下轮 poll 去读罐容易错过「页面已经跳走、窗口还没销毁」这一拍。 */
+    const onCookie = (_e, c) => {
+      if (!c || c.name !== 'SESSDATA' || !c.value) return;
+      if (current) current.sessdata = c.value;
+    };
+    session.cookies.on('changed', onCookie);
+    unwatchCookie = () => session.cookies.removeListener('changed', onCookie);
     await win.loadURL(LOGIN_URL);
     const img = await waitQr();
     current = {
@@ -118,6 +137,13 @@ function createQrLogin({ BrowserWindow, app }) {
       throw new Error('登录窗口已关闭，请重新获取二维码');
     }
     const cookie = await readCookie();
+    if (!cookie && current && current.sessdata) {
+      /* 监听已经看到 SESSDATA 落地，但读罐这一拍还没刷出来：按白名单把它拼回去 */
+      const c = current.sessdata;
+      lastCookie = 'SESSDATA=' + c;
+      destroy();
+      return { state: 'confirmed', cookie: lastCookie, img: '' };
+    }
     if (cookie) {
       lastCookie = cookie;
       destroy();
