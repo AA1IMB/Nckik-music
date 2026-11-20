@@ -3671,7 +3671,13 @@ function openDrawer(el) {
     setTimeout(() => $('#q').focus(), 120);
   }
   // 设置重新打开时，如果二维码面板还开着就换一张新码：旧 key 很可能已经过期
-  else if (el.id === 'dSet' && qrShown()) setTimeout(qrStart, 60);
+  else if (el.id === 'dSet') {
+    if (qrShown()) setTimeout(qrStart, 60);
+    /* 重启后是「先恢复凭证、后补验」：这一段回来时设置面板往往已经画过了，
+     * 所以打开面板就再取一次状态，否则会一直显示上一次的「未登录」。 */
+    updateBilNote();
+    if (S.srcMode === 'bil') bilEnsureFavs();
+  }
 }
 
 /* ------------------------------------------------------------------ 设置 */

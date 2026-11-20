@@ -1176,7 +1176,13 @@ ipcMain.handle('bil:favList', (_e, mediaId, page) =>
 ipcMain.handle('bil:cover', (_e, url, size) =>
   bilCall(async () => ({ dataUrl: await bil.coverData(url, Number(size) || 300) })));
 
-ipcMain.handle('bil:status', () => bilCall(async () => ({ status: bil.status() })));
+ipcMain.handle('bil:status', () =>
+  bilCall(async () => {
+    /* 启动时只恢复了 Cookie、还没验过：面板一打开就补验一次。
+     * 否则重启后明明凭证有效，界面仍按 nickname 空值显示「未登录」。 */
+    if (bil.loggedIn() && !bil.authInfo().verified) await bil.verify().catch(() => null);
+    return { status: bil.status() };
+  }));
 
 ipcMain.handle('bil:qr', () =>
   bilCall(async () => {
