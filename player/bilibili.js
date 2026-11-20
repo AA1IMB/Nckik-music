@@ -531,6 +531,26 @@ async function qrPoll() {
 }
 
 /* ---------------- 凭证 ---------------- */
+/* cookie 名是大小写敏感的：B 站只认 `SESSDATA` / `DedeUserID`，把名字小写发过去
+ * 会被当成「没有登录态」（nav 回 -101）。parseCookie 为了好取值统一存小写，所以
+ * 拼回请求头时要用这里保留原写法的版本。 */
+function parseCookiePairs(raw) {
+  const keep = new Map();          // 小写名 → [原名, 值]，同名后者覆盖
+  String(raw || '')
+    .replace(/^cookie:\s*/i, '')
+    .split(/[;\n\r]+/)
+    .forEach(part => {
+      const s2 = part.trim();
+      if (!s2) return;
+      const i = s2.indexOf('=');
+      if (i <= 0) return;
+      const name = s2.slice(0, i).trim();
+      if (!name) return;
+      keep.set(name.toLowerCase(), [name, s2.slice(i + 1).trim()]);
+    });
+  return [...keep.values()];
+}
+
 function parseCookie(raw) {
   const out = {};
   String(raw || '')
@@ -548,7 +568,8 @@ function parseCookie(raw) {
 
 function applyAuth(rawCookie) {
   const c = parseCookie(rawCookie);
-  state.cookie = Object.entries(c).map(([k, v]) => k + '=' + v).join('; ');
+  /* 用保留原名大小写的键值拼请求头（小写名的 cookie 头等于没发，见 parseCookiePairs 注释） */
+  state.cookie = parseCookiePairs(rawCookie).map(([k, v]) => k + '=' + v).join('; ');
   state.sessdata = c.sessdata || '';
   state.biliJct = c.bili_jct || '';
   state.userId = Number(c.dedeuserid || 0) || 0;
@@ -560,6 +581,9 @@ function applyAuth(rawCookie) {
 }
 
 function loggedIn() { return !!state.sessdata; }
+
+/* 诊断/探针用：当前会写进请求头的 Cookie 字符串（含大小写） */
+function cookieHeader() { return state.cookie; }
 
 /* SESSDATA 的「形状」诊断：只看长度、分隔符个数与字符类别，不暴露值本身。
  * B 站的值是 `xxx%2C<时间戳>%2C<校验>` 三段；逗号数与长度不对就说明取回来时被
@@ -665,6 +689,6 @@ module.exports = {
   searchVideos, viewInfo, playUrl, invalidateUrl, coverData,
   sortPinned, isPinnedUp, favFolders, favList, mapFavItem,
   qrCreate, qrPoll, qrSvg,
-  applyAuth, authInfo, status, verify, logout, loggedIn,
+  applyAuth, authInfo, status, verify, logout, loggedIn, parseCookiePairs, cookieHeader,
   mapVideo, parseCookie, httpsify
 };

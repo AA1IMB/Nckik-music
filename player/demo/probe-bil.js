@@ -308,6 +308,23 @@ const snap = () => js(`(() => {
     }
   }
 
+  log('— §8b Cookie 头名字（大小写敏感，2026-11-20 复盘）');
+  {
+    /* 只在主进程里跑纯函数、不发请求：B 站只认 `SESSDATA` / `DedeUserID` 的写法，
+     * 名字被小写发出去等于没带登录态（nav 回 -101，扫码成功也判未登录）。 */
+    const bil = require(path.join(root, 'bilibili.js'));
+    const raw = 'SESSDATA=abc%2C1799999999%2Cxyz; bili_jct=JJ; DedeUserID=42; buvid3=B3';
+    const pairs = bil.parseCookiePairs(raw);
+    ok('保留 cookie 名原写法', pairs.map(p => p[0]).join(',') === 'SESSDATA,bili_jct,DedeUserID,buvid3', pairs.map(p => p[0]).join(','));
+    bil.applyAuth(raw);
+    ok('请求头以 SESSDATA= 开头', /^SESSDATA=abc/.test(bil.cookieHeader()), bil.cookieHeader().slice(0, 24));
+    ok('值里的 %2C 不被解码', /^SESSDATA=abc%2C1799999999%2Cxyz(;|$)/.test(bil.cookieHeader()));
+    const lower = pairs.map(([k, v]) => k.toLowerCase() + '=' + v).join('; ');
+    bil.applyAuth(lower);
+    ok('小写名的对照：请求头确实会变成 sessdata=', /^sessdata=/.test(bil.cookieHeader()), bil.cookieHeader().slice(0, 24));
+    bil.logout();
+  }
+
   log('— §9 控制台');
   ok('渲染层无 JS 报错', errors.length === 0, errors.slice(0, 2).join(' | '));
 
