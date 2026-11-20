@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('api', {
   bilCover: (url, size) => ipcRenderer.invoke('bil:cover', url, size),
   bilStatus: () => ipcRenderer.invoke('bil:status'),
   bilQr: () => ipcRenderer.invoke('bil:qr'),
+  bilQrCancel: () => ipcRenderer.invoke('bil:qrCancel'),
   bilQrPoll: () => ipcRenderer.invoke('bil:qrPoll'),
   bilLogin: (cookie) => ipcRenderer.invoke('bil:login', cookie),
   bilLogout: () => ipcRenderer.invoke('bil:logout'),

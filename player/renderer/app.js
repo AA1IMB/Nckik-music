@@ -2672,6 +2672,8 @@ function bilQrStop(hide) {
     if (w) w.classList.remove('show');
     const img = $('#bilQrShot');
     if (img) img.innerHTML = '';
+    /* 关掉主进程里那个隐藏登录窗，不然它会一直挂着 */
+    try { window.api.bilQrCancel(); } catch { /* 忽略 */ }
   }
 }
 
@@ -2702,7 +2704,10 @@ async function bilQrStart() {
       + ' · 可以改用下面的「导入 Cookie」', true);
     return;
   }
-  shot.innerHTML = '<div class="qrimg">' + r.svg + '</div>';
+  /* 主进程会返回官方登录页里的二维码位图（data:image/png）；老版本回的是 svg，两种都认 */
+  const qrBox = r.qr || r;
+  if (qrBox.img) shot.innerHTML = '<div class="qrimg"><img alt="" src="' + qrBox.img + '"></div>';
+  else shot.innerHTML = '<div class="qrimg">' + (qrBox.svg || '') + '</div>';
   bilQrState('请用哔哩哔哩手机客户端扫码');
   const token = ++bilQrToken;
   bilQrTimer = setTimeout(() => bilQrPoll(token), 1500);
@@ -2737,6 +2742,10 @@ async function bilQrPoll(token) {
     toast(`已登录哔哩哔哩${r.nickname ? ' · ' + r.nickname : ''}${r.warning ? '（' + r.warning + '）' : ''}`);
     if (S.srcMode === 'bil') renderBil();
     return;
+  }
+  if (r.img) {
+    const cur = $('#bilQrShot img');
+    if (cur && cur.getAttribute('src') !== r.img) cur.setAttribute('src', r.img);
   }
   if (r.state === 'scanned') bilQrState('已扫码，请在手机上确认');
   else if (r.state === 'expired') {

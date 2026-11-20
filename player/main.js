@@ -6,6 +6,7 @@ const fsp = require('node:fs/promises');
 const { Readable } = require('node:stream');
 const ne = require('./netease');
 const bil = require('./bilibili');
+const { createQrLogin } = require('./bilibili-qr');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -457,6 +458,9 @@ function writeNeCookie(cookie) {
  * 与网易云同一套做法：只存会话串（SESSDATA / bili_jct / DedeUserID），
  * 用系统密钥库加密后落盘；settings.json 与日志里都不出现明文。
  * 单独一个文件是为了「删掉一个音源的登录」不会波及另一个。 */
+/* 扫码走「官方登录页 + 隐藏窗口」：见 bilibili-qr.js 顶部注释 */
+const bilQr = createQrLogin({ BrowserWindow, app });
+
 const bilAuthPath = path.join(userDir, 'bil-auth.bin');
 
 /* 只把 Cookie 的键名拿出来记日志，值一律不落盘 */
@@ -1176,29 +1180,37 @@ ipcMain.handle('bil:status', () => bilCall(async () => ({ status: bil.status() }
 
 ipcMain.handle('bil:qr', () =>
   bilCall(async () => {
-    const q = await bil.qrCreate();
-    return { svg: bil.qrSvg(q.url), url: q.url, ttl: q.ttl };
+    const qr = await bilQr.start();
+    bilFavLog('qrStart', { key: qr.key, imgLen: String(qr.img || '').length });
+    return { qr };
   }));
 
+/* 轮询：窗口里出现了 SESSDATA 才算登录成功（与浏览器里扫码一模一样） */
 ipcMain.handle('bil:qrPoll', () =>
   bilCall(async () => {
-    const r = await bil.qrPoll();
-    if (r.code !== 0 || !r.cookie) return { loggedIn: false, code: r.code, state: r.state || '', message: r.message };
+    const r = await bilQr.poll();
+    if (r.state !== 'confirmed') {
+      return { loggedIn: false, state: r.state, img: r.img || '', code: r.state === 'expired' ? 86038 : 86101 };
+    }
+    bil.applyAuth(r.cookie);
     let saved = false, warn = '';
     try { saved = writeBilCookie(r.cookie); }
     catch (e) { warn = String(e.message || e); }
     const v = await bil.verify().catch(() => ({ ok: false }));
-    /* 扫码当刻就把「会话到底被不被认可」记下来：navCode=-101 就是设备指纹没绑上 */
     bilFavLog('qrLogin', {
       ok: !!(v && v.ok), navCode: v && v.navCode, isLogin: v && v.isLogin,
-      hasBuvid3: v && v.hasBuvid3, saved
+      hasBuvid3: v && v.hasBuvid3, saved, cookieLen: r.cookie.length
     });
     return {
-      loggedIn: true, saved, code: 0, state: 'confirmed',
-      nickname: v.nickname || bil.authInfo().nickname || '',
-      warning: saved ? '' : (warn || '登录成功，但凭证没能落盘，重启后需要重新扫码')
+      loggedIn: !!(v && v.ok), saved, code: 0, state: 'confirmed',
+      nickname: (v && v.nickname) || bil.authInfo().nickname || '',
+      warning: (v && v.ok) ? '' : (saved
+        ? '登录成功，但这个会话没通过校验（' + ((v && v.navCode) || '网络') + '），请重试或改用导入 Cookie'
+        : (warn || '登录成功，但凭证没能落盘，重启后需要重新扫码'))
     };
   }));
+
+ipcMain.handle('bil:qrCancel', () => { bilQr.stop(); return { ok: true }; });
 
 /* 手工导入 Cookie：与扫码走同一条保存路径，只是没有「取码」这一段。 */
 ipcMain.handle('bil:login', (_e, cookie) =>
