@@ -2435,8 +2435,11 @@ function bilFavsHTML() {
       <span class="lnk" data-bil-favretry="1">重试</span></div>`;
   }
   if (!f.items.length) {
-    return `<div class="ne-msg">这个账号还没有自建收藏夹。
-      <span class="lnk" data-bil-favretry="1">刷新</span></div>`;
+    /* 「登录着但一个都没返回」几乎都是登录态没被接口认可，不是账号真的没有收藏夹：
+     * 给重新扫码的出口，别让用户以为收藏夹丢了。 */
+    return `<div class="ne-msg">接口没有返回任何收藏夹。这通常意味着当前登录态已失效。
+      <span class="lnk" data-bil-login="1">重新扫码</span>
+      <span class="lnk" data-bil-favretry="1">再试一次</span></div>`;
   }
   return `<div class="ne-sec">我的收藏夹 <em>${f.items.length} 个</em><button data-bil-favretry="1">刷新</button></div>`
     + f.items.map(bilFavRowHTML).join('');

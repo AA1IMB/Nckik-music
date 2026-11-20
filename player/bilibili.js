@@ -273,12 +273,28 @@ function favError(json, what) {
 
 async function favFolders() {
   assertLogin();
+  /* 扫码拿到的 Cookie 不一定带 DedeUserID（不同入口差别很大），
+   * 没带就先用 nav 问一次 —— 顺便把「这个 Cookie 到底还有效吗」一起确认掉。 */
+  if (!state.userId || !state.verified) {
+    const check = await verify();
+    if (!check.ok) {
+      state.expired = true;
+      throw new BilError('登录态已失效，请重新扫码登录后再看收藏夹', 'BIL_NOT_LOGIN');
+    }
+  }
   const mid = Number(state.userId) || 0;
   if (!mid) throw new BilError('登录信息里没有 DedeUserID，没法列收藏夹；请重新扫码登录', 'BIL_NO_MID');
+  await ensureDeviceCookie();
   const { json } = await getJSON(API + '/x/v3/fav/folder/created/list-all?up_mid=' + mid, {
     headers: authHeaders()
   });
   if (Number(json.code) !== 0) favError(json, '收藏夹列表');
+  /* 未登录访问这个接口是 code=0 + data=null；带着失效的 SESSDATA 也是这个形状。
+   * 不把 null 当「没有收藏夹」，否则界面会停在空态、用户以为收藏夹丢了。 */
+  if (!json.data) {
+    state.expired = true;
+    throw new BilError('接口没有认可当前登录态（返回空数据），请重新扫码登录', 'BIL_NOT_LOGIN');
+  }
   const rows = ((json.data && json.data.list) || []);
   const items = rows.map(f => ({
     source: 'bilibili',
@@ -317,6 +333,10 @@ async function favList(mediaId, { page = 1, size = 20 } = {}) {
     '&platform=web&keyword=&order=mtime&type=0&tid=0';
   const { json } = await getJSON(url, { headers: authHeaders() });
   if (Number(json.code) !== 0) favError(json, '收藏夹内容');
+  if (!json.data) {
+    state.expired = true;
+    throw new BilError('接口没有认可当前登录态（返回空数据），请重新扫码登录', 'BIL_NOT_LOGIN');
+  }
   const d = json.data || {};
   const items = ((d.medias || [])).filter(v => v && v.bvid).map(mapFavItem);
   return {
@@ -540,10 +560,27 @@ function authInfo() {
   };
 }
 
+/* 设备指纹：网页登录会带 buvid3/buvid4，我们只存了登录 Cookie。
+ * 缺这两个时有接口会把我们当匿名（返回 data:null）或直接风控，所以在第一次
+ * 需要鉴权的请求前向 /x/frontend/finger/spi 要一对，补进 Cookie 里缓存住。 */
+let deviceCookieAt = 0;
+async function ensureDeviceCookie() {
+  if (/\bbuvid3=/.test(state.cookie)) return;
+  if (Date.now() - deviceCookieAt < 10 * 60 * 1000) return;   // 刚试过，别连着打
+  deviceCookieAt = Date.now();
+  try {
+    const { json } = await getJSON(API + '/x/frontend/finger/spi');
+    const d = (json && json.data) || {};
+    if (!d.b_3) return;
+    state.cookie = state.cookie + '; buvid3=' + d.b_3 + (d.b_4 ? '; buvid4=' + d.b_4 : '');
+  } catch { /* 拿不到就照旧，不影响主流 */ }
+}
+
 /* 校验：nav 带 Cookie 请求，code=0 且 isLogin=true 才算真的登录上了。
  * 只判断「有没有 SESSDATA」是不够的 —— 过期的 SESSDATA 也能拼出字符串。 */
 async function verify() {
   if (!loggedIn()) { state.verified = false; return { loggedIn: false, ok: false, reason: 'no-auth' }; }
+  await ensureDeviceCookie();
   try {
     const { json } = await getJSON(API + '/x/web-interface/nav', { headers: { Cookie: state.cookie } });
     const d = (json && json.data) || {};

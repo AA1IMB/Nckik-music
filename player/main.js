@@ -459,6 +459,15 @@ function writeNeCookie(cookie) {
  * 单独一个文件是为了「删掉一个音源的登录」不会波及另一个。 */
 const bilAuthPath = path.join(userDir, 'bil-auth.bin');
 
+/* 只把 Cookie 的键名拿出来记日志，值一律不落盘 */
+function parseBilCookieKeys(raw) {
+  return String(raw || '')
+    .replace(/^cookie:\s*/i, '')
+    .split(/[;\n\r]+/)
+    .map(x => x.trim().split('=')[0].toLowerCase())
+    .filter(Boolean);
+}
+
 function readBilCookie() {
   try {
     if (!fs.existsSync(bilAuthPath)) return '';
@@ -1113,10 +1122,45 @@ ipcMain.handle('bil:url', (_e, bvid, cid) =>
   }));
 
 /* 收藏夹：两个都要登录态，未登录由 BilError(BIL_NOT_LOGIN) 转成界面引导。 */
-ipcMain.handle('bil:favs', () => bilCall(() => bil.favFolders()));
+/* 收藏夹相关的调用写一行诊断日志：只记结果码与身份摘要，不落 Cookie 值。
+ * 收藏夹依赖账号态，出问题时「界面只说失败」没法排障，日志能把环节钉死。 */
+const bilFavLogPath = path.join(userDir, 'bil-fav.log');
+function bilFavLog(what, extra) {
+  try {
+    const info = bil.authInfo();
+    const line = JSON.stringify({
+      at: new Date().toISOString(), what,
+      loggedIn: info.loggedIn, verified: info.verified, expired: info.expired,
+      userId: info.userId, sessdata: info.sessdataMasked,
+      ...extra
+    });
+    fs.appendFileSync(bilFavLogPath, line + '\n');
+    if (fs.statSync(bilFavLogPath).size > 256 * 1024) fs.writeFileSync(bilFavLogPath, '');
+  } catch { /* 日志失败不影响功能 */ }
+}
+
+ipcMain.handle('bil:favs', () => bilCall(async () => {
+  try {
+    const r = await bil.favFolders();
+    bilFavLog('favFolders', { ok: true, folders: r.items.length, userId: r.userId });
+    return r;
+  } catch (e) {
+    bilFavLog('favFolders', { ok: false, code: e && e.code, message: String((e && e.message) || e) });
+    throw e;
+  }
+}));
 
 ipcMain.handle('bil:favList', (_e, mediaId, page) =>
-  bilCall(() => bil.favList(mediaId, { page: Number(page) || 1 })));
+  bilCall(async () => {
+    try {
+      const r = await bil.favList(mediaId, { page: Number(page) || 1 });
+      bilFavLog('favList', { ok: true, mediaId: String(mediaId), page: r.page, items: r.items.length, total: r.total });
+      return r;
+    } catch (e) {
+      bilFavLog('favList', { ok: false, mediaId: String(mediaId), code: e && e.code, message: String((e && e.message) || e) });
+      throw e;
+    }
+  }));
 
 ipcMain.handle('bil:cover', (_e, url, size) =>
   bilCall(async () => ({ dataUrl: await bil.coverData(url, Number(size) || 300) })));
@@ -1215,7 +1259,13 @@ app.whenReady().then(() => {
   registerNeProtocol();
   registerBilProtocol();
   ne.setCookie(readNeCookie());     // 上次扫过的凭证在开窗前就位，首屏点歌即可用
-  bil.applyAuth(readBilCookie());   // 哔哩哔哩同理由，两个音源的凭证互不影响
+  const savedBil = readBilCookie();
+  bil.applyAuth(savedBil);          // 哔哩哔哩同理由，两个音源的凭证互不影响
+  /* 记一行「凭证到底读到没有」：收藏夹出问题时，这一步是最容易出错又最难看出来的 */
+  bilFavLog('startup', {
+    cookieLen: savedBil.length,
+    keys: parseBilCookieKeys(savedBil)
+  });
   ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
