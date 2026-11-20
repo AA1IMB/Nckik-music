@@ -703,6 +703,9 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .plrow .pd { font-size: 10.5px; color: var(--fg3); margin-top: 3px; }
 .plrow .pr { flex: none; font-size: 15px; color: var(--fg3); margin-right: 2px; }
 
+/* 置顶 UP（VV音乐局）的角标：形状沿用 .tag，只换色，不额外占高度 */
+.item .n .tag.vv { color: var(--acInk, #fff); background: var(--ac, #6b5cff); }
+
 /* 加载骨架：比一行「正在加载…」更稳，不会在拿到数据时整块跳动 */
 .sk { display: flex; align-items: center; gap: 11px; padding: 7px 8px; }
 .sk i { display: block; border-radius: 6px; background: var(--card); animation: skPulse 1.3s ease-in-out infinite; }

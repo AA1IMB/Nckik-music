@@ -44,11 +44,13 @@ const S = {
     coll: null,                                      // { kind, id, name, sub, status, err, tracks }
     collSeq: 0
   },
-  /* 哔哩哔哩只有「搜索 → 点一首播」这一条路径（没有歌单/推荐），
-   * 所以状态也小：结果集、加载态、错误、登录态，外加一个在途请求令牌。 */
+  /* 哔哩哔哩：搜索 + 我的收藏夹两条路径。view 决定列表区画什么：
+   * idle（空态/首页引导） / search（搜索结果） / fav（某个收藏夹的条目） / error。 */
   bil: {
-    items: [], busy: false, err: '', seq: 0, view: 'idle',   // idle / search / error
-    status: null, total: 0
+    items: [], busy: false, err: '', seq: 0, view: 'idle',
+    status: null, total: 0,
+    favs: { status: 'idle', err: '', items: [], seq: 0 },   // 收藏夹（文件夹）列表
+    fav: { id: '', title: '', page: 0, hasMore: false, items: [], busy: false, err: '' }
   }
 };
 
@@ -1353,7 +1355,8 @@ function itemHTML(t, i) {
   const tag = isNet(t)
     ? `<span class="tag">${t.vip ? 'VIP' : '云'}</span>`
     : isBil(t)
-      ? `<span class="tag">${t.vip ? 'UP' : 'B'}</span>`
+      /* 置顶 UP 的内容多一个 VV 标，看列表时能一眼认出是「优先展示」那一组 */
+      ? `<span class="tag${t.pinned ? ' vv' : ''}">${t.pinned ? 'VV' : (t.vip ? 'UP' : 'B')}</span>`
       : '';
   const idx = i == null ? '' : ` data-i="${i}"`;
   /* 封面：本地走 trackCover（主进程读内嵌图/同目录图，缩到 96px 再回传），
@@ -2013,7 +2016,8 @@ function setSource(mode) {
     S.bil.items = [];
     S.bil.err = '';
     S.bil.view = 'idle';
-    updateBilNote();
+    bilFavsReset();
+    updateBilNote().then(() => bilEnsureFavs());
   }
   renderLibrary();
   if (net || bilMode) setTimeout(() => q.focus(), 60);
@@ -2324,14 +2328,15 @@ function paintBilNote() {
   if (!el) return;
   const st = S.bil.status;
   const ok = !!(st && st.loggedIn);
-  el.textContent = ok
-    ? `已登录${st.nickname ? ' · ' + st.nickname : ''}${st.userId ? ' (uid ' + st.userId + ')' : ''} · 播放按账号权限取流`
-    : (st && st.loggedIn === false && st.sessdataMasked
-      ? '登录已失效 · 点这里重新扫码'
+  const expired = !!(st && st.expired);
+  el.textContent = expired
+    ? '登录已失效 · 点这里重新扫码（收藏夹需要重新登录）'
+    : (ok
+      ? `已登录${st.nickname ? ' · ' + st.nickname : ''}${st.userId ? ' (uid ' + st.userId + ')' : ''} · 播放按账号权限取流`
       : '未登录 · 只能播放公开稿件，点这里扫码登录');
-  el.classList.toggle('linked', !ok);
+  el.classList.toggle('linked', !ok || expired);
   const ast = $('#bilAuthState');
-  if (ast) ast.textContent = ok ? (st.nickname || '已登录') : '未登录';
+  if (ast) ast.textContent = expired ? '登录已失效' : (ok ? (st.nickname || '已登录') : '未登录');
 }
 
 async function updateBilNote() {
@@ -2340,6 +2345,155 @@ async function updateBilNote() {
     if (r && r.ok) S.bil.status = r.status;
   } catch { /* 网络异常不阻塞浏览：状态未知就按未登录显示 */ }
   paintBilNote();
+}
+
+/* ---------------- 哔哩哔哩收藏夹 ----------------
+ * 未登录不是错误：给出「扫码登录」引导即可，搜索与播放不受影响。
+ * 文件夹列表与条目都按登录态缓存，切回来不重复请求；点「刷新」才强制重取。
+ */
+function bilFavsReset() {
+  S.bil.favs = { status: 'idle', err: '', items: [], seq: 0 };
+  S.bil.fav = { id: '', title: '', page: 0, hasMore: false, items: [], busy: false, err: '' };
+  if (S.bil.view === 'fav') S.bil.view = 'idle';
+}
+
+async function bilEnsureFavs(force) {
+  const st = S.bil.status;
+  if (!st || !st.loggedIn || st.expired) {
+    bilFavsReset();
+    if (S.srcMode === 'bil') renderBil();
+    return;
+  }
+  const f = S.bil.favs;
+  if (!force && (f.status === 'ready' || f.status === 'loading')) return;
+  const seq = ++f.seq;
+  f.status = 'loading';
+  f.err = '';
+  if (S.srcMode === 'bil' && S.bil.view !== 'fav') renderBil();
+
+  let r;
+  try { r = await window.api.bilFavs(); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (seq !== f.seq) return;
+
+  if (!r || !r.ok) {
+    const code = (r && r.error && r.error.code) || '';
+    f.status = code === 'BIL_NOT_LOGIN' ? 'guest' : 'error';
+    f.err = (r && r.error && r.error.message) || '收藏夹加载失败';
+    if (code === 'BIL_NOT_LOGIN') {
+      /* 上游说登录失效：把状态改成「失效」，界面才会给出重新扫码的入口 */
+      S.bil.status = Object.assign({}, S.bil.status, { loggedIn: false, expired: true });
+      paintBilNote();
+    }
+  } else {
+    f.status = 'ready';
+    f.items = r.items || [];
+    f.err = '';
+  }
+  if (S.srcMode === 'bil' && S.bil.view !== 'fav') renderBil();
+}
+
+function bilFavRowHTML(f) {
+  /* 封面先留首字磁贴，再由 bilPaintFavCovers() 异步换成真实缩略图：
+   * 行是批量 render 出来的，同步等图会把整块面板卡住。 */
+  return `<div class="plrow" data-bil-fav="${esc(f.id)}" data-bil-favname="${esc(f.name)}">
+      <div class="pth${f.coverUrl ? ' img' : ''}"${f.coverUrl ? ` data-cover="${esc(f.coverUrl)}"` : ''}><span>${esc((f.name || '?').slice(0, 1))}</span></div>
+      <div class="pi"><div class="pn">${esc(f.name)}</div>
+        <div class="pd">${esc(f.sub || '')}</div></div>
+      <span class="pr">›</span>
+    </div>`;
+}
+
+/* 文件夹封面：与列表缩略图同一条路（bilCover 取 120px），失败就留着首字磁贴，
+ * 不报错、不重试到死 —— 收藏夹的可用性不依赖封面。 */
+function bilPaintFavCovers() {
+  const els = $$('#bilHome .pth[data-cover]');
+  for (const el of els) {
+    const url = el.dataset.cover;
+    if (!url || el.dataset.done) continue;
+    el.dataset.done = '1';
+    window.api.bilCover(url, 120).then(r => {
+      if (r && r.ok && r.dataUrl && el.isConnected) {
+        el.style.backgroundImage = 'url("' + r.dataUrl + '")';
+        el.classList.add('img');
+      }
+    }).catch(() => { /* 没封面不影响点进收藏夹 */ });
+  }
+}
+
+function bilFavsHTML() {
+  const st = S.bil.status;
+  const expired = !!(st && st.expired);
+  const f = S.bil.favs;
+  if (!st || !st.loggedIn || expired) {
+    return `<div class="ne-msg">${expired ? '登录已失效，重新扫码后可看收藏夹。' : '登录后可看「我的收藏夹」；不登录也能搜索与播放公开稿件。'}
+      <span class="lnk" data-bil-login="1">${expired ? '重新扫码' : '扫码登录'}</span></div>`;
+  }
+  if (f.status === 'loading') return `<div class="ne-msg">正在读取收藏夹…</div>`;
+  if (f.status === 'error') {
+    return `<div class="ne-msg">收藏夹加载失败：${esc(f.err || '未知原因')}
+      <span class="lnk" data-bil-favretry="1">重试</span></div>`;
+  }
+  if (!f.items.length) {
+    return `<div class="ne-msg">这个账号还没有自建收藏夹。
+      <span class="lnk" data-bil-favretry="1">刷新</span></div>`;
+  }
+  return `<div class="ne-sec">我的收藏夹 <em>${f.items.length} 个</em><button data-bil-favretry="1">刷新</button></div>`
+    + f.items.map(bilFavRowHTML).join('');
+}
+
+function renderBilFavs() {
+  const home = $('#bilHome');
+  if (!home) return;
+  home.innerHTML = bilFavsHTML();
+  home.classList.add('show');
+  bilPaintFavCovers();
+}
+
+async function bilOpenFav(id, title) {
+  S.bil.view = 'fav';
+  S.bil.fav = { id: String(id), title: String(title || ''), page: 0, hasMore: false, items: [], busy: true, err: '' };
+  renderBil();
+  await bilFavPage(1);
+}
+
+async function bilFavPage(page) {
+  const fav = S.bil.fav;
+  if (!fav.id) return;
+  fav.busy = page === 1;
+  if (page === 1) { fav.items = []; fav.err = ''; }
+  renderBil();
+
+  let r;
+  try { r = await window.api.bilFavList(fav.id, page); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+
+  fav.busy = false;
+  if (!r || !r.ok) {
+    const code = (r && r.error && r.error.code) || '';
+    fav.err = (r && r.error && r.error.message) || '收藏夹内容加载失败';
+    if (code === 'BIL_NOT_LOGIN') {
+      S.bil.status = Object.assign({}, S.bil.status, { loggedIn: false, expired: true });
+      paintBilNote();
+    }
+  } else {
+    const seen = new Set(fav.items.map(t => bilBvidOf(t)));
+    for (const t of (r.items || [])) {
+      if (seen.has(bilBvidOf(t))) continue;      // 翻页时上游偶尔重复，按 bvid 去重
+      seen.add(bilBvidOf(t));
+      fav.items.push(t);
+    }
+    fav.page = page;
+    fav.hasMore = !!r.hasMore;
+    if (r.title && !fav.title) fav.title = r.title;
+  }
+  if (S.bil.view === 'fav') renderBil();
+}
+
+async function bilLoadMore() {
+  const fav = S.bil.fav;
+  if (!fav.id || fav.busy || !fav.hasMore) return;
+  await bilFavPage(fav.page + 1);
 }
 
 async function bilSearch() {
@@ -2355,6 +2509,7 @@ async function bilSearch() {
   S.bil.busy = true;
   S.bil.err = '';
   S.bil.view = 'search';
+  S.bil.fav.items = [];
   renderBil();
 
   let r;
@@ -2385,8 +2540,66 @@ function renderBil() {
   const list = $('#libList');
   const count = $('#libCount');
   const home = $('#bilHome');
-  if (home) home.classList.remove('show');
   const st = S.bil;
+
+  /* 收藏夹条目视图：列表区画条目，顶部面板收起。 */
+  if (st.view === 'fav') {
+    if (home) home.classList.remove('show');
+    const fav = st.fav;
+    if (fav.busy && !fav.items.length) {
+      list.innerHTML = emptyRow('正在读取「' + esc(fav.title || '收藏夹') + '」…');
+      count.textContent = '哔哩哔哩 · 收藏夹';
+      list.onclick = null;
+      return;
+    }
+    if (fav.err && !fav.items.length) {
+      list.innerHTML = emptyRow('收藏夹内容加载失败：' + esc(fav.err)
+        + '<br><span class="lnk" data-bil-favback="1">返回收藏夹</span>'
+        + ' · <span class="lnk" data-bil-favretry2="1">重试</span>');
+      count.textContent = '哔哩哔哩 · 失败';
+      list.onclick = e => {
+        if (e.target.closest('[data-bil-favback]')) { S.bil.view = 'idle'; renderBil(); return; }
+        if (e.target.closest('[data-bil-favretry2]')) bilFavPage(1);
+      };
+      return;
+    }
+    if (!fav.items.length) {
+      list.innerHTML = emptyRow('这个收藏夹是空的。'
+        + '<br><span class="lnk" data-bil-favback="1">返回收藏夹</span>');
+      count.textContent = '哔哩哔哩 · 0 首';
+      list.onclick = e => {
+        if (e.target.closest('[data-bil-favback]')) { S.bil.view = 'idle'; renderBil(); }
+      };
+      return;
+    }
+    list.innerHTML = fav.items.map(t => itemHTML(t, null)).join('')
+      + (fav.hasMore
+        ? `<div class="empty-row"><span class="lnk" data-bil-more="1">${fav.busy ? '正在加载…' : '加载更多'}</span></div>`
+        : '');
+    fillThumbs(list);
+    count.textContent = `${fav.title || '收藏夹'} · 已加载 ${fav.items.length} 首`
+      + (fav.hasMore ? ' · 还有更多' : '');
+    list.onclick = e => {
+      const more = e.target.closest('[data-bil-more]');
+      if (more) { bilLoadMore(); return; }
+      const el = e.target.closest('.item');
+      if (!el) return;
+      const bvid = el.dataset.bil;
+      const t = fav.items.find(x => bilBvidOf(x) === bvid);
+      if (t) playBil(t);
+    };
+    markedEl = null;
+    markCurrent();
+    return;
+  }
+
+  /* 搜索态（有结果/加载中/失败）时收起首页面板 */
+  if (st.view === 'search' || st.view === 'error' || st.busy) {
+    if (home) home.classList.remove('show');
+  } else {
+    /* 空态：先画「我的收藏夹」，下面是搜索引导 */
+    renderBilFavs();
+  }
 
   if (st.busy) {
     list.innerHTML = emptyRow('正在搜索哔哩哔哩…');
@@ -2410,7 +2623,9 @@ function renderBil() {
   }
   list.innerHTML = st.items.map(t => itemHTML(t, null)).join('');
   fillThumbs(list);
+  const pinned = st.items.filter(t => t.pinned).length;
   count.textContent = `搜索到 ${st.items.length} 条` + (st.total > st.items.length ? ` / 共 ${st.total}` : '')
+    + (pinned ? ` · 置顶 ${pinned} 条` : '')
     + ' · 点击播放并加入曲库';
   list.onclick = e => {
     const el = e.target.closest('.item');
@@ -2514,6 +2729,8 @@ async function bilQrPoll(token) {
   if (r.loggedIn) {
     bilQrStop(true);
     await updateBilNote();
+    bilFavsReset();
+    await bilEnsureFavs(true);
     toast(`已登录哔哩哔哩${r.nickname ? ' · ' + r.nickname : ''}${r.warning ? '（' + r.warning + '）' : ''}`);
     if (S.srcMode === 'bil') renderBil();
     return;
@@ -2553,6 +2770,8 @@ async function bilSaveAuth() {
   if (ta) ta.value = '';
   S.bil.status = r.status;
   paintBilNote();
+  bilFavsReset();
+  bilEnsureFavs(true);
   closePops();
   const chk = r.check || {};
   const okVerify = !!chk.ok;
@@ -2567,6 +2786,7 @@ async function bilSaveAuth() {
 async function bilLogout() {
   try { await window.api.bilLogout(); } catch {}
   S.bil.status = { loggedIn: false };
+  bilFavsReset();
   paintBilNote();
   toast('已退出哔哩哔哩');
   if (S.srcMode === 'bil') renderBil();
@@ -3981,6 +4201,17 @@ function bind() {
   $('#bilCookie').onkeydown = e => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); bilSaveAuth(); }
   };
+  // 收藏夹面板：文件夹行 / 重试 / 登录引导，都是事件委托
+  const bilHome = $('#bilHome');
+  if (bilHome) {
+    bilHome.onclick = e => {
+      if (e.target.closest('[data-bil-login]')) { $('#bilNote').onclick(); return; }
+      if (e.target.closest('[data-bil-favretry]')) { bilEnsureFavs(true); return; }
+      const row = e.target.closest('[data-bil-fav]');
+      if (row) bilOpenFav(row.dataset.bilFav, row.dataset.bilFavname);
+    };
+  }
+
   // 曲库里那句「点这里扫码登录」也走同一条路：先开设置抽屉，再开扫码面板
   $('#bilNote').onclick = () => {
     const st = S.bil.status;

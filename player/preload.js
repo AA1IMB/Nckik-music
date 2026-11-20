@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('api', {
   bilSearch: (q, limit) => ipcRenderer.invoke('bil:search', { q, limit }),
   bilView: (bvid) => ipcRenderer.invoke('bil:view', bvid),
   bilUrl: (bvid, cid) => ipcRenderer.invoke('bil:url', bvid, cid),
+  bilFavs: () => ipcRenderer.invoke('bil:favs'),
+  bilFavList: (mediaId, page) => ipcRenderer.invoke('bil:favList', mediaId, page),
   bilCover: (url, size) => ipcRenderer.invoke('bil:cover', url, size),
   bilStatus: () => ipcRenderer.invoke('bil:status'),
   bilQr: () => ipcRenderer.invoke('bil:qr'),

@@ -1112,6 +1112,12 @@ ipcMain.handle('bil:url', (_e, bvid, cid) =>
     };
   }));
 
+/* 收藏夹：两个都要登录态，未登录由 BilError(BIL_NOT_LOGIN) 转成界面引导。 */
+ipcMain.handle('bil:favs', () => bilCall(() => bil.favFolders()));
+
+ipcMain.handle('bil:favList', (_e, mediaId, page) =>
+  bilCall(() => bil.favList(mediaId, { page: Number(page) || 1 })));
+
 ipcMain.handle('bil:cover', (_e, url, size) =>
   bilCall(async () => ({ dataUrl: await bil.coverData(url, Number(size) || 300) })));
 

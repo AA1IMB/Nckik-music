@@ -195,6 +195,119 @@ const snap = () => js(`(() => {
   const bad = await js(`window.api.bilUrl('BV0000000000', 0).then(r => r).catch(e => ({ ok:false, error:{ code:'THROW', message:String(e && e.message || e) } }))`);
   ok('取流失败有错误码', bad && bad.ok === false && !!bad.error, JSON.stringify(bad && bad.error));
 
+  log('— §10 收藏夹：未登录给引导而不是报错');
+  const favGuest = await js(`window.api.bilFavs().then(r => r).catch(e => ({ ok:false, error:{ code:'THROW', message:String(e && e.message || e) } }))`);
+  ok('未登录时收藏夹返回 BIL_NOT_LOGIN', favGuest && favGuest.ok === false && favGuest.error && favGuest.error.code === 'BIL_NOT_LOGIN',
+    JSON.stringify(favGuest && favGuest.error));
+  /* 回到哔哩哔哩空态，确认「我的收藏夹」那块给的是登录引导（.lnk 可点），不是红字报错 */
+  await click('#segSrc b[data-s="bil"]');
+  await sleep(500);
+  const favUi = await js(`(() => {
+    const home = document.querySelector('#bilHome');
+    return {
+      shown: !!home && home.classList.contains('show'),
+      text: home ? (home.textContent || '').trim().slice(0, 80) : '',
+      hasLogin: !!document.querySelector('#bilHome [data-bil-login]'),
+      hasError: /失败|出错/.test(home ? home.textContent : '')
+    };
+  })()`);
+  ok('收藏夹面板给出登录引导', favUi.hasLogin, favUi.text);
+  ok('引导不是报错红字', favUi.hasError === false);
+
+  log('— §11 搜索排序：VV音乐局置顶');
+  const pin = await js(`window.api.bilSearch('VV音乐局', 20).then(r => r).catch(e => ({ ok:false, error:{ code:'THROW', message:String(e && e.message || e) } }))`);
+  if (!pin || !pin.ok) {
+    log('  · SKIP 置顶断言：搜索失败 ' + JSON.stringify(pin && pin.error));
+  } else {
+    const arr = pin.tracks || [];
+    const flags = arr.map(t => !!t.pinned);
+    const firstPlain = flags.indexOf(false);
+    const lastPinned = flags.lastIndexOf(true);
+    ok('置顶项都排在前面', lastPinned < 0 || firstPlain < 0 || lastPinned < firstPlain,
+      'pinned=' + flags.filter(Boolean).length + ' total=' + arr.length);
+    ok('置顶项标了 pinned 且作者含 VV音乐局',
+      arr.filter(t => t.pinned).every(t => /VV音乐局/.test(t.artist || '')),
+      arr.filter(t => t.pinned).slice(0, 2).map(t => t.artist).join(' / '));
+    if (arr.some(t => t.pinned)) ok('置顶项带 VV 角标语义', arr[0].pinned === true, 'first=' + arr[0].title.slice(0, 20));
+    else log('  · SKIP VV 角标：这次搜索没有该 UP 的内容');
+  }
+
+  log('— §11b sortPinned 单元验证（主进程直接调，纯函数）');
+  const bilMod = require(path.join(root, 'bilibili.js'));
+  const mixed = await Promise.resolve(bilMod.sortPinned([
+    { title: 'a', artist: '别人' },
+    { title: 'b', artist: 'VV音乐局' },
+    { title: 'c', artist: '别人2' },
+    { title: 'd', artist: 'VV音乐局' }
+  ]));
+  ok('置顶组在前、其余保持原序', mixed.map(t => t.title).join(',') === 'b,d,a,c', mixed.map(t => t.title).join(','));
+  ok('置顶项被标 pinned', mixed[0].pinned === true && mixed[1].pinned === true && !mixed[2].pinned);
+  ok('非置顶项没有被改动', mixed[2].title === 'a' && mixed[2].pinned === undefined);
+
+  log('— §12 登录失效时的重新扫码引导');
+  const expiredUi = await js(`(() => {
+    S.bil.status = Object.assign({}, S.bil.status, { loggedIn: false, expired: true });
+    paintBilNote();
+    renderBil();
+    const home = document.querySelector('#bilHome');
+    return {
+      note: (document.querySelector('#bilNote') || {}).textContent || '',
+      auth: (document.querySelector('#bilAuthState') || {}).textContent || '',
+      relogin: !!document.querySelector('#bilHome [data-bil-login]'),
+      homeText: home ? (home.textContent || '').trim().slice(0, 60) : ''
+    };
+  })()`);
+  ok('曲库提示切到「登录已失效」', /失效/.test(expiredUi.note), expiredUi.note);
+  ok('设置页状态显示登录已失效', /失效/.test(expiredUi.auth), expiredUi.auth);
+  ok('收藏夹面板给出重新扫码入口', expiredUi.relogin, expiredUi.homeText);
+  await js(`(() => { S.bil.status = Object.assign({}, S.bil.status, { expired: false }); paintBilNote(); renderBil(); })()`);
+
+  log('— §12b 收藏夹面板渲染与点击（合成数据）');
+  const favUi2 = await js(`(async () => {
+    S.bil.status = { loggedIn: true, userId: 123, nickname: '探针' };
+    S.bil.favs = { status: 'ready', err: '', seq: 0, items: [
+      { id: '111', name: '我喜欢的音乐', sub: '12 个内容', coverUrl: 'https://i0.hdslb.com/bfs/archive/x.jpg' },
+      { id: '222', name: '深夜循环', sub: '3 个内容', coverUrl: '' }
+    ] };
+    S.bil.view = 'idle';
+    renderBil();
+    const rows = [...document.querySelectorAll('#bilHome .plrow[data-bil-fav]')];
+    const first = rows[0];
+    const title = first ? (first.querySelector('.pn') || {}).textContent : '';
+    const sub = first ? (first.querySelector('.pd') || {}).textContent : '';
+    if (first) first.click();
+    await new Promise(r => setTimeout(r, 2500));
+    const list = document.querySelector('#libList');
+    return {
+      rows: rows.length, title, sub,
+      view: S.bil.view,
+      favId: S.bil.fav.id,
+      listText: (list ? list.textContent : '').trim().slice(0, 60),
+      blank: !list || !(list.textContent || '').trim()
+    };
+  })()`);
+  ok('收藏夹面板列出文件夹', favUi2.rows === 2, 'rows=' + favUi2.rows);
+  ok('文件夹显示名称与条目数', favUi2.title === '我喜欢的音乐' && /12/.test(favUi2.sub || ''), favUi2.title + ' | ' + favUi2.sub);
+  ok('点开文件夹进入条目视图', favUi2.view === 'fav' && favUi2.favId === '111', favUi2.view + ' id=' + favUi2.favId);
+  ok('条目视图有内容而不是留白（失败也给出原因）', favUi2.blank === false, favUi2.listText);
+
+  log('— §13 收藏夹（真实账号，需 BIL_TEST_COOKIE）');
+  if (!process.env.BIL_TEST_COOKIE) {
+    log('  · SKIP 未提供 BIL_TEST_COOKIE：真账号收藏夹（分页 / 条目字段）无法在本机自动验证');
+  } else {
+    const login = await js(`window.api.bilLogin(${JSON.stringify(process.env.BIL_TEST_COOKIE)}).then(r => r).catch(e => ({ ok:false, error:{ message:String(e && e.message || e) } }))`);
+    ok('测试账号登录成功', !!login && login.ok === true);
+    const folders = await js(`window.api.bilFavs().then(r => r).catch(e => ({ ok:false, error:{ message:String(e && e.message || e) } }))`);
+    ok('拿到收藏夹列表', !!folders && folders.ok === true && Array.isArray(folders.items), folders && folders.ok ? 'folders=' + folders.items.length : JSON.stringify(folders && folders.error));
+    if (folders && folders.ok && folders.items.length) {
+      const one = folders.items[0];
+      const page1 = await js(`window.api.bilFavList(${JSON.stringify(one.id)}, 1).then(r => r).catch(e => ({ ok:false, error:{ message:String(e && e.message || e) } }))`);
+      ok('收藏夹条目可读', !!page1 && page1.ok === true && page1.items.length > 0, page1 && page1.ok ? 'items=' + page1.items.length : '');
+      ok('条目字段齐全（bvid/标题/作者/时长）', !!page1 && page1.items.every(t => /^BV/.test(t.bilBvid || '') && t.title && t.artist && t.duration >= 0));
+      ok('分页信息可用', !!page1 && typeof page1.hasMore === 'boolean', page1 && ('hasMore=' + page1.hasMore + ' total=' + page1.total));
+    }
+  }
+
   log('— §9 控制台');
   ok('渲染层无 JS 报错', errors.length === 0, errors.slice(0, 2).join(' | '));
 

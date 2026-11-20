@@ -48,6 +48,7 @@ const state = {
   userId: 0,
   nickname: '',
   verified: false,
+  expired: false,     // 凭证过期/失效：界面据此引导重新扫码，而不是当成「未登录」或「正常」
   qr: null
 };
 
@@ -195,9 +196,9 @@ async function searchVideos(kw, { page = 1, order = 'click' } = {}) {
   });
   if (json.code !== 0) throw new BilError(String(json.message || '搜索失败'), 'BIL_SEARCH');
   const data = json.data || {};
-  const items = (data.result || [])
+  const items = sortPinned((data.result || [])
     .filter(v => v && v.bvid)
-    .map(v => mapVideo(v));
+    .map(v => mapVideo(v)));
   return { items, page, total: Number(data.numResults) || items.length, hasMore: items.length > 0 };
 }
 
@@ -221,6 +222,110 @@ async function viewInfo(bvid) {
     pic: httpsify(d.pic),
     duration: Number(d.duration) || 0,
     pages
+  };
+}
+
+/* ---------------- 置顶 UP ---------------- */
+
+/* 「VV音乐局」发的内容优先展示：只做一次稳定分区（置顶组保持上游顺序，
+ * 其余也保持原顺序），不伪造排序权重、不丢结果；同名 UP 也一起置顶。 */
+const PIN_UP = 'VV音乐局';
+
+function isPinnedUp(name) {
+  /* 只认这一个账号本身：名字里带相同字样的搬运号不跟着置顶，
+   * 否则这个位置的排序会被无关账号挤占。 */
+  return String(name || '').trim() === PIN_UP;
+}
+
+function sortPinned(items) {
+  const hot = [];
+  const rest = [];
+  for (const t of items || []) {
+    if (isPinnedUp(t && t.artist)) hot.push(Object.assign({}, t, { pinned: true }));
+    else rest.push(t);
+  }
+  return hot.concat(rest);
+}
+
+/* ---------------- 收藏夹 ----------------
+ * 两个接口都要带 Cookie：list-all 拿「我创建的收藏夹」，resource/list 分页拿条目。
+ * 未登录直接抛 BIL_NOT_LOGIN，由 IPC 层转成「登录引导」而不是报错。
+ */
+function authHeaders() {
+  return state.cookie ? { Cookie: state.cookie } : {};
+}
+
+function assertLogin() {
+  if (!loggedIn()) throw new BilError('未登录：扫码或导入 Cookie 后才能看收藏夹', 'BIL_NOT_LOGIN');
+}
+
+function favError(json, what) {
+  const code = Number(json && json.code);
+  if (code === -101) {
+    state.expired = true;                 // 上游明确说「账号未登录」：凭证真的失效了
+    throw new BilError('登录已失效，请重新扫码后再看' + what, 'BIL_NOT_LOGIN');
+  }
+  if (code === -352 || code === -412) {
+    throw new BilError('被 B 站风控拦了（' + code + '），过一会儿再试', 'BIL_403');
+  }
+  throw new BilError(String((json && json.message) || ('取' + what + '失败')), 'BIL_FAV');
+}
+
+async function favFolders() {
+  assertLogin();
+  const mid = Number(state.userId) || 0;
+  if (!mid) throw new BilError('登录信息里没有 DedeUserID，没法列收藏夹；请重新扫码登录', 'BIL_NO_MID');
+  const { json } = await getJSON(API + '/x/v3/fav/folder/created/list-all?up_mid=' + mid, {
+    headers: authHeaders()
+  });
+  if (Number(json.code) !== 0) favError(json, '收藏夹列表');
+  const rows = ((json.data && json.data.list) || []);
+  const items = rows.map(f => ({
+    source: 'bilibili',
+    id: String(f.id),
+    name: String(f.title || '').slice(0, 120) || '未命名收藏夹',
+    coverUrl: httpsify(f.cover || ''),
+    count: Number(f.media_count) || 0,
+    sub: (Number(f.media_count) || 0) + ' 个内容'
+  }));
+  return { items, userId: mid };
+}
+
+function mapFavItem(v) {
+  const bvid = String((v && v.bvid) || '');
+  const t = mapVideo({
+    bvid,
+    title: v.title,
+    author: (v.upper && v.upper.name) || '',
+    pic: v.cover,
+    duration: Number(v.duration) || 0,
+    play: 0
+  });
+  t.album = '哔哩哔哩收藏夹';
+  /* attr 非 0 = 稿件已失效（删除/私有）。保留在列表里但标出来，点播时会被跳过。 */
+  if (Number(v.attr) !== 0) t.unavailable = '稿件已失效';
+  return t;
+}
+
+async function favList(mediaId, { page = 1, size = 20 } = {}) {
+  assertLogin();
+  const id = String(mediaId || '').trim();
+  if (!/^\d+$/.test(id)) throw new BilError('收藏夹标识不合法', 'BIL_BAD_ID');
+  const pn = Math.max(1, Number(page) || 1);
+  const ps = Math.min(20, Math.max(1, Number(size) || 20));   // 上游上限 20
+  const url = API + '/x/v3/fav/resource/list?media_id=' + id + '&pn=' + pn + '&ps=' + ps +
+    '&platform=web&keyword=&order=mtime&type=0&tid=0';
+  const { json } = await getJSON(url, { headers: authHeaders() });
+  if (Number(json.code) !== 0) favError(json, '收藏夹内容');
+  const d = json.data || {};
+  const items = ((d.medias || [])).filter(v => v && v.bvid).map(mapFavItem);
+  return {
+    items,
+    page: pn,
+    size: ps,
+    title: String((d.info && d.info.title) || ''),
+    total: Number((d.info && d.info.media_count) || 0),
+    hasMore: !!d.has_more
   };
 }
 
@@ -416,6 +521,7 @@ function applyAuth(rawCookie) {
   state.userId = Number(c.dedeuserid || 0) || 0;
   state.nickname = '';
   state.verified = false;
+  state.expired = false;
   urlCache.clear();          // 身份变了，缓存的地址可能对应不同权限，别复用
   return loggedIn();
 }
@@ -429,7 +535,8 @@ function authInfo() {
     userId: state.userId,
     nickname: state.nickname,
     sessdataMasked: state.sessdata ? state.sessdata.slice(0, 4) + '…(' + state.sessdata.length + ')' : '',
-    verified: state.verified
+    verified: state.verified,
+    expired: state.expired
   };
 }
 
@@ -441,6 +548,7 @@ async function verify() {
     const { json } = await getJSON(API + '/x/web-interface/nav', { headers: { Cookie: state.cookie } });
     const d = (json && json.data) || {};
     state.verified = json.code === 0 && !!d.isLogin;
+    if (Number(json.code) === -101 || (json.code === 0 && !d.isLogin)) state.expired = true;
     state.nickname = String(d.uname || '');
     state.userId = Number(d.mid || state.userId) || state.userId;
     return { loggedIn: state.verified, ok: state.verified, nickname: state.nickname, userId: state.userId, vip: Number((d.vipStatus || 0)) > 0 };
@@ -453,9 +561,11 @@ async function verify() {
 function status() {
   return {
     ...authInfo(),
-    note: loggedIn()
-      ? (state.verified ? '已登录：会员稿件可尝试高音质' : '已登录：尚未验证，播放时以实际取流为准')
-      : '未登录：只能播放公开稿件，收藏夹不可用'
+    note: state.expired
+      ? '登录已失效：收藏夹需要重新扫码'
+      : (loggedIn()
+        ? (state.verified ? '已登录：会员稿件可尝试高音质' : '已登录：尚未验证，播放时以实际取流为准')
+        : '未登录：只能播放公开稿件，收藏夹不可用')
   };
 }
 
@@ -467,6 +577,7 @@ function logout() {
 module.exports = {
   BilError, request, getJSON,
   searchVideos, viewInfo, playUrl, invalidateUrl, coverData,
+  sortPinned, isPinnedUp, favFolders, favList, mapFavItem,
   qrCreate, qrPoll, qrSvg,
   applyAuth, authInfo, status, verify, logout, loggedIn,
   mapVideo, parseCookie, httpsify
