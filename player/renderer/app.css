@@ -813,6 +813,9 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 }
 .qrimg { width: 100%; height: 100%; }
 .qrimg svg { display: block; width: 100%; height: 100%; }
+/* 哔哩哔哩的码是位图（官方登录页那张 140px 的 PNG）：撑满白卡并居中，
+   留白交给 .qrbox 自己的白底，避免像之前那样缩在角落 */
+.qrimg img { display: block; width: 100%; height: 100%; object-fit: contain; }
 /* 过期/取码失败时把码压暗：不能让用户拿着废码一直扫 */
 .qrbox.dead .qrimg { filter: blur(3px) grayscale(1); opacity: .22; }
 .qrmask {

@@ -39,15 +39,34 @@ function createQrLogin({ BrowserWindow, app }) {
     while (Date.now() < deadline) {
       if (!win || win.isDestroyed()) throw new Error('登录窗口已关闭');
       const img = await win.webContents.executeJavaScript(`(() => {
-        /* 二维码是页面里那张 data:image/png 的 img（140×140），旁边还有装饰图，
-         * 所以按「data:image + 足够大」筛，不依赖会变的 class 名。 */
-        const list = [...document.querySelectorAll('img')];
-        const hit = list.find(i => /^data:image\\//.test(i.src || '') && (i.naturalWidth || 0) >= 120)
-                 || list.find(i => /qrcode/i.test(i.className || ''));
-        if (hit && hit.src) return hit.src;
-        /* 有的版本二维码画在 canvas 上，退一步取 canvas 的 dataURL */
-        const cv = document.querySelector('canvas');
-        return cv && cv.width >= 120 ? cv.toDataURL('image/png') : '';
+        const pick = () => {
+          const list = [...document.querySelectorAll('img')];
+          return list.find(i => /^data:image\\//.test(i.src || '') && (i.naturalWidth || 0) >= 120)
+              || list.find(i => /qrcode/i.test(i.className || ''))
+              || null;
+        };
+        const hit = pick();
+        const cv0 = document.querySelector('canvas');
+        const src = (hit && hit.src) || (cv0 && cv0.width >= 120 ? cv0.toDataURL('image/png') : '');
+        if (!src) return '';
+        /* 页面里这张码只有 140px，直接拉到 216 的框里会发虚。
+         * 用 canvas 按整数倍 2x 重画一遍（关掉平滑，模块边缘保持硬边），
+         * 只在第一次取到新码时做，避免每 300ms 都重画。 */
+        if (window.__bilQrSrc === src && window.__bilQrUp) return window.__bilQrUp;
+        window.__bilQrSrc = src;
+        window.__bilQrUp = src;
+        const im = new Image();
+        im.onload = () => {
+          const scale = im.width < 200 ? 2 : 1;
+          const c = document.createElement('canvas');
+          c.width = im.width * scale; c.height = im.height * scale;
+          const g = c.getContext('2d');
+          g.imageSmoothingEnabled = false;
+          g.drawImage(im, 0, 0, c.width, c.height);
+          window.__bilQrUp = c.toDataURL('image/png');
+        };
+        im.src = src;
+        return src;
       })()`).catch(() => '');
       if (img) return img;
       await new Promise(r => setTimeout(r, 300));
@@ -57,10 +76,24 @@ function createQrLogin({ BrowserWindow, app }) {
 
   async function readCookie() {
     if (!session) return '';
-    const all = await session.cookies.get({ domain: '.bilibili.com' });
-    const map = new Map(all.map(c => [c.name, c.value]));
+    /* 不按 domain 过滤：登录页会把 SESSDATA 写到 www./passport./.bilibili.com 等
+     * 不同作用域上，用 domain 过滤很容易「看漏」（酷狗那版就踩过这个坑）。
+     * 这里取全部 cookie，再按名字白名单挑，看到同名取最后一个非空值。 */
+    const all = await session.cookies.get({});
+    const map = new Map();
+    for (const c of all) {
+      if (!KEEP.includes(c.name)) continue;
+      if (c.value) map.set(c.name, c.value);
+    }
     if (!map.get('SESSDATA')) return '';
     return KEEP.filter(k => map.get(k)).map(k => k + '=' + map.get(k)).join('; ');
+  }
+
+  /* 诊断用：把「现在罐里有哪些 cookie 名字」记一行，扫码确认后没反应时靠它定位 */
+  async function cookieNames() {
+    if (!session) return [];
+    const all = await session.cookies.get({});
+    return [...new Set(all.map(c => c.name))];
   }
 
   async function pageText() {
@@ -104,7 +137,11 @@ function createQrLogin({ BrowserWindow, app }) {
     const text = await pageText();
     let state = 'waiting';
     if (/已失效|已过期|请刷新/.test(text)) state = 'expired';
-    else if (/已扫码|扫描成功|请在手机/.test(text)) state = 'scanned';
+    else if (/已扫码|扫描成功|请在手机|登录成功|正在跳转/.test(text)) state = 'scanned';
+    if (state === 'scanned' && current && !current.sawScan) {
+      current.sawScan = true;
+      current.names = await cookieNames();
+    }
     let img = '';
     if (state !== 'expired' && win && !win.isDestroyed()) {
       img = await win.webContents.executeJavaScript(`(() => {
@@ -114,7 +151,7 @@ function createQrLogin({ BrowserWindow, app }) {
       if (img && current) current.img = img;
     }
     /* 页面自己换码时把最新的图带回去，界面跟着换，用户不用手动重试 */
-    return { state, img: img || (current ? current.img : '') };
+    return { state, img: img || (current ? current.img : ''), names: (current && current.names) || [] };
   }
 
   function stop() {
