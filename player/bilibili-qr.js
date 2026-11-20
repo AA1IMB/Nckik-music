@@ -38,35 +38,24 @@ function createQrLogin({ BrowserWindow, app }) {
     const deadline = Date.now() + QR_READY_TIMEOUT;
     while (Date.now() < deadline) {
       if (!win || win.isDestroyed()) throw new Error('登录窗口已关闭');
+      /* 只做一件事：把页面里那张二维码的 data URL 取出来。
+       * 放大交给渲染层（CSS image-rendering: pixelated，140 → 216 用最近邻，
+       * 边缘硬、不糊）。之前在这里用 canvas 重画过一版，注入脚本会稳定报
+       * 「Script failed to execute」——页面环境对这条脚本不友好，干脆不在
+       * 页面里动手，只读。 */
+      /* 注意：页面刚渲染时这里先挂的是一张 ~900 字符的占位白图，
+       * 真正的二维码（140×140）base64 约 5KB，要等它自己画完才出现。
+       * 所以要求长度过阈值才算拿到，否则会一直显示一块白板。 */
       const img = await win.webContents.executeJavaScript(`(() => {
-        const pick = () => {
-          const list = [...document.querySelectorAll('img')];
-          return list.find(i => /^data:image\\//.test(i.src || '') && (i.naturalWidth || 0) >= 120)
-              || list.find(i => /qrcode/i.test(i.className || ''))
-              || null;
-        };
-        const hit = pick();
-        const cv0 = document.querySelector('canvas');
-        const src = (hit && hit.src) || (cv0 && cv0.width >= 120 ? cv0.toDataURL('image/png') : '');
-        if (!src) return '';
-        /* 页面里这张码只有 140px，直接拉到 216 的框里会发虚。
-         * 用 canvas 按整数倍 2x 重画一遍（关掉平滑，模块边缘保持硬边），
-         * 只在第一次取到新码时做，避免每 300ms 都重画。 */
-        if (window.__bilQrSrc === src && window.__bilQrUp) return window.__bilQrUp;
-        window.__bilQrSrc = src;
-        window.__bilQrUp = src;
-        const im = new Image();
-        im.onload = () => {
-          const scale = im.width < 200 ? 2 : 1;
-          const c = document.createElement('canvas');
-          c.width = im.width * scale; c.height = im.height * scale;
-          const g = c.getContext('2d');
-          g.imageSmoothingEnabled = false;
-          g.drawImage(im, 0, 0, c.width, c.height);
-          window.__bilQrUp = c.toDataURL('image/png');
-        };
-        im.src = src;
-        return src;
+        const MIN = 1500;   // 占位图约 900 字符，真码约 5KB
+        const c = document.querySelector('canvas');
+        if (c && c.width >= 120) {
+          const d = c.toDataURL('image/png');
+          if (d.length >= MIN) return d;
+        }
+        const i = [...document.querySelectorAll('img')]
+          .find(x => String(x.src || '').startsWith('data:image/') && (x.naturalWidth || 0) >= 120);
+        return i && String(i.src).length >= MIN ? i.src : '';
       })()`).catch(() => '');
       if (img) return img;
       await new Promise(r => setTimeout(r, 300));
@@ -145,8 +134,15 @@ function createQrLogin({ BrowserWindow, app }) {
     let img = '';
     if (state !== 'expired' && win && !win.isDestroyed()) {
       img = await win.webContents.executeJavaScript(`(() => {
-        const i = [...document.querySelectorAll('img')].find(x => /^data:image\\//.test(x.src || '') && (x.naturalWidth || 0) >= 120);
-        return i ? i.src : '';
+        const MIN = 1500;
+        const c = document.querySelector('canvas');
+        if (c && c.width >= 120) {
+          const d = c.toDataURL('image/png');
+          if (d.length >= MIN) return d;
+        }
+        const i = [...document.querySelectorAll('img')]
+          .find(x => String(x.src || '').startsWith('data:image/') && (x.naturalWidth || 0) >= 120);
+        return i && String(i.src).length >= MIN ? i.src : '';
       })()`).catch(() => '');
       if (img && current) current.img = img;
     }

@@ -807,6 +807,8 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .qrwrap.show { display: block; }
 .qrbox {
   position: relative; width: 216px; height: 216px; margin: 0 auto;
+  /* 内边距就是二维码的静区：哔哩哔哩那张位图没有白边，贴边显示时扫码器很难定位 */
+  padding: 14px; box-sizing: border-box;
   border-radius: 12px; overflow: hidden; background: #fff;
   box-shadow: 0 2px 12px rgba(0, 0, 0, .18);
   outline: .5px solid rgba(0, 0, 0, .06);   /* 亮色主题下白卡与面板底色靠得太近 */
@@ -815,7 +817,12 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .qrimg svg { display: block; width: 100%; height: 100%; }
 /* 哔哩哔哩的码是位图（官方登录页那张 140px 的 PNG）：撑满白卡并居中，
    留白交给 .qrbox 自己的白底，避免像之前那样缩在角落 */
-.qrimg img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.qrimg img {
+  display: block; width: 100%; height: 100%; object-fit: contain;
+  /* 哔哩哔哩那边只能拿到 140px 的位图（188 的可用区放大 1.34 倍）：
+     最近邻比双线性更锐，模块边缘不发灰，扫码更容易识别 */
+  image-rendering: pixelated;
+}
 /* 过期/取码失败时把码压暗：不能让用户拿着废码一直扫 */
 .qrbox.dead .qrimg { filter: blur(3px) grayscale(1); opacity: .22; }
 .qrmask {
