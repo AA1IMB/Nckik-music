@@ -1465,11 +1465,19 @@ function credOf(provider) {
 /* 上游曲目的封面/歌词统一入口；fail-safe：任何异常都回空，不影响播放。 */
 async function upstreamMetaOf(key) {
   const s = String(key || '');
-  if (s.startsWith('kg:')) return upmeta.kgMeta(s.slice(3));
+  if (s.startsWith('kg:')) {
+    const m = await upmeta.kgMeta(s.slice(3));
+    /* 酷狗封面是 http 地址，渲染层 CSP 只放行 https/data：在这里换成 data URL，
+     * 否则「有封面但一片空白」。 */
+    if (m && m.cover) m.cover = await upmeta.coverDataUrl(m.cover, 'https://www.kugou.com/');
+    return m;
+  }
   if (s.startsWith('qq:')) {
     const cred = credOf('qqapp') || {};
     const extra = cred.extra || {};
-    return upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey });
+    const m = await upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey });
+    if (m && m.cover) m.cover = await upmeta.coverDataUrl(m.cover, 'https://y.qq.com/');
+    return m;
   }
   return { cover: '', lyric: [] };
 }

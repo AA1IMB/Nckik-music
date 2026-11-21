@@ -39,6 +39,26 @@ function parseLrc(text) {
 }
 
 /* ---------------- 酷狗 ---------------- */
+
+/* 封面统一转成 data URL：
+ * 酷狗给的是 http:// 地址，渲染层 CSP 只放行 https/data，直接塞会被拦掉
+ * （现象就是「有封面对象但画面空白」）。顺手也绕开防盗链。 */
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+async function coverDataUrl(url, referer) {
+  if (!url) return '';
+  const abs = String(url).replace(/^http:\/\//i, 'https://');
+  try {
+    const r = await fetch(abs, { headers: { 'User-Agent': UA, Referer: referer || 'https://www.kugou.com/' } });
+    if (!r.ok) return abs;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (!buf.length || buf.length > 3 * 1024 * 1024) return abs;
+    const mime = (r.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    return 'data:' + mime + ';base64,' + buf.toString('base64');
+  } catch {
+    return abs;
+  }
+}
+
 async function kgMeta(hash, durationSec) {
   const h = String(hash || '').toUpperCase();
   if (!/^[0-9A-F]{32}$/.test(h)) return { cover: '', lyric: [] };
@@ -87,6 +107,28 @@ async function qqMeta(mid, cred) {
 
   let cover = '';
   let lyric = [];
+  let code = 0;
+  try {
+    /* 封面：走 CgiGetTrackInfo 拿 album.mid，再拼官方图床地址。
+     * 这一步失败不影响歌词。 */
+    const tb = {
+      comm,
+      req_0: {
+        module: 'music.trackInfo.UniformRuleCtrl', method: 'CgiGetTrackInfo',
+        param: { types: [3], ids: [m] }
+      }
+    };
+    const tr = await fetch(MUSICU, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': QQ_UA, Referer: 'https://y.qq.com/' },
+      body: JSON.stringify(tb)
+    });
+    const tj = await tr.json();
+    const track = ((tj.req_0 && tj.req_0.data && tj.req_0.data.tracks) || [])[0] || {};
+    const albumMid = track.album && track.album.mid;
+    if (albumMid) cover = 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + albumMid + '.jpg';
+  } catch { /* 封面拿不到就算了 */ }
+
   try {
     const body = {
       comm,
@@ -101,12 +143,13 @@ async function qqMeta(mid, cred) {
       body: JSON.stringify(body)
     });
     const j = await r.json();
+    code = (j.req_0 && j.req_0.code) || 0;
     const data = (j.req_0 && j.req_0.data) || {};
     const raw = String(data.lyric || '');
     if (raw) lyric = parseLrc(decodeURIComponentSafe(raw));
   } catch { /* 歌词拿不到就算了 */ }
 
-  put(key, { cover, lyric });
+  put(key, { cover, lyric, code });
   return { cover, lyric };
 }
 
@@ -115,4 +158,5 @@ function decodeURIComponentSafe(s) {
   try { return decodeURIComponent(s); } catch { return s; }
 }
 
-module.exports = { kgMeta, qqMeta, parseLrc };
+module.exports = {
+  coverDataUrl, kgMeta, qqMeta, parseLrc };
