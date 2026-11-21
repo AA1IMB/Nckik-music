@@ -52,6 +52,38 @@
     row.append(btnQr, btnCancel);
     acts.appendChild(row);
 
+    /* 合规上游：留空就走本地免费链路；填了就走你自己的网关（VIP 由网关身份决定） */
+    let upRow = null;
+    if (def.id === 'kugou') {
+      upRow = h('div', 'line col uprow');
+      const lab = h('div', 'k', '上游网关');
+      lab.appendChild(h('small', null, '可选：填自建/本地的酷狗 API 地址（如 http://127.0.0.1:3000）；留空则只放免费曲'));
+      const ibox = h('div', 'authrow');
+      const inp = h('input', 'upinput');
+      inp.type = 'text';
+      inp.placeholder = 'http://127.0.0.1:3000';
+      const save = h('button', 'ghost mini', '保存');
+      save.onclick = async () => {
+        try {
+          const st = (await window.api.getSettings()) || {};
+          st.upstream = Object.assign({}, st.upstream || {}, { kugou: String(inp.value || '').trim() });
+          await window.api.setSettings(st);
+          window.__accToast && window.__accToast('已保存酷狗上游地址');
+        } catch (e) {
+          window.__accToast && window.__accToast('保存失败：' + (e && e.message ? e.message : e));
+        }
+      };
+      ibox.append(inp, save);
+      upRow.append(lab, ibox);
+      /* 打开面板时把已保存的值回填 */
+      (async () => {
+        try {
+          const st = (await window.api.getSettings()) || {};
+          inp.value = (st.upstream && st.upstream.kugou) || '';
+        } catch { /* 读不到就留空 */ }
+      })();
+    }
+
     const wrap = h('div', 'qrwrap');
     const box = h('div', 'qrbox');
     const img = h('div', 'qrimg');
@@ -76,7 +108,10 @@
 
     const title = h('div', 'acctitle');
     title.append(h('span', 'acctitle-name', def.title), h('span', 'acctitle-tag', '官方 App 扫码'));
-    card.append(title, head, acts, wrap, listLine, upLine);
+    const kids = [title, head, acts, wrap];
+    if (upRow) kids.push(upRow);
+    kids.push(listLine, upLine);
+    card.append(...kids);
 
     return {
       def,

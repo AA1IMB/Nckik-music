@@ -994,3 +994,11 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .idn-meta small { font-size: 11px; color: var(--fg3); }
 .idn-tick { flex: 0 0 auto; font-size: 11px; color: var(--ac); }
 .idn-foot { padding: 8px 6px 2px; font-size: 11px; line-height: 1.5; color: var(--fg3); border-top: .5px solid var(--line); margin-top: 4px; }
+
+/* 酷狗「上游网关」输入行（可选）：与账号卡同一套视觉，不抢扫码区的注意力 */
+.uprow .upinput {
+  flex: 1 1 auto; min-width: 0; height: 30px; padding: 0 10px;
+  border-radius: 8px; border: .5px solid var(--edge);
+  background: var(--field); color: var(--fg); font: inherit; font-size: 12.5px;
+}
+.uprow .upinput::placeholder { color: var(--fg3); }
