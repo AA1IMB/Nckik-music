@@ -17,9 +17,11 @@
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "electron": "^33.0.0",
     "electron-builder": "^26.18.0",
-    "jsqr": "^1.4.0"
+    "jsqr": "^1.4.0",
+    "typescript": "^5.9.3"
   },
   "build": {
     "appId": "com.nckik.music",

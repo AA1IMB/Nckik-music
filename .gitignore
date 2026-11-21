@@ -1,6 +1,7 @@
 # 依赖与构建产物
 player/node_modules/
 player/dist/
+player/accounts/dist/
 .tmp/
 
 # 演示素材由 player/make-demo.js 生成，不入库（~3.6 MB）
