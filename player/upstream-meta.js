@@ -101,9 +101,23 @@ async function qqMeta(mid, cred, albumMid) {
   if (hit) return hit;
 
   /* 封面：QQ 官方图床按「专辑 mid」拼，歌曲 mid 拼不出来。
-   * album mid 由歌单曲目列表带下来（CgiGetTrackInfo 只吃数字 id，这里用不上）。 */
-  let cover = albumMid
-    ? 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + String(albumMid) + '.jpg'
+   * 正常情况 album mid 由歌单曲目列表带下来；但从「播放列表」播旧条目时没有这个字段，
+   * 这时用单曲信息接口按 songmid 反查一次（一次请求，结果进缓存）。 */
+  let am = String(albumMid || '');
+  if (!am) {
+    try {
+      const u = 'https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=' + encodeURIComponent(m)
+        + '&format=json&platform=yqq&outCharset=utf-8&pcachetime=' + Date.now();
+      const r = await fetch(u, {
+        headers: { 'User-Agent': QQ_UA, Referer: 'https://y.qq.com/portal/player.html' }
+      });
+      const j = await r.json();
+      const d = (j && j.data && j.data[0]) || null;
+      am = String((d && d.album && d.album.mid) || '');
+    } catch { /* 查不到就退回占位图 */ }
+  }
+  let cover = am
+    ? 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + am + '.jpg'
     : '';
 
   /* 歌词走「旧版歌词接口」，和 folia 用的是同一条：

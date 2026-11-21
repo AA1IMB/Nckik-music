@@ -3554,7 +3554,8 @@ async function playAt(qi, opts) {
       /* 上游曲目没有本地文件，别去问 trackDetail（它会回「元数据读取失败」，
        * 界面就顶着一行红字）。封面与码率一起从上游拿。 */
       try {
-        const m = await window.api.accMeta(k.path, albumMidOf(k, 'qq'));
+        const am = albumMidOf(k, 'qq');
+        const m = await window.api.accMeta(k.path, am);
         if (m && m.ok) {
           art = m.cover || null;
           if (m.codec) k.codec = m.codec;
