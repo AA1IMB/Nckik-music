@@ -82,14 +82,19 @@ function qqGuid() {
   return s;
 }
 
-async function qqVkey(cred, mid, file) {
+async function qqVkey(cred, mid, file, tune) {
+  const comm = qqComm(cred);
+  if (tune.qqZero) comm.qq = '0';
+  if (tune.noAuthst) delete comm.authst;
+  if (tune.loginType) comm.tmeLoginType = tune.loginType;
   const body = {
-    comm: qqComm(cred),
+    comm,
     req_0: {
       module: 'music.vkey.GetVkey', method: 'UrlGetVkey',
       param: {
-        filename: [file], guid: qqGuid(), songmid: [mid], songtype: [0],
-        uin: String(cred.uin || '0'), loginflag: 1, platform: '20'
+        filename: [file], guid: tune.guid || qqGuid(), songmid: [mid], songtype: [0],
+        uin: String(tune.uinOverride != null ? tune.uinOverride : (cred.uin || '0')),
+        loginflag: 1, platform: tune.platform || '20'
       }
     }
   };
@@ -107,12 +112,7 @@ async function qqVkey(cred, mid, file) {
       `QQ 音乐取流返回 ${code}${msg ? '：' + msg : ''}`);
   }
   const info = (j.req_0 && j.req_0.data && j.req_0.data.midurlinfo && j.req_0.data.midurlinfo[0]) || {};
-  if (!info.purl) {
-    const rc = info.result || 0;
-    throw fail(rc === 104003 ? 'E_NO_COPYRIGHT' : 'E_NO_STREAM',
-      rc === 104003 ? '这首在 QQ 音乐需要会员/已下架' : 'QQ 音乐没有给出可播地址');
-  }
-  return String(info.purl);
+  return String(info.purl || '');
 }
 
 async function qqResolve(mid, cred, prefer) {
@@ -120,15 +120,33 @@ async function qqResolve(mid, cred, prefer) {
   if (!/^[0-9A-Za-z]{10,20}$/.test(m)) throw fail('E_BAD_TRACK', 'QQ 曲目 id 不正确');
   if (!cred || !cred.musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
   const files = prefer === 'standard' ? [...QQ_FILES].reverse() : QQ_FILES;
+  /* GetVkey 对 comm 的细节很敏感：不同账号/版本下 uin 该放 comm.qq 还是 param.uin、
+   * guid 是否需要与登录一致、platform 给 20 还是 yqq，都可能决定 purl 是否为空。
+   * 这里按「最像官方客户端」到「最宽松」的顺序试，命中即返回。 */
+  const tunes = [
+    { platform: '20' },
+    { platform: 'yqq.json' },
+    { qqZero: true, platform: '20' },
+    { loginType: 6, platform: '20' },
+    { noAuthst: true, platform: 'yqq.json' },
+    { uinOverride: '0', platform: '20' }
+  ];
   let lastErr = null;
   for (const f of files) {
-    try {
-      const purl = await qqVkey(cred, m, f.prefix + m + f.ext);
-      const url = purl.startsWith('http') ? purl : 'https://dl.stream.qqmusic.qq.com/' + purl;
-      return { url, quality: f.quality, headers: { Referer: 'https://y.qq.com/', 'User-Agent': QQ_UA } };
-    } catch (e) {
-      lastErr = e;
-      if (e.code === 'E_NO_COPYRIGHT' || e.code === 'E_AUTH_REQUIRED') break;
+    for (const t of tunes) {
+      try {
+        const purl = await qqVkey(cred, m, f.prefix + m + f.ext, t);
+        if (!purl) { lastErr = fail('E_NO_STREAM', 'QQ 音乐没有给出可播地址'); continue; }
+        const url = purl.startsWith('http') ? purl : 'https://dl.stream.qqmusic.qq.com/' + purl;
+        console.log('[qqvkey] ok', JSON.stringify(t), f.prefix, purl.slice(0, 40));
+        /* CDN 对未带登录 cookie 的请求会 403/302 到空内容，带上 uin + keyst 最稳 */
+        const cookie = `uin=${cred.uin}; qm_keyst=${cred.musickey}; qqmusic_key=${cred.musickey}`;
+        return { url, quality: f.quality, headers: { Referer: 'https://y.qq.com/', 'User-Agent': QQ_UA, Cookie: cookie } };
+      } catch (e) {
+        lastErr = e;
+        console.log('[qqvkey] fail', JSON.stringify(t), f.prefix, e.code, String(e.message).slice(0, 60));
+        if (e.code === 'E_NO_COPYRIGHT' || e.code === 'E_AUTH_REQUIRED') return Promise.reject(e);
+      }
     }
   }
   throw lastErr || fail('E_NO_STREAM', 'QQ 音乐没有给出可播地址');
