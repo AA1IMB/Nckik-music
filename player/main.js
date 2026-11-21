@@ -8,6 +8,7 @@ const ne = require('./netease');
 const bil = require('./bilibili');
 const { createQrLogin } = require('./bilibili-qr');
 const upstream = require('./upstream-library');
+const streams = require('./stream-resolve');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -46,7 +47,8 @@ const libraryPath = path.join(userDir, 'library.json');
 protocol.registerSchemesAsPrivileged([
   { scheme: 'media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
   { scheme: 'neaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
-  { scheme: 'bilaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
+  { scheme: 'bilaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
+  { scheme: 'upaudio', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
 ]);
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -326,6 +328,86 @@ function parseBilId(url) {
     const [bvid, cid] = id.split(':');
     return { bvid: bvid || '', cid: Number(cid) || 0 };
   } catch { return { bvid: '', cid: 0 }; }
+}
+
+/* ---------------- 上游音源协议（kugou / qqapp） ----------------
+ * 与 bilaudio 同一套做法：解析直链 → 带 Referer/UA 代理 → 透传 Range。
+ * 直链有时效（酷狗约几分钟、QQ 的 vkey 更长），所以每次请求都重新解析，
+ * 但同一 track 在 90 秒内复用结果，避免 Range 请求把接口打爆。
+ */
+const UP_HEAD_TIMEOUT = 15000;
+const upCache = new Map();
+
+function parseUpId(url) {
+  const m = /^upaudio:\/\/s\/([a-z]+)\/(.+)$/.exec(String(url || ''));
+  return m ? { provider: m[1], id: decodeURIComponent(m[2]) } : { provider: '', id: '' };
+}
+
+async function upResolve(provider, id) {
+  const key = provider + ':' + id;
+  const now = Date.now();
+  const hit = upCache.get(key);
+  if (hit && now - hit.at < 90_000) return hit.info;
+
+  const cred = credOf(provider);
+  if (!cred) throw Object.assign(new Error('还没有登录该音源'), { code: 'E_AUTH_REQUIRED' });
+  const extra = cred.extra || {};
+  const info = provider === 'kugou'
+    ? await streams.kgResolve(id, 'high')
+    : await streams.qqResolve(id, { uin: extra.uin, musickey: extra.musickey }, 'high');
+  upCache.set(key, { at: now, info });
+  return info;
+}
+
+function registerUpProtocol() {
+  protocol.handle('upaudio', async (request) => {
+    const { provider, id } = parseUpId(request.url);
+    if (!/^(kugou|qqapp)$/.test(provider) || !id) {
+      return new Response('bad id', { status: 400, headers: { 'x-up-reason': 'UP_BAD_ID' } });
+    }
+    let info;
+    try {
+      info = await upResolve(provider, id);
+    } catch (e) {
+      return new Response(String((e && e.message) || e), {
+        status: 404,
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'x-up-reason': (e && e.code) || 'UP_ERROR' }
+      });
+    }
+
+    const range = request.headers.get('range');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new Error('UP_HEAD_TIMEOUT')), UP_HEAD_TIMEOUT);
+    let res;
+    try {
+      res = await net.fetch(info.url, {
+        headers: { ...(info.headers || {}), ...(range ? { Range: range } : {}) },
+        signal: ctrl.signal
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      try { ctrl.abort(); } catch {}
+      upCache.delete(provider + ':' + id);
+      return new Response('upstream timeout', { status: 504, headers: { 'x-up-reason': 'UP_TIMEOUT' } });
+    }
+    clearTimeout(timer);
+
+    if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 410) {
+      try { ctrl.abort(); } catch {}
+      upCache.delete(provider + ':' + id);
+      return new Response('upstream ' + res.status, { status: 502, headers: { 'x-up-reason': 'UP_EXPIRED' } });
+    }
+
+    const h = new Headers();
+    for (const k of PASSTHROUGH_HEADERS) {
+      const v = res.headers.get(k);
+      if (v) h.set(k, v);
+    }
+    if (!h.has('accept-ranges')) h.set('accept-ranges', 'bytes');
+    const ct = String(h.get('content-type') || '');
+    if (!/^audio\//i.test(ct) && !/^video\//i.test(ct)) h.set('content-type', 'audio/mpeg');
+    return new Response(proxyBody(res, ctrl, provider + ':' + id), { status: res.status, headers: h });
+  });
 }
 
 function registerBilProtocol() {
@@ -918,6 +1000,10 @@ ipcMain.handle('media:url', (_e, file) => {
     const { bvid, cid } = bilParts(s);
     return 'bilaudio://s/' + bvid + ':' + cid;
   }
+  /* 上游音源（酷狗 / QQ 音乐）的曲目在列表里用前缀 id 存：
+   * 播放时映射到 upaudio 协议，由主进程解析直链并带 Referer 代理。 */
+  if (/^kg:[0-9A-Fa-f]{32}$/.test(s)) return 'upaudio://s/kugou/' + s.slice(3).toUpperCase();
+  if (/^qq:[0-9A-Za-z]{8,24}$/.test(s)) return 'upaudio://s/qqapp/' + s.slice(3);
   return `media://f/?p=${encodeURIComponent(s)}`;
 });
 
@@ -1521,11 +1607,14 @@ function setupAccounts() {
 }
 
 app.whenReady().then(() => {
-  if (!gotLock) return;
+  /* 只有「pid 锁也说有实例」才该退出；Chromium 锁拿不到（权限/杀软占用）时
+   * 上面已经回退到 pid 锁，这里必须继续启动，否则表现为「双击没反应」。 */
+  if (!gotLock && pidState === 'held') return;
   migrateOldUserData();             // 改名后第一次启动：把老目录里的曲库/设置/凭证接过来
   registerMediaProtocol();
   registerNeProtocol();
   registerBilProtocol();
+  registerUpProtocol();
   ne.setCookie(readNeCookie());     // 上次扫过的凭证在开窗前就位，首屏点歌即可用
   const savedBil = readBilCookie();
   bil.applyAuth(savedBil);          // 哔哩哔哩同理由，两个音源的凭证互不影响

@@ -1,0 +1,137 @@
+'use strict';
+/* ---------------- 取流：QQ 音乐 / 酷狗 ----------------
+ * 只做「拿到可播的直链」，音频本身交给自定义协议代理（带 Referer / 超时）。
+ *   - 酷狗：m.kugou.com 的 playInfo 公开接口，按 128k→320k 依次试；
+ *   - QQ 音乐：musicu 的 GetVkey（用登录 cookie 里的 uin + musickey），
+ *     拿到 purl 再拼成 http(s) 直链，VIP/版权受限时给明确错误码。
+ * 两条路都不做签名算法；拿不到就抛带 code 的错误。
+ */
+
+const KG_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const QQ_UA = 'QQMusic 14090008(android 12)';
+const MUSICU = 'https://u.y.qq.com/cgi-bin/musicu.fcg';
+
+function fail(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  return e;
+}
+
+/* ---------- 酷狗 ---------- */
+
+const KG_QUALITY = [
+  { key: '320', label: '320k' },
+  { key: '128', label: '128k' }
+];
+
+async function kgPlayInfo(hash, qualityKey) {
+  const url = `https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=${encodeURIComponent(hash)}&album_id=0&album_audio_id=0`;
+  const r = await fetch(url, { headers: { 'User-Agent': KG_UA, Referer: 'https://www.kugou.com/' } });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `酷狗取流返回 ${r.status}`);
+  let j;
+  try { j = await r.json(); } catch { throw fail('E_UPSTREAM_BAD_JSON', '酷狗取流没有返回 JSON'); }
+  const pay = Number(j.pay_type || 0);
+  if (pay > 0 || (!j.url && !j.backup_url)) {
+    if (pay > 0) throw fail('E_NO_COPYRIGHT', '这首是 VIP/付费曲目，需要用会员账号播放');
+    throw fail('E_NO_STREAM', '酷狗没有给出可播地址');
+  }
+  /* playInfo 同时给 128k 的 url 与 320k 的 url：按请求档位挑，拿不到就退回另一个 */
+  const pick = qualityKey === '320'
+    ? (j.url || j.backup_url)
+    : (j.backup_url || j.url);
+  if (!pick) throw fail('E_NO_STREAM', '酷狗没有给出可播地址');
+  return { url: String(pick), bitrate: Number(j.bitRate || 0), ext: String(j.extName || 'mp3') };
+}
+
+async function kgResolve(hash, prefer) {
+  const h = String(hash || '').toUpperCase();
+  if (!/^[0-9A-F]{32}$/.test(h)) throw fail('E_BAD_TRACK', '酷狗曲目 id 不正确');
+  const order = prefer === 'standard' ? [...KG_QUALITY].reverse() : KG_QUALITY;
+  let lastErr = null;
+  for (const q of order) {
+    try {
+      const r = await kgPlayInfo(h, q.key);
+      return { url: r.url, quality: q.label, headers: { Referer: 'https://www.kugou.com/', 'User-Agent': KG_UA } };
+    } catch (e) {
+      lastErr = e;
+      if (e.code === 'E_NO_COPYRIGHT') break;
+    }
+  }
+  throw lastErr || fail('E_NO_STREAM', '酷狗没有给出可播地址');
+}
+
+/* ---------- QQ 音乐 ---------- */
+
+const QQ_FILES = [
+  { prefix: 'M800', ext: '.mp3', quality: '320k' },
+  { prefix: 'M500', ext: '.mp3', quality: '128k' }
+];
+
+function qqComm(cred) {
+  return {
+    ct: 11, cv: 14090008, v: 14090008, chid: '10003505', tmeAppID: 'qqmusic',
+    tmeLoginType: 2, qq: String(cred.uin || ''), authst: String(cred.musickey || '')
+  };
+}
+
+function qqGuid() {
+  /* vkey 需要 guid；用一个稳定的伪随机串即可（服务端只当作会话标识） */
+  let s = '';
+  const hex = '0123456789abcdef';
+  for (let i = 0; i < 32; i++) s += hex[Math.floor(Math.random() * 16)];
+  return s;
+}
+
+async function qqVkey(cred, mid, file) {
+  const body = {
+    comm: qqComm(cred),
+    req_0: {
+      module: 'music.vkey.GetVkey', method: 'UrlGetVkey',
+      param: {
+        filename: [file], guid: qqGuid(), songmid: [mid], songtype: [0],
+        uin: String(cred.uin || '0'), loginflag: 1, platform: '20'
+      }
+    }
+  };
+  const r = await fetch(MUSICU, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'User-Agent': QQ_UA, Referer: 'https://y.qq.com/' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `QQ 音乐取流返回 ${r.status}`);
+  const j = await r.json();
+  const code = (j.req_0 && j.req_0.code) || j.code || 0;
+  if (code !== 0) {
+    const msg = (j.req_0 && j.req_0.message) || j.message || '';
+    throw fail(code === 1000 || code === 104400 ? 'E_AUTH_REQUIRED' : 'E_UPSTREAM_CODE',
+      `QQ 音乐取流返回 ${code}${msg ? '：' + msg : ''}`);
+  }
+  const info = (j.req_0 && j.req_0.data && j.req_0.data.midurlinfo && j.req_0.data.midurlinfo[0]) || {};
+  if (!info.purl) {
+    const rc = info.result || 0;
+    throw fail(rc === 104003 ? 'E_NO_COPYRIGHT' : 'E_NO_STREAM',
+      rc === 104003 ? '这首在 QQ 音乐需要会员/已下架' : 'QQ 音乐没有给出可播地址');
+  }
+  return String(info.purl);
+}
+
+async function qqResolve(mid, cred, prefer) {
+  const m = String(mid || '').trim();
+  if (!/^[0-9A-Za-z]{10,20}$/.test(m)) throw fail('E_BAD_TRACK', 'QQ 曲目 id 不正确');
+  if (!cred || !cred.musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
+  const files = prefer === 'standard' ? [...QQ_FILES].reverse() : QQ_FILES;
+  let lastErr = null;
+  for (const f of files) {
+    try {
+      const purl = await qqVkey(cred, m, f.prefix + m + f.ext);
+      const url = purl.startsWith('http') ? purl : 'https://dl.stream.qqmusic.qq.com/' + purl;
+      return { url, quality: f.quality, headers: { Referer: 'https://y.qq.com/', 'User-Agent': QQ_UA } };
+    } catch (e) {
+      lastErr = e;
+      if (e.code === 'E_NO_COPYRIGHT' || e.code === 'E_AUTH_REQUIRED') break;
+    }
+  }
+  throw lastErr || fail('E_NO_STREAM', 'QQ 音乐没有给出可播地址');
+}
+
+module.exports = { kgResolve, qqResolve };

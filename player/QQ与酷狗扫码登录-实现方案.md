@@ -445,3 +445,11 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 - QQ 只接「自建歌单」；收藏歌单要 `encryptUin`（`PlaylistFavRead`），本版未接。
 - QQ 歌单不返回曲目数（`count` 可能为 0），列表里按「打开时读取」显示。
 - 曲目只能入列表，播放还需要取流（QQ 需合规上游，酷狗需 `kg:<hash>` 协议），面板会提示「取流尚未接入」。
+
+## 二十二、取流（v0.9.4）
+
+- 新增 `player/stream-resolve.js`：`kgResolve(hash,prefer)` 走 `m.kugou.com/app/i/getSongInfo.php?cmd=playInfo`（`pay_type>0` 直接判 `E_NO_COPYRIGHT`），`qqResolve(mid,{uin,musickey})` 走 musicu `music.vkey.GetVkey / UrlGetVkey`（`M800`→320k、`M500`→128k）。
+- 新增自定义协议 `upaudio://s/<provider>/<id>`（与 `bilaudio` 同构：解析直链 → 带 Referer/UA 代理 → 透传 Range，直链缓存 90s），`media:url` 把 `kg:<hash>` / `qq:<mid>` 映射到它，CSP 的 `media-src` 同步放开。
+- 实测：酷狗免费曲（`FC21EFCE59906B54DF2E47EDE9CC757A`）`duration 221.5s`、`readyState 4`、播放 2.44s 正常推进；VIP 曲目给 `E_NO_COPYRIGHT` 并被面板提示。
+- QQ 音乐：`GetVkey` 已接通但当前账号下仍拿不到 `purl`（返回 `err 4 / no supported sources`），需继续核对 comm 的 `qq/authst` 与 `guid`，暂按「取流不可用」处理，列表与歌单不受影响。
+- 顺手修掉一个真 bug：`main.js` 里 `app.whenReady().then(() => { if (!gotLock) return; ... })` —— Chromium 单实例锁拿不到（权限/杀软占用）时会**整段跳过启动**，表现为「双击没反应」；改为只有 `pidState === 'held'` 才退出。

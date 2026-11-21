@@ -1861,10 +1861,14 @@ async function plSelectSource(src) {
       if (!r || !r.ok) throw new Error((r && r.error && r.error.message) || '读取失败');
       /* 上游歌单给的是 { id, title, artist, duration }，没有 path：
        * 用 id 当 path，这样列表能落盘；取流是否支持由播放层决定（见下方提示）。 */
-      tracks = (src.kind === 'up' ? (r.items || []).map(t => ({ ...t, path: t.path || t.id })) : (r.tracks || []));
-      if (src.kind === 'up' && tracks.length) {
-        toast('已读取 ' + tracks.length + ' 首；' + (src.provider === 'kugou' ? '酷狗' : 'QQ 音乐') + '取流尚未接入，暂只能进列表', 3600);
-      }
+      tracks = src.kind === 'up'
+        ? (r.items || []).map(t => ({
+            title: t.title, artist: t.artist, duration: t.duration,
+            /* 上游曲目在列表里用前缀 id 存，media:url 据此选协议：
+             * 酷狗 kg:<32位hash>，QQ 音乐 qq:<songmid>。 */
+            path: src.provider === 'kugou' ? 'kg:' + t.id : (String(t.id).startsWith('qq:') ? t.id : 'qq:' + t.id)
+          }))
+        : (r.tracks || []);
     } catch (e) {
       PL.busy = false;
       renderPl();
