@@ -1,19 +1,39 @@
-import type { Account, QualityId } from '../types';
-import type { AudioAttempt, AudioFetchContext } from '../stream';
-import { PageLoginProvider, joinUrl, type PageProviderConfig, type PageProviderDeps, type LoginStartResult, type ProviderPollResult } from './base';
+import { createHash, randomBytes, randomUUID } from 'crypto';
+import type { Account, Credential, Logger, ProviderId, QualityId, Transport } from '../types';
+import type { AudioAttempt, AudioFetchContext, StreamProvider } from '../stream';
 import { AccountError, classifyUpstream } from '../errors';
+import type { Provider, ProviderPollResult } from './base';
 
 /**
- * 酷狗音乐
+ * 酷狗音乐：官方 App 扫码（客户端通道）
  * ---------------------------------------------------------------------------
- * 扫码链路：打开酷狗官方登录页（login-user.kugou.com，appid=1014）→ 页面自己出码并轮询
- *          → 手机酷狗 App 扫码确认 → 登录成功回调后 cookie 里出现 token / userid / dfid。
- * 与 QQ 同一套：不开新窗口、不伪造签名，只读官方页面自己产生的 cookie。
+ * 与 QQ 音乐 App 扫码同一形态：二维码由平台签发、手机 App 确认，我们只读结果，
+ * 不伪造任何签名、不逆向私有协议。
  *
- * 取流必须配置合规上游（`upstreamBase`）：
- *   GET {base}/song/url?hash=<hash>&quality=<128|320|flac>&album_id=<id>
- *   返回 { data: { url, bitrate } } 或 { data: { url: '', restriction: { code, hint } } }
+ * 三个接口（都是 login-user.kugou.com，web 签名，参数按键名排序后拼接）：
+ *   1. /v2/qrcode                  出码，返回 qrcode(key) 与 qrcode_img(data:image/png)
+ *   2. /v2/get_userinfo_qrcode     轮询：status 0 过期 / 1 等待 / 2 已扫待确认 / 4 授权成功
+ *   3. status=4 时同一响应里给 token + userid —— 这是**客户端 token**，
+ *      会员权益按 appid 1001/1005 + 设备 mid/dfid 发放，付费曲才有直链。
+ *
+ * 为什么不用网页登录页：网页登录抓到的 web 会话 token 在 trackercdn 上不算会员凭证，
+ * 付费曲固定回 20018 / priv_status 0（见方案文档 §十四）。客户端 token 才有权益。
  */
+
+const WEB_SALT = 'NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt';
+const API = 'https://login-user.kugou.com';
+const APPID = '1001';
+const SRCAPPID = '2919';
+const CLIENTVER = '20489';
+const H5_QR = 'https://h5.kugou.com/apps/loginQRCode/html/index.html?appid=1005&';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+const LADDER: Record<QualityId, readonly QualityId[]> = {
+  standard: ['standard'],
+  high: ['high', 'standard'],
+  lossless: ['lossless', 'high', 'standard'],
+  hires: ['hires', 'lossless', 'high', 'standard']
+};
 
 const QUALITY_PARAM: Record<QualityId, string> = {
   standard: '128',
@@ -22,142 +42,245 @@ const QUALITY_PARAM: Record<QualityId, string> = {
   hires: 'high'
 };
 
-const LADDER: Record<QualityId, QualityId[]> = {
-  standard: ['standard'],
-  high: ['high', 'standard'],
-  lossless: ['lossless', 'high', 'standard'],
-  hires: ['hires', 'lossless', 'high', 'standard']
-};
-
-export const KUGOU_CONFIG: PageProviderConfig = {
-  id: 'kugou',
-  label: '酷狗音乐',
-  // 注意：带 callback 参数时酷狗会回 ERR_FAILED(-2) 加载失败，去掉即可正常出码
-  loginUrl: 'https://login-user.kugou.com/login/?appid=1014',
-  partition: 'persist:acc-kugou',
-  qrMessage: '请用手机酷狗 App 扫一扫',
-  // 不清分区：已经扫码成功过的 token/userid 留在里面，重启后第一拍 poll 就能直接恢复登录态
-  clearSession: false,
-  cookieNames: ['token', 'userid', 'dfid', 'kugouid', 'kg_mid', 'kg_dfid', 'NickName'],
-  requiredCookieNames: ['token', 'userid'],
-  qrTimeoutMs: 15_000,
-  qrTtlMs: 5 * 60 * 1000,
-  // 酷狗在那个位置 315s 后才写「已失效 请点击刷新」，且不换图 —— 必须认出这句话
-  expiredPatterns: [/已失效/, /二维码已过期/, /请点击刷新/],
-  scannedPatterns: [/已扫码/, /扫描成功/, /请在手机上确认/, /登录中/]
-};
-
-export class KugouProvider extends PageLoginProvider {
-  /** 页面的轮询响应里拿到的权威状态：4 = 手机上已确认，token 可直接换会话 */
-  private watch: { status: number; token: string; userId: string; exchanged: string } = {
-    status: 0,
-    token: '',
-    userId: '',
-    exchanged: ''
-  };
-  private tapOff: (() => void) | null = null;
-
-  constructor(deps: Omit<PageProviderDeps, 'cfg' | 'ladder' | 'fetchAudio'> & { upstreamBase?: string }) {
-    const cfg: PageProviderConfig = { ...KUGOU_CONFIG, upstreamBase: deps.upstreamBase };
-    super({ ...deps, cfg, ladder: LADDER, fetchAudio: ctx => fetchKugouAudio(ctx, cfg.upstreamBase) });
-  }
-
-  /**
-   * 酷狗登录页在隐藏窗口里有时不会自己把「手机已确认」换成会话（页面要靠 regok 回跳/
-   * opener 交接），所以这里旁听它自己的轮询响应：拿到 data.status === 4 与 token 后，
-   * 直接调页面自己的 `KgUser.QRCodeLogin(appid, userid, token, cb)` 完成换会话。
-   * 换出来的 token/userid 会由页面写入同一分区 cookie，随后 poll() 自然命中。
-   */
-  protected override async start(): Promise<LoginStartResult> {
-    const r = await super.start();
-    this.watch = { status: 0, token: '', userId: '', exchanged: '' };
-    this.tapOff?.();
-    this.tapOff = this.host.tapJson?.(
-      ['*get_userinfo_qrcode*', '*login_qr_check*'],
-      json => {
-        const root = json as Record<string, unknown> | null;
-        const data = root && (root.data as Record<string, unknown> | null);
-        if (!data || typeof data !== 'object') return;
-        const st = Number(data.status);
-        if (Number.isFinite(st)) this.watch.status = st;
-        if (typeof data.token === 'string' && data.token) this.watch.token = data.token;
-        const uid = data.userid ?? data.userId ?? data.kugouid;
-        if (uid !== undefined && uid !== null && String(uid)) this.watch.userId = String(uid);
-      }
-    ) ?? null;
-    return r;
-  }
-
-  protected override async poll(): Promise<ProviderPollResult> {
-    let r = await super.poll();
-    if (r.phase === 'confirmed') return r;
-
-    if (this.watch.token && this.watch.exchanged !== this.watch.token) {
-      this.watch.exchanged = this.watch.token;
-      // 兜底：不等页面换会话，直接把 token/userid 按官方同样的形态写进分区。
-      // 页面自己换成功时这是幂等的；换失败时这就是唯一的登录态来源。
-      if (this.watch.userId && this.host.writeCookies) {
-        await this.host.writeCookies({ token: this.watch.token, userid: this.watch.userId }, '.kugou.com');
-        this.logger.info('[acc] 酷狗直接写入 token', { userId: this.watch.userId });
-      }
-      // 写完立刻重判：此时 requiredCookieNames 已命中，正常应直接 confirmed。
-      // 不调用页面的 KgUser.QRCodeLogin —— executeJavaScript 在页面跳转时会一直不返回，
-      // 曾把整个 poll() 挂住（界面就永远停在「已扫码」）。
-      await new Promise(res => setTimeout(res, 500));
-      r = await super.poll();
-      this.logger.info('[acc] 酷狗写入后重判', { phase: r.phase });
-    }
-    if (this.watch.status === 4 && r.phase !== 'confirmed') {
-      // 已确认但 cookie 还没读到：保持 scanned，别退回 waiting
-      return { phase: 'scanned' };
-    }
-    return r;
-  }
-
-  protected override profilePath(): string {
-    return '/user/detail';
-  }
-
-  protected override mapProfile(body: Record<string, unknown>, fallback: Account): Account {
-    const data = (body.data ?? body) as Record<string, unknown>;
-    const name = str(data.nickname) || str(data.username) || str(data.NickName) || fallback.name;
-    const avatar = str(data.pic) || str(data.avatar) || '';
-    const uid = String(data.userid ?? data.uid ?? fallback.userId);
-    return { ...fallback, id: `kugou:${uid}`, userId: uid, name, avatarUrl: avatar };
-  }
+function md5(s: string): string {
+  return createHash('md5').update(s, 'utf8').digest('hex');
 }
 
-async function fetchKugouAudio(ctx: AudioFetchContext, upstreamBase?: string): Promise<AudioAttempt> {
-  if (!upstreamBase) {
-    throw new AccountError('E_NOT_IMPLEMENTED', '酷狗音乐：尚未接入合规上游，无法取流。', {
-      hint: '请在设置中填写自建网关地址'
-    });
-  }
-  const qs = new URLSearchParams({ hash: ctx.songId, quality: QUALITY_PARAM[ctx.quality] });
-  if (ctx.albumId) qs.set('album_id', ctx.albumId);
-  const res = await fetchJson(joinUrl(upstreamBase, '/song/url') + '?' + qs.toString());
-  const data = (res.body.data ?? res.body) as Record<string, unknown>;
-  const url = str(data.url);
-  if (!url) {
-    const restriction = (data.restriction ?? {}) as Record<string, unknown>;
-    const hint = str(restriction.hint) || str(restriction.code);
-    const kind = /vip|pay|会员/.test(hint) ? 'vip' : /region|地区/.test(hint) ? 'region' : 'copyright';
-    return { block: { kind, code: hint, message: str(data.message) } };
-  }
-  return { url, bitrateKbps: Number(data.bitrate) || 0 };
-}
-
-async function fetchJson(url: string): Promise<{ status: number; body: Record<string, unknown> }> {
-  const doFetch = (globalThis as { fetch?: (u: string, init?: RequestInit) => Promise<Response> }).fetch;
-  if (!doFetch) throw new AccountError('E_UPSTREAM_UNAVAILABLE', '酷狗音乐：取流通道不可用（缺少 fetch）。');
-  const res = await doFetch(url, { headers: { Accept: 'application/json' } });
-  if (res.status === 429) throw classifyUpstream('kugou', { httpStatus: 429, message: 'rate limit' });
-  if (!res.ok) throw classifyUpstream('kugou', { httpStatus: res.status, message: res.statusText });
-  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+/** 客户端 mid：官方实现是 md5(guid) 的十六进制大整数转十进制串 */
+function midOf(guid: string): string {
+  return BigInt('0x' + md5(guid)).toString();
 }
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : typeof v === 'number' ? String(v) : '';
+}
+
+interface KugouDeps {
+  transport: Transport;
+  logger: Logger;
+  now?: () => number;
+  /** 兼容旧装配（网页登录时代传过 hidden host）；本实现不需要窗口 */
+  host?: unknown;
+  upstreamBase?: string;
+}
+
+export class KugouProvider implements Provider {
+  readonly id: ProviderId = 'kugou';
+  readonly label = '酷狗音乐（App 扫码）';
+  readonly login: Provider['login'];
+  readonly stream: StreamProvider;
+
+  private readonly transport: Transport;
+  private readonly logger: Logger;
+  private readonly now: () => number;
+  private readonly upstreamBase?: string;
+
+  /** 每次出码换一套设备身份：token 与 mid/dfid 绑定，取流时必须原样带上 */
+  private device = { mid: '', dfid: '' };
+  private current: { key: string; at: number; expiresAt: number } | null = null;
+  private scannedAt = 0;
+  private lastCredential: Credential | null = null;
+
+  constructor(deps: KugouDeps) {
+    this.transport = deps.transport;
+    this.logger = deps.logger;
+    this.now = deps.now ?? Date.now;
+    this.upstreamBase = deps.upstreamBase;
+    this.login = { start: () => this.start(), poll: () => this.poll(), cancel: () => this.cancel() };
+    this.stream = { id: this.id, ladder: LADDER, fetchAudio: ctx => this.fetchAudio(ctx) };
+  }
+
+  /* ---------------- 登录 ---------------- */
+
+  private async start(): Promise<{ qr: { image: string; expiresAt: number }; message: string }> {
+    this.cancel();
+    const guid = randomUUID();
+    this.device = { mid: midOf(guid), dfid: randomBytes(12).toString('hex') };
+
+    const params = this.signed({
+      dfid: this.device.dfid,
+      mid: this.device.mid,
+      uuid: '-',
+      appid: APPID,
+      clientver: CLIENTVER,
+      clienttime: String(Math.floor(this.now() / 1000)),
+      type: '1',
+      plat: '4',
+      qrcode_txt: H5_QR,
+      srcappid: SRCAPPID
+    });
+
+    const res = await this.get<{ status?: number; error_code?: number; data?: Record<string, unknown>; data2?: unknown }>(
+      '/v2/qrcode',
+      params
+    );
+    const body = (res.body ?? {}) as Record<string, unknown>;
+    const data = (body.data ?? body) as Record<string, unknown>;
+    const key = str(data.qrcode) || str(data.key);
+    const image = str(data.qrcode_img);
+    if (!key || !image.startsWith('data:image')) {
+      const code = Number(body.error_code || body.status) || 0;
+      throw new AccountError('E_UPSTREAM_UNAVAILABLE', `酷狗音乐：出码失败（${code}）。`, {
+        hint: '稍后重试；若持续失败可能是 IP 被限流。'
+      });
+    }
+
+    const ttlMs = 5 * 60 * 1000;
+    this.current = { key, at: this.now(), expiresAt: this.now() + ttlMs };
+    this.scannedAt = 0;
+    this.logger.info('[acc] 酷狗 App 扫码已出码', { mid: this.device.mid.slice(0, 6) + '…' });
+    return { qr: { image, expiresAt: this.current.expiresAt }, message: '请用手机酷狗 App 扫一扫' };
+  }
+
+  private async poll(): Promise<ProviderPollResult> {
+    const cur = this.current;
+    if (!cur) {
+      if (this.lastCredential) return { phase: 'confirmed', message: '已登录' };
+      throw new AccountError('E_AUTH_REQUIRED', '酷狗音乐：登录窗口已关闭，请重新获取二维码。');
+    }
+    if (this.now() > cur.expiresAt) {
+      this.current = null;
+      throw new AccountError('E_QR_EXPIRED', '酷狗音乐：二维码已过期，请重新获取。');
+    }
+
+    const params = this.signed({
+      dfid: this.device.dfid,
+      mid: this.device.mid,
+      uuid: '-',
+      appid: APPID,
+      clientver: CLIENTVER,
+      clienttime: String(Math.floor(this.now() / 1000)),
+      plat: '4',
+      qrcode: cur.key,
+      srcappid: SRCAPPID
+    });
+    const res = await this.get<Record<string, unknown>>('/v2/get_userinfo_qrcode', params);
+    const body = (res.body ?? {}) as Record<string, unknown>;
+    const data = (body.data ?? {}) as Record<string, unknown>;
+    const status = Number(data.status);
+
+    if (status === 4) {
+      const token = str(data.token) || str(body.token);
+      const userid = str(data.userid) || str(data.user_id) || str(body.userid);
+      if (!token || !userid) {
+        return { phase: 'scanned', message: '已扫码，正在换取登录态…', retryAfterMs: 1500 };
+      }
+      const credential: Credential = {
+        cookie: `token=${token}; userid=${userid}; mid=${this.device.mid}; dfid=${this.device.dfid}`,
+        extra: { token, userid, mid: this.device.mid, dfid: this.device.dfid },
+        updatedAt: this.now(),
+        verifiedAt: this.now()
+      };
+      const account: Account = {
+        id: `kugou:${userid}`,
+        provider: 'kugou',
+        name: `酷狗 ${userid}`,
+        userId: userid,
+        avatarUrl: '',
+        createdAt: this.now(),
+        lastLoginAt: this.now()
+      };
+      this.lastCredential = credential;
+      this.current = null;
+      this.logger.info('[acc] 酷狗 App 扫码确认', { userid });
+      return { phase: 'confirmed', message: `已登录：酷狗 ${userid}`, credential, account };
+    }
+
+    if (status === 0) {
+      this.current = null;
+      throw new AccountError('E_QR_EXPIRED', '酷狗音乐：二维码已失效，请重新获取。');
+    }
+    if (status === 2 || status === 3) {
+      if (!this.scannedAt) this.scannedAt = this.now();
+      if (this.now() - this.scannedAt > 60_000) {
+        this.current = null;
+        throw new AccountError('E_LOGIN_TIMEOUT', '酷狗音乐：手机上一直没确认，二维码已作废。', {
+          hint: '重新扫一次，并在手机上点确认。'
+        });
+      }
+      return { phase: 'scanned', message: '已扫码，请在手机上确认', retryAfterMs: 1500 };
+    }
+    return { phase: 'waiting', message: '请用手机酷狗 App 扫一扫', retryAfterMs: 2000 };
+  }
+
+  private async cancel(): Promise<void> {
+    this.current = null;
+    this.scannedAt = 0;
+  }
+
+  /** 凭据校验：token/userid 还在就认为有效（昵称接口不公开，名字用 uid） */
+  async verify(credential: Credential): Promise<Account> {
+    const userid = str(credential.extra.userid) || /(?:^|;\s*)userid=([^;]+)/.exec(credential.cookie)?.[1] || '';
+    const token = str(credential.extra.token) || /(?:^|;\s*)token=([^;]+)/.exec(credential.cookie)?.[1] || '';
+    if (!userid || !token) {
+      throw new AccountError('E_AUTH_REQUIRED', '酷狗音乐：登录已失效，请重新扫码。');
+    }
+    return {
+      id: `kugou:${userid}`,
+      provider: 'kugou',
+      name: `酷狗 ${userid}`,
+      userId: userid,
+      avatarUrl: '',
+      createdAt: this.now(),
+      lastLoginAt: this.now()
+    };
+  }
+
+  /* ---------------- 取流 ---------------- */
+
+  private async fetchAudio(ctx: AudioFetchContext): Promise<AudioAttempt> {
+    if (!this.upstreamBase) {
+      throw new AccountError('E_NOT_IMPLEMENTED', '酷狗音乐：尚未接入合规上游，无法取流。', {
+        hint: '请在设置中填写自建网关地址'
+      });
+    }
+    const qs = new URLSearchParams({ hash: ctx.songId, quality: QUALITY_PARAM[ctx.quality] });
+    if (ctx.albumId) qs.set('album_id', ctx.albumId);
+    const url = this.upstreamBase.replace(/\/$/, '') + '/song/url?' + qs.toString();
+    const res = await this.transport.getJson<Record<string, unknown>>(url, { headers: { Accept: 'application/json' } });
+    if (res.status === 429) throw classifyUpstream('kugou', { httpStatus: 429, message: 'rate limit' });
+    if (res.status >= 400) throw classifyUpstream('kugou', { httpStatus: res.status, message: 'upstream error' });
+    const body = (res.body ?? {}) as Record<string, unknown>;
+    const data = (body.data ?? body) as Record<string, unknown>;
+    const playUrl = str(data.url);
+    if (!playUrl) {
+      const restriction = (data.restriction ?? {}) as Record<string, unknown>;
+      const hint = str(restriction.hint) || str(restriction.code);
+      const kind = /vip|pay|会员/.test(hint) ? 'vip' : /region|地区/.test(hint) ? 'region' : 'copyright';
+      return { block: { kind, code: hint, message: str(data.message) } };
+    }
+    return { url: playUrl, bitrateKbps: Number(data.bitrate) || 0 };
+  }
+
+  /* ---------------- 工具 ---------------- */
+
+  private signed(params: Record<string, string>): Record<string, string> {
+    const raw = Object.keys(params)
+      .sort()
+      .map(k => `${k}=${params[k]}`)
+      .join('');
+    return { ...params, signature: md5(WEB_SALT + raw + WEB_SALT) };
+  }
+
+  private async get<T>(path: string, params: Record<string, string>) {
+    const url = API + path + '?' + new URLSearchParams(params).toString();
+    const res = await this.transport.getJson<T>(url, {
+      headers: {
+        'User-Agent': UA,
+        Accept: 'application/json, text/plain, */*',
+        clienttime: params.clienttime,
+        mid: params.mid,
+        dfid: params.dfid
+      }
+    });
+    if (res.status === 429) throw classifyUpstream('kugou', { httpStatus: 429, message: 'rate limit' });
+    if (res.status >= 400) {
+      throw new AccountError('E_UPSTREAM_UNAVAILABLE', `酷狗音乐：接口不可用（HTTP ${res.status}）。`, {
+        hint: '稍后重试。'
+      });
+    }
+    return res;
+  }
 }
 
 export { LADDER as KUGOU_LADDER };

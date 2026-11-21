@@ -1,4 +1,5 @@
 'use strict';
+const crypto = require('crypto');
 /* ---------------- 取流：QQ 音乐 / 酷狗 ----------------
  * 只做「拿到可播的直链」，音频本身交给自定义协议代理（带 Referer / 超时）。
  *   - 酷狗：m.kugou.com 的 playInfo 公开接口，按 128k→320k 依次试；
@@ -18,6 +19,72 @@ function fail(code, message) {
 }
 
 /* ---------- 酷狗 ---------- */
+
+/* 客户端签名取链（会员权益走这条）：
+ * signature = md5(salt + 排序后的 k=v 拼接 + salt)；key = md5(hash + salt2 + appid + mid + userid)。
+ * 只在本地拼参数、只读接口，不伪造登录、不绕过任何授权校验。 */
+const KG_WEB_SALT = 'NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt';
+const KG_KEY_SALT = '57ae12eb6890223e355ccfcb74edf70d';
+
+function kgSign(params) {
+  const raw = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('');
+  return crypto.createHash('md5').update(KG_WEB_SALT + raw + KG_WEB_SALT, 'utf8').digest('hex');
+}
+
+function kgCookieField(cookie, name) {
+  const m = new RegExp('(?:^|;\\s*)' + name + '=([^;]*)').exec(String(cookie || ''));
+  return m ? m[1] : '';
+}
+
+/** 用客户端 token 问 trackercdn 要直链；拿不到返回 null（不抛错，交给免费链路兜底） */
+async function kgPrivilegeUrl(cred, hash, qualityKey) {
+  const extra = (cred && cred.extra) || {};
+  const token = extra.token || kgCookieField(cred && cred.cookie, 'token');
+  const userid = extra.userid || kgCookieField(cred && cred.cookie, 'userid');
+  if (!token || !userid) return null;
+  const mid = extra.mid || kgCookieField(cred && cred.cookie, 'mid');
+  const dfid = extra.dfid || kgCookieField(cred && cred.cookie, 'dfid');
+  const appid = '1005';
+  const lower = String(hash).toLowerCase();
+  const params = {
+    dfid: dfid || '-',
+    mid: mid || '',
+    uuid: '-',
+    appid,
+    clientver: '11430',
+    clienttime: String(Math.floor(Date.now() / 1000)),
+    token,
+    userid,
+    hash: lower,
+    album_id: '0',
+    album_audio_id: '0',
+    quality: String(qualityKey),
+    page_id: '151369488',
+    ppage_id: '463467626,350369493,788954147',
+    pid: '2',
+    cmd: '26',
+    key: crypto.createHash('md5').update(lower + KG_KEY_SALT + appid + (mid || '') + userid, 'utf8').digest('hex')
+  };
+  params.signature = kgSign(params);
+  const url = 'https://trackercdn.kugou.com/v5/url?' + new URLSearchParams(params).toString();
+  try {
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': KG_UA,
+        'x-router': 'trackercdn.kugou.com',
+        Accept: 'application/json'
+      }
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const first = Array.isArray(j.url) ? j.url[0] : j.url;
+    const picked = typeof first === 'string' ? first : (first && first.url);
+    if (typeof picked === 'string' && /^https?:\/\//.test(picked)) return picked;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 const KG_QUALITY = [
   { key: '320', label: '320k' },
@@ -43,12 +110,19 @@ async function kgPlayInfo(hash, qualityKey) {
   return { url: String(pick), bitrate: Number(j.bitRate || 0), ext: String(j.extName || 'mp3') };
 }
 
-async function kgResolve(hash, prefer) {
+async function kgResolve(hash, prefer, cred) {
   const h = String(hash || '').toUpperCase();
   if (!/^[0-9A-F]{32}$/.test(h)) throw fail('E_BAD_TRACK', '酷狗曲目 id 不正确');
   const order = prefer === 'standard' ? [...KG_QUALITY].reverse() : KG_QUALITY;
   let lastErr = null;
   for (const q of order) {
+    /* 先问客户端签名通道：付费曲只有这条能给直链；免费曲也走它，失败再回落 playInfo */
+    if (cred) {
+      const signedUrl = await kgPrivilegeUrl(cred, h, q.key);
+      if (signedUrl) {
+        return { url: signedUrl, quality: q.label, headers: { Referer: 'https://www.kugou.com/', 'User-Agent': KG_UA } };
+      }
+    }
     try {
       const r = await kgPlayInfo(h, q.key);
       return { url: r.url, quality: q.label, headers: { Referer: 'https://www.kugou.com/', 'User-Agent': KG_UA } };
