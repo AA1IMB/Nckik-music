@@ -159,10 +159,27 @@ function synthBilTrack(item) {
   };
 }
 
+/* 上游音源（酷狗 kg:<hash> / QQ 音乐 qq:<mid>）的曲目不进本地曲库，
+ * 但它们照样能播：用队列里的元数据现造一条可播行，别再判成「不在曲库里」。 */
+function synthUpTrack(item) {
+  if (!item) return null;
+  const id = String(item.id || '');
+  if (!/^(kg:[0-9A-Fa-f]{32}|qq:[0-9A-Za-z]{8,24})$/.test(id)) return null;
+  return {
+    path: id,
+    title: item.title || item.name || '未知曲目',
+    artist: item.artist || '',
+    duration: Number(item.duration || 0) || 0,
+    codec: id.startsWith('kg:') ? 'MP3' : 'AAC'
+  };
+}
+
 function qTrack(qi) {
   const row = S.q[qi];
   if (!row) return null;
-  if (!row.t) row.t = resolveTrack(row.id) || synthNetTrack(row.item) || synthBilTrack(row.item);
+  if (!row.t) {
+    row.t = resolveTrack(row.id) || synthNetTrack(row.item) || synthBilTrack(row.item) || synthUpTrack(row.item);
+  }
   return row.t;
 }
 
