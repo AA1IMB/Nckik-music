@@ -1,7 +1,7 @@
 /* 统一账号层的公共类型（纯类型，不依赖 electron / node，便于单独编译与自测） */
 
 /** 目前接入的两个平台；新增平台只在此处追加，其余层按 ProviderId 分发 */
-export type ProviderId = 'qq' | 'kugou';
+export type ProviderId = 'qq' | 'kugou' | 'qqapp';
 
 /** 音质档位：与现有 settings.quality 的命名保持一致（标准/较高/极高/无损/高解析） */
 export type QualityId = 'standard' | 'high' | 'lossless' | 'hires';
@@ -186,7 +186,8 @@ export interface Logger {
 
 export const PROVIDER_LABEL: Record<ProviderId, string> = {
   qq: 'QQ 音乐',
-  kugou: '酷狗音乐'
+  kugou: '酷狗音乐',
+  qqapp: 'QQ 音乐（App 扫码）'
 };
 
 export const QUALITY_LABEL: Record<QualityId, string> = {

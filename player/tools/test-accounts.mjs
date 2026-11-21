@@ -452,6 +452,174 @@ const transportStub = { getJson: async () => ({ status: 200, body: {} }), postJs
   );
 }
 
+/* ---------------- §9 QQ 音乐 App 扫码（协议通道） ---------------- */
+
+function fakeMusicu(opts = {}) {
+  const calls = [];
+  const stub = async (_url, body) => {
+    const method = body.req_0.method;
+    calls.push(method);
+    if (method === 'CreateQRCode') {
+      return {
+        status: 200,
+        body: { code: 0, req_0: { code: 0, data: { qrcodeID: 'QID-TEST-1', qrcode: 'data:image/png;base64,AAAA', expiresIn: 900 } } }
+      };
+    }
+    if (method === 'Login') {
+      if (opts.loginCode) return { status: 200, body: { code: 0, req_0: { code: opts.loginCode, data: {} } } };
+      return {
+        status: 200,
+        body: {
+          code: 0,
+          req_0: { code: 0, data: { musickey: 'K'.repeat(48), str_musicid: '1707959004', loginType: 2, nick: '月亮在不在' } }
+        }
+      };
+    }
+    if (method === 'GetLoginUserInfo') {
+      return { status: 200, body: { code: 0, req_0: { code: 0, data: { info: { nick: '月亮在不在' } } } } };
+    }
+    return { status: 200, body: { code: 0, req_0: { code: 0, data: {} } } };
+  };
+  return { calls, transport: { getJson: stub, postJson: stub } };
+}
+
+/** 假 broker：收到 CONNECT 回 CONNACK，收到 SUBSCRIBE 回 SUBACK，之后由测试手动 feed */
+function fakeMqtt() {
+  const sent = [];
+  const st = { sent, closed: false, url: '', handlers: null };
+  st.connect = (url, handlers) => {
+    st.url = url;
+    st.handlers = handlers;
+    setTimeout(() => handlers.onopen?.(), 0);
+    return {
+      send(bytes) {
+        const buf = Buffer.from(bytes);
+        sent.push(buf);
+        if (buf[0] === 0x10) setTimeout(() => handlers.onmessage?.(new Uint8Array([0x20, 3, 0, 0, 0])), 0);
+        if (buf[0] === 0x82) {
+          const m = /management\.qrcode_login\/[A-Za-z0-9_-]+/.exec(buf.toString('latin1'));
+          if (m) st.topic = m[0];
+          setTimeout(() => handlers.onmessage?.(new Uint8Array([0x90, 4, 0, 1, 0, 0])), 0);
+        }
+      },
+      close() {
+        st.closed = true;
+        handlers.onclose?.(1000, 'closed');
+      }
+    };
+  };
+  st.feed = obj => {
+    const topic = Buffer.from(st.topic, 'utf8');
+    const payload = Buffer.from(JSON.stringify(obj), 'utf8');
+    const body = Buffer.concat([Buffer.from([topic.length >> 8, topic.length & 0xff]), topic, Buffer.from([0]), payload]);
+    st.handlers.onmessage?.(new Uint8Array([0x30, ...mqttVarint(body.length), ...body]));
+  };
+  return st;
+}
+
+function mqttVarint(n) {
+  const out = [];
+  let v = n;
+  do {
+    let d = v % 128;
+    v = Math.floor(v / 128);
+    if (v > 0) d |= 0x80;
+    out.push(d);
+  } while (v > 0);
+  return out;
+}
+
+const sleep2 = ms => new Promise(r => setTimeout(r, ms));
+
+{
+  const { QqAppProvider } = require(path.join(dist, 'providers', 'qqapp.js'));
+  const { encodeConnect } = require(path.join(dist, 'mqtt.js'));
+
+  // 1) 编码：CONNECT 里必须带 auth method "pass" 与 qrcodeId 的 user properties
+  const packet = Buffer.from(
+    encodeConnect({
+      clientId: '17000000000001234',
+      authMethod: 'pass',
+      userProperties: [
+        { key: 'tmeAppID', value: 'qqmusic' },
+        { key: 'hashTag', value: 'QID-TEST-1' }
+      ]
+    })
+  );
+  ok(packet[0] === 0x10, 'MQTT CONNECT 报文类型正确');
+  ok(packet.includes(Buffer.from('pass', 'utf8')), 'CONNECT 带认证方式 pass（缺了会被回 0x8C）');
+  ok(packet.includes(Buffer.from('QID-TEST-1', 'utf8')), 'CONNECT 带 qrcodeId 的 user property');
+
+  // 2) 正常路径：出码 → waiting → scanned → cookies → confirmed
+  {
+    const mu = fakeMusicu();
+    const mq = fakeMqtt();
+    const prov = new QqAppProvider({
+      transport: mu.transport,
+      logger,
+      connect: mq.connect,
+      now: () => nowRef.t,
+      readyTimeoutMs: 2000
+    });
+    const started = await prov.login.start();
+    ok(/^data:image\/png/.test(started.qr.image), 'start 返回 data URL 二维码');
+    ok(started.message.includes('QQ 音乐'), 'start 文案指向 QQ 音乐 App');
+    eq(mu.calls[0], 'CreateQRCode', 'start 先调 CreateQRCode');
+
+    const p1 = await prov.login.poll();
+    eq(p1.phase, 'waiting', '刚出码是 waiting');
+
+    mq.feed({ appName: 'QQ音乐', userNick: '月亮在不在', userLogo: 'http://x/a.png' });
+    const p2 = await prov.login.poll();
+    eq(p2.phase, 'scanned', '收到 scanned 推送后变 scanned');
+
+    mq.feed({
+      cookies: {
+        qqmusic_key: { value: 'TOKEN-1' },
+        qqmusic_uin: { value: '1707959004' },
+        qrcode_id: { value: 'QID-TEST-1' }
+      }
+    });
+    await sleep2(30);
+    const p3 = await prov.login.poll();
+    eq(p3.phase, 'confirmed', '收到 cookies 后确认登录');
+    ok(p3.credential && /qm_keyst=K{10}/.test(p3.credential.cookie), '凭据里带 qm_keyst=musickey');
+    eq(p3.credential.extra.uin, '1707959004', '凭据 extra 里带 uin');
+    eq(p3.account && p3.account.name, '月亮在不在', '确认后带回昵称');
+    ok(mq.sent.some(b => b[0] === 0x82), '向 broker 发过 SUBSCRIBE');
+
+    await prov.login.cancel();
+  }
+
+  // 3) 换凭证被拒（104400）：必须落到 failed，而不是静默卡住
+  {
+    const mu = fakeMusicu({ loginCode: 104400 });
+    const mq = fakeMqtt();
+    const prov = new QqAppProvider({ transport: mu.transport, logger, connect: mq.connect, now: () => nowRef.t, readyTimeoutMs: 2000 });
+    await prov.login.start();
+    mq.feed({ cookies: { qqmusic_key: { value: 'T' }, qqmusic_uin: { value: '1707959004' } } });
+    await sleep2(30);
+    const p = await prov.login.poll();
+    eq(p.phase, 'failed', '换凭证被拒时相位是 failed');
+    ok(p.error && typeof p.error.code === 'string' && p.error.code.startsWith('E_'), '失败带明确错误码');
+    ok(/104400|失败/.test(p.error.message), '错误文案说明上游拒绝');
+  }
+
+  // 4) 二维码过期：超过 expiresAt 后相位变 expired，并断开订阅
+  {
+    const mu = fakeMusicu();
+    const mq = fakeMqtt();
+    const t = { v: 1_700_000_000_000 };
+    const prov = new QqAppProvider({ transport: mu.transport, logger, connect: mq.connect, now: () => t.v, readyTimeoutMs: 2000 });
+    await prov.login.start();
+    eq((await prov.login.poll()).phase, 'waiting', '过期前是 waiting');
+    t.v += 15 * 60 * 1000;
+    const p = await prov.login.poll();
+    eq(p.phase, 'expired', '超时后变 expired');
+    eq(p.error && p.error.code, 'E_QR_EXPIRED', '过期给 E_QR_EXPIRED');
+  }
+}
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

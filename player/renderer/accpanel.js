@@ -6,10 +6,11 @@
  * 这里不再复制一份，避免两处文案与两种真相。
  */
 (() => {
-  const PROVIDERS = ['qq', 'kugou'];
-  const LABEL = { qq: 'QQ 音乐', kugou: '酷狗音乐' };
+  const PROVIDERS = ['qq', 'qqapp', 'kugou'];
+  const LABEL = { qq: 'QQ 音乐', qqapp: 'QQ 音乐 App', kugou: '酷狗音乐' };
   const HELP = {
     qq: '用手机 QQ 扫一扫（官方登录页的「扫码登录」页签），在手机上确认后即登录 QQ 音乐；二维码约 3 分钟有效，失效后点「重新获取」。',
+    qqapp: '用手机 QQ 音乐 App 的「扫一扫」扫这个码，在手机上确认后即登录；二维码约 15 分钟有效，失效后点「重新获取」。',
     kugou: '用手机酷狗 App 扫一扫，在手机上确认后即登录；二维码约 3 分钟有效，失效后点「重新获取」。'
   };
   const PHASE = {

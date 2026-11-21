@@ -1311,7 +1311,8 @@ function setupAccounts() {
         warn: (m, d) => console.warn('[acc]', m, d || '')
       },
       // 合规上游：没配就只做登录，取流会明确报 E_NOT_IMPLEMENTED
-      upstream: { qq: process.env.NCKK_QQ_UPSTREAM || '', kugou: process.env.NCKK_KUGOU_UPSTREAM || '' }
+      upstream: { qq: process.env.NCKK_QQ_UPSTREAM || '', kugou: process.env.NCKK_KUGOU_UPSTREAM || '',
+      qqapp: process.env.NCKK_QQAPP_UPSTREAM || '' }
     });
     acc.registerAccountsIpc({
       ipcMain,

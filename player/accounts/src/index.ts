@@ -6,6 +6,9 @@ import { AccountManager } from './accountManager';
 import { AccountError, wrapUnknown } from './errors';
 import { QqProvider } from './providers/qq';
 import { KugouProvider } from './providers/kugou';
+import { QqAppProvider } from './providers/qqapp';
+import { createWsConnect } from './wsConnect';
+import type { MqttConnect } from './mqtt';
 import type { Provider } from './providers/base';
 import {
   ACC,
@@ -34,6 +37,8 @@ export interface AccountsModuleOptions {
   logger: Logger;
   /** 合规上游地址（自建网关 / 官方开放平台代理）。缺省则该平台只做登录，不做取流 */
   upstream?: Partial<Record<ProviderId, string>>;
+  /** 单测注入假的 MQTT 连接；主进程不传，走 ws 实现 */
+  mqttConnect?: MqttConnect;
   now?: () => number;
   fs?: FsLike;
 }
@@ -70,6 +75,14 @@ export function createAccountsModule(opts: AccountsModuleOptions): AccountsModul
       logger: opts.logger,
       now,
       upstreamBase: opts.upstream?.kugou
+    }),
+    // QQ 音乐 App 扫码：不需要隐藏窗口，走 musicu 协议 + MQTT 推送
+    qqapp: new QqAppProvider({
+      transport: opts.transport,
+      logger: opts.logger,
+      connect: opts.mqttConnect ?? createWsConnect(),
+      now,
+      upstreamBase: opts.upstream?.qqapp
     })
   };
 
@@ -80,7 +93,7 @@ export function createAccountsModule(opts: AccountsModuleOptions): AccountsModul
     store,
     providers,
     async dispose() {
-      await Promise.all([manager.cancelLogin('qq'), manager.cancelLogin('kugou')]);
+      await Promise.all([manager.cancelLogin('qq'), manager.cancelLogin('kugou'), manager.cancelLogin('qqapp')]);
     }
   };
 }

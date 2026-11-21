@@ -309,3 +309,53 @@ const out = await this.host.evalInPage(KgUser.QRCodeLogin(...));  // ← 页面�
 | `PageProviderConfig.clearSession`（默认 true，酷狗设 false） | 酷狗分区不再每次登录都清空 —— 已经扫过的 `token/userid` 会留着，重启后第一拍 poll 即可恢复登录态；QQ 仍清空（避免快捷登录旧账号） |
 
 `tsc` 0 error、`tools/test-accounts.mjs` 49/49。
+
+## 十八、QQ 音乐 App 扫码（协议通道，v0.9.0）
+
+前两版给 QQ 音乐走的是「打开 y.qq.com → 点三层页签 → 读跨域子帧里的码」，扫的是**网页版**的码
+（QQ 互联 / 微信）。folia-major 走的是客户端协议：二维码由 QQ 音乐 App 自己的登录服务签发，
+手机用「QQ 音乐 App → 扫一扫」扫。这一版把那条通道也接上了，作为并列的第三个来源
+（`provider = 'qqapp'`），网页通道保持不动。
+
+### 18.1 协议四步（全部实测通过）
+
+| 步骤 | 请求 | 关键点 |
+| --- | --- | --- |
+| 出码 | `POST https://u.y.qq.com/cgi-bin/musicu.fcg`，`req_0 = {module:'music.login.LoginServer', method:'CreateQRCode', param:{tmeAppID:'qqmusic', ct:11, cv:14090008}}` | comm 带上 `ct/cv/v/chid/tmeAppID`；不需要签名、不需要 QIMEI。返回 `qrcodeID` + `qrcode`（data URL）+ `expiresIn: 900` |
+| 收推送 | `wss://mu.y.qq.com/ws/handshake`，MQTT 5，订阅 `management.qrcode_login/<qrcodeID>` | CONNECT 属性必须含 **Auth Method = `pass`**（漏了回 `0x8C Bad authentication method`）与 `tmeAppID/business/hashTag/clientTag/userID`；SUBSCRIBE 属性 `authorization=tmelogin, pubsub=unicast` |
+| 换凭据 | 同 musicu：`module:'music.login.LoginServer', method:'Login'`，`param {musicid:<数字>, qrCodeID, token}` | `token` 是推送里的 `qqmusic_key`（只活 300 秒）；comm 必须覆盖 **`tmeLoginType: 6`**，`musicid` 必须给**数字**（字符串回 `10006`、类型给 2 回 `1000`、不覆盖回 `104400`）→ 得 `musickey`（159 字符，3 天） |
+| 校验 | `module:'music.UserInfo.userInfoServer', method:'GetLoginUserInfo'`，comm `{qq, authst: musickey, tmeLoginType: 2}`，Cookie `uin=…; qqmusic_uin=…; qm_keyst=…; qqmusic_key=…` | 模块名必须是 `userInfoServer`，`userInfo` 恒回 `500003`；`data.info.nick` 就是昵称 |
+
+### 18.2 代码结构
+
+| 文件 | 作用 |
+| --- | --- |
+| `accounts/src/mqtt.ts` | 最小 MQTT 5 客户端：CONNECT / SUBSCRIBE / PINGREQ / DISCONNECT + PUBLISH 解析；`ready` 在 SUBACK 才兑现；socket 是鸭子类型，主进程传 `ws`、单测传内存假实现 |
+| `accounts/src/wsConnect.ts` | 把 `ws` 包成 `MqttConnect`（Electron 33 = Node 20，主进程没有全局 WebSocket） |
+| `accounts/src/providers/qqapp.ts` | 上面四步的状态机：`start()` 出码 + 订阅 → `poll()` 报 `waiting/scanned/confirmed/expired/failed` → 确认那一拍换凭据并校验昵称 |
+| `accounts/src/index.ts` | `providers.qqapp` 注册；`mqttConnect` 可注入（单测用） |
+| `renderer/index.html` / `accpanel.js` | 设置抽屉第三段「QQ 音乐 App」，与另两个平台共用同一套二维码 UI |
+
+### 18.3 状态与错误
+
+| 情形 | 相位 / 错误码 |
+| --- | --- |
+| 刚出码、等手机扫 | `waiting`，`retryAfterMs 2000` |
+| 手机已扫、等确认（推送 `scanned`，带 `userNick`） | `scanned` |
+| 确认并换到 `musickey`、校验通过 | `confirmed` + 账号（昵称来自 `GetLoginUserInfo`） |
+| 超过二维码有效期（900 秒） | `expired` + `E_QR_EXPIRED` |
+| 推送通道连不上 / 订阅被拒 | `E_UPSTREAM_UNAVAILABLE`（文案带底层原因） |
+| 换凭证被平台拒（`104400` 等） | `failed` + 上游错误码（`classifyUpstream` 归一） |
+
+### 18.4 验证
+
+- 协议层：`.tmp/probe-qqmqtt.mjs`（出码 + 订阅）、`.tmp/probe-qqexchange2.js`（换凭据的三种 comm 对照：`tme6` 成功、`tme2` 回 `1000`、字符串 id 回 `10006`）、`.tmp/probe-qqprofile.js`（`GetLoginUserInfo` 取到昵称）。
+- 端到端：真机扫码 → `scanned` → `cookies` → `musickey` → 昵称「月亮在不在」，全链路一次跑通。
+- 自测：`node player/tools/test-accounts.mjs` **68/68**（新增 19 条：CONNECT 必须带 `pass`、出码/订阅、scanned、cookies→confirmed 及凭据断言、换凭证被拒、过期）。
+- 界面：`.tmp/diag-acc3.js` 在真实主进程里点开「QQ 音乐 App」→ 150×150 码渲染进面板、`accStatus` 返回 `phase waiting`，截图 `player/demo/shot-acc-qqapp.png`。
+
+### 18.5 依赖与边界
+
+- 新增运行时依赖 `ws@8`（仅主进程用）。
+- 仍然**不做**任何签名/逆向：二维码由平台签发，登录由用户在手机 App 上确认；取流与另两条通道一样要求配置合规上游（`NCKK_QQAPP_UPSTREAM`），未配置时面板显示「未配置」，只做登录与账号管理。
+- 已知边界：手机端「扫码后确认」无法自动化，必须真人操作一次；二维码 15 分钟有效，过期后点「重新获取」。
