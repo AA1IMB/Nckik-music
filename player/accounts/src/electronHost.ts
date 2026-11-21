@@ -334,6 +334,16 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
       });
       return () => undefined;
     },
+    async writeCookies(pairs, domain) {
+      const sess = win ? win.webContents.session : electron().session.fromPartition(partition);
+      const url = 'https://' + domain.replace(/^\./, '') + '/';
+      for (const [name, value] of Object.entries(pairs)) {
+        if (!name || !value) continue;
+        try {
+          await sess.cookies.set({ url, domain, path: '/', name, value, secure: true, httpOnly: false, expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 3600 });
+        } catch { /* 单个 cookie 写失败不影响其它 */ }
+      }
+    },
     async evalInPage(code) {
       if (!win || win.isDestroyed()) return null;
       return win.webContents.executeJavaScript(code, true).catch(() => null);

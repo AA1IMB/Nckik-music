@@ -92,6 +92,12 @@ export class KugouProvider extends PageLoginProvider {
 
     if (this.watch.token && this.watch.exchanged !== this.watch.token) {
       this.watch.exchanged = this.watch.token;
+      // 兜底：不等页面换会话，直接把 token/userid 按官方同样的形态写进分区。
+      // 页面自己换成功时这是幂等的；换失败时这就是唯一的登录态来源。
+      if (this.watch.userId && this.host.writeCookies) {
+        await this.host.writeCookies({ token: this.watch.token, userid: this.watch.userId }, '.kugou.com');
+        this.logger.info('[acc] 酷狗直接写入 token', { userId: this.watch.userId });
+      }
       const args = JSON.stringify([1014, this.watch.userId || '0', this.watch.token]);
       const code = `new Promise(r => {
         const done = v => { try { r(String(v).slice(0, 120)); } catch { r('cb-error'); } };

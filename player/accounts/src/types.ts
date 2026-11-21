@@ -165,6 +165,12 @@ export interface LoginWindowHost {
   tapJson?(patterns: readonly string[], onJson: (json: unknown) => void): () => void;
   /** 在登录页主框架里执行一段脚本（只用于调用页面自己已有的函数） */
   evalInPage?(code: string): Promise<unknown>;
+  /**
+   * 把旁听到的凭据写回这个分区的 cookie。
+   * 酷狗页面在隐藏窗口里偶尔不肯自己换会话，此时 `data.token/userid` 已经是登录凭据，
+   * 我们直接按官方写入的同样形态落到 `.kugou.com`，后续读取/校验都走同一条路。
+   */
+  writeCookies?(cookies: Record<string, string>, domain: string): Promise<void>;
   close(): Promise<void>;
   /** 订阅 cookie 变化；返回退订函数。凭据靠它「第一时间」拿到，避免轮询拍点错过 */
   onCookiesChanged(cb: (names: Record<string, string>) => void): () => void;

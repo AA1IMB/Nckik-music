@@ -270,3 +270,17 @@ if (this.cfg.requiredCookieNames.every(n => !!cookies[n])) { ... confirmed ... }
 
 验证：`tsc` 0 error；`tools/test-accounts.mjs` 49/49；旁听实测每 1s 拿到一条
 `{"status":1,"ds":1,"hasToken":false}`（未扫码时状态 1，符合预期），证明 CDP 旁听通道可用。
+
+## 十六、酷狗「已扫码」仍不跳登录：直接采用旁听到的 token（2026-11-21）
+
+上一版把收尾交给页面自己的 `KgUser.QRCodeLogin`，真机上仍有概率不生效（页面在隐藏窗口里不写 cookie）。
+改为**读到即登录**，不再依赖页面执行结果：
+
+1. `host.writeCookies(pairs, domain)`：按官方同样的形态（`.kugou.com`、`path=/`、30 天）把 cookie 写进分区。
+2. `KugouProvider.poll()` 在 `data.status === 4` 且拿到 `token` / `userid` 时：
+   先 `writeCookies({ token, userid }, '.kugou.com')`，再跑一次常规 `poll()` ——
+   `requiredCookieNames: ['token','userid']` 命中、`pickExtra` 从 `userid` 取到账号标识，即 `confirmed`。
+3. 页面自己换会话成功的场景下，这一步是幂等的（写的是同一份值）。
+
+验证：`host.writeCookies({token:'FAKE_TOKEN_123', userid:'987654321'}, '.kugou.com')` 后
+`readCookies(['token','userid'])` 立刻读回两值，分区里落到 `.kugou.com`；`tsc` 0 error、自测 49/49。
