@@ -1282,6 +1282,49 @@ app.on('second-instance', () => {
   win.focus();
 });
 
+/* ---------------- QQ / 酷狗 账号层 ----------------
+ * 代码在 player/accounts（TypeScript），这里只做接线；判定逻辑一律在主进程模块里。
+ * dist 未编译时注册一组兜底 handler：界面会收到「需要先编译」的明确原因，
+ * 而不是点了按钮没有任何反应。
+ */
+let accAccounts = null;
+function setupAccounts() {
+  const channels = ['acc:begin', 'acc:poll', 'acc:refresh', 'acc:cancel', 'acc:status',
+    'acc:list', 'acc:current', 'acc:switch', 'acc:logout', 'acc:audio', 'acc:invalidate'];
+  const fallback = () => ({
+    ok: false,
+    error: {
+      code: 'E_NOT_IMPLEMENTED',
+      message: '账号模块未编译：请先执行 cd player && npx tsc -p tsconfig.accounts.json'
+    }
+  });
+  try {
+    const acc = require('./accounts/dist/src');
+    const host = require('./accounts/dist/src/electronHost');
+    accAccounts = acc.createAccountsModule({
+      dataDir: app.getPath('userData'),
+      cipher: host.safeStorageCipher(),
+      host: host.createElectronHost(),
+      transport: host.netTransport(),
+      logger: {
+        info: (m, d) => console.log('[acc]', m, d || ''),
+        warn: (m, d) => console.warn('[acc]', m, d || '')
+      },
+      // 合规上游：没配就只做登录，取流会明确报 E_NOT_IMPLEMENTED
+      upstream: { qq: process.env.NCKK_QQ_UPSTREAM || '', kugou: process.env.NCKK_KUGOU_UPSTREAM || '' }
+    });
+    acc.registerAccountsIpc({
+      ipcMain,
+      module: accAccounts,
+      sendEvent: (ch, p) => { if (win && !win.isDestroyed()) win.webContents.send(ch, p); }
+    });
+    console.log('[acc] accounts ready');
+  } catch (e) {
+    console.warn('[acc] 账号模块未启用：', (e && e.message) || e);
+    for (const ch of channels) ipcMain.handle(ch, fallback);
+  }
+}
+
 app.whenReady().then(() => {
   if (!gotLock) return;
   migrateOldUserData();             // 改名后第一次启动：把老目录里的曲库/设置/凭证接过来
@@ -1298,6 +1341,7 @@ app.whenReady().then(() => {
     sessdata: bil.sessdataShape()
   });
   ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
+  setupAccounts();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 }).catch(e => logCrash('whenReady', e));

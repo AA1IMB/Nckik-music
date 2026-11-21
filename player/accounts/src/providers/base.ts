@@ -57,6 +57,11 @@ export interface PageProviderConfig {
   cookieNames: readonly string[];
   /** 判定「已登录」必须同时具备的名字 */
   requiredCookieNames: readonly string[];
+  /**
+   * 页面上必须先点一下才会出码时的入口文案（例如 QQ 音乐首页的「登录」）。
+   * 只做「点这个可见按钮」，不注入任何伪造参数。
+   */
+  clickText?: string;
   qrTimeoutMs: number;
   qrTtlMs: number;
   expiredPatterns: readonly RegExp[];
@@ -109,10 +114,36 @@ export class PageLoginProvider implements Provider {
   /* ---------------- 登录 ---------------- */
 
   protected async start(): Promise<LoginStartResult> {
-    await this.host.open(this.cfg.loginUrl, {
-      partition: this.cfg.partition,
-      size: { width: 960, height: 720 }
-    });
+    // 打开登录页并等二维码。酷狗登录页在「全新分区」的首次冷启动会直接 ERR_FAILED(-2)，
+    // 但同一分区再开一次就正常（服务端要先种几个匿名 cookie），所以这里做一次静默重试。
+    const openOnce = async (): Promise<string | null> => {
+      try {
+        await this.host.open(this.cfg.loginUrl, {
+          clickText: this.cfg.clickText,
+          partition: this.cfg.partition,
+          size: { width: 960, height: 720 }
+        });
+      } catch (err) {
+        this.logger.warn('[acc] 打开登录页失败，将重试一次', { provider: this.id, error: (err as Error).message });
+        return null;
+      }
+      const settle = this.now() + 4000;
+      while (this.now() < settle) {
+        const image = await this.host.readQrImage();
+        if (image && isUsableQr(image)) return image;
+        await sleep(300);
+      }
+      return null;
+    };
+
+    let first = await openOnce();
+    if (!first) {
+      await this.host.close().catch(() => undefined);
+      await sleep(900);
+      first = await openOnce();
+    }
+    if (first) return { qr: { image: first, expiresAt: this.now() + this.cfg.qrTtlMs }, message: '请用手机 App 扫码' };
+
     const deadline = this.now() + this.cfg.qrTimeoutMs;
     while (this.now() < deadline) {
       const image = await this.host.readQrImage();

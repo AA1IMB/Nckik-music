@@ -160,3 +160,26 @@ powershell -ExecutionPolicy Bypass -File .\启动开发版.ps1 -Probe all
 3. **风控**：轮询 2s、限流立即停、单账号单会话，均为降低触发面；仍可能因异地登录被要求验证码，届时按 `E_RISK_CONTROL` 提示用户改用扫码。
 4. **平台差异**：QQ 的 `qm_keyst` 与旧名 `qqmusic_key` 并存，酷狗要求 `token`+`userid` 双命中；新增平台只需再写一个 `providers/*.ts` 与 `CAPS`。
 5. **未验证项**：「QQ 登录弹层在 1280×800 下二维码是否完整可见」「酷狗扫码后 cookie 写入延迟是否超过 60s」为**推测**，需真机扫一次确认（本项目 B 站扫码即栽在「占位图/静区」这类肉眼可见但自动化测不到的细节上）。
+
+## 十一、已接入主程序（2026-11-21）
+
+按用户要求「接进 main.js + 设置抽屉」后落地，改动如下（除 `accounts/` 外的既有文件只加不改语义）：
+
+| 文件 | 改动 |
+| --- | --- |
+| `player/main.js` | 新增 `setupAccounts()`：`require('./accounts/dist/src')` + `electronHost`，装配 `createAccountsModule`（`dataDir` 用 `app.getPath('userData')`，`cipher` 用 `safeStorage`，`upstream` 读 `NCKK_QQ_UPSTREAM` / `NCKK_KUGOU_UPSTREAM`），`registerAccountsIpc` 注册 11 个通道；未编译时注册兜底 handler，返回 `E_NOT_IMPLEMENTED` 并提示编译命令 |
+| `player/preload.js` | 追加 `accBegin/accPoll/accRefresh/accCancel/accStatus/accList/accCurrent/accSwitch/accLogout/accAudio` 与 `onAccEvent` |
+| `player/renderer/index.html` | 设置抽屉新增「QQ 音乐 / 酷狗音乐」分段、扫码登录/取消/重新获取、二维码框、账号列表、取流状态行；引入 `accpanel.js` |
+| `player/renderer/accpanel.js` | 新建（纯 JS，独立于 TS 编译产物）：`begin/poll/schedule` 驱动轮询，`paintQr` 按 `retryAfterMs` 定时器推进，过期/失败给遮罩与「重新获取」，账号列表支持切换与退出 |
+| `player/renderer/app.css` | 账号列表样式（复用现有 `--card/--ac/--fg*` 变量） |
+| `accounts/src/electronHost.ts` | ①支持 `clickText`（QQ 首页要先点「登录」）；②`readQrImage` 遍历全部子帧，跨域子帧里的普通 `<img>` 用 `session.fetch` 转 data URL，主框架远程图跳过（首页封面会误判）；③每次 `executeJavaScript`/`fetch` 都有超时；④**UA 默认不覆盖**（沿用 Electron UA） |
+| `accounts/src/providers/{qq,kugou}.ts`、`base.ts` | QQ `clickText: '登录'`；酷狗登录页去掉 `callback` 参数（带它必 `ERR_FAILED(-2)`）；`start()` 增加「首次打开失败/4s 内无码 → 关窗重开一次」的静默重试（酷狗冷启动偶发 `ERR_FAILED(-2)`） |
+
+**实测证据**：
+
+- QQ 音乐：`y.qq.com` 首页点「登录」后，二维码在跨域子帧 `open.weixin.qq.com/connect/qrconnect?appid=wx48db31d50e334801` 里（`graph.qq.com` 那条「QQ 互联」路子只有头像、不出码）。读到的码长 62–64KB、470×470、带静区，`player/demo/shot-acc-qq.png`。**即「QQ 音乐」这一路实际是微信扫码**（官方登录页如此），帮助文案已如实写明。
+- 酷狗音乐：`login-user.kugou.com/login/?appid=1014` 页面自己出码（实测拿到 423–470px、`qrLen 64447`）。注意酷狗登录页对同一出口 IP 有频控，短时间反复打开会返回 `ERR_FAILED(-2)`（已加一次静默重开 + 面板「重新获取」兜底）。
+- 端到端（`.tmp/diag-acc-e2e.js`，向 `persist:acc-qq` 注入假 `qm_keyst/uin` 模拟「手机确认」）：`begin 3058ms → waiting`、`poll after cookie → confirmed（uid 1234567890）`、`accounts.bin 1285B 落盘`、`list 2 条`。
+- 既有回归：`npx tsc -p tsconfig.accounts.json` 0 error；`node tools/test-accounts.mjs` 40/40。
+
+**仍有限制**：①手机「确认」这一拍无法自动化，需真实扫一次；②取流需配置 `NCKK_QQ_UPSTREAM` / `NCKK_KUGOU_UPSTREAM`（未配置时面板显示「未配置」，只做登录与账号管理）；③酷狗冷启动偶发 `ERR_FAILED(-2)` 已有一次静默重试，若仍失败点「重新获取」。

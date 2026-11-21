@@ -38,6 +38,8 @@ export const QQ_CONFIG: PageProviderConfig = {
   label: 'QQ 音乐',
   loginUrl: 'https://y.qq.com/',
   partition: 'persist:acc-qq',
+  // 首页要点一下「登录」才会挂出登录弹层（里面有微信 / QQ 两路二维码）
+  clickText: '登录',
   // 只读这些名字；qqmusic_key 是老版名，qm_keyst 是新版名，二者出现其一即算登录
   cookieNames: ['qm_keyst', 'qqmusic_key', 'p_skey', 'skey', 'uin', 'wxuin', 'psrf_qqunionid', 'psrf_musickey_createtime'],
   requiredCookieNames: [],

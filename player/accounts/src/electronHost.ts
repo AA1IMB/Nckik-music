@@ -94,6 +94,15 @@ export function netTransport(userAgent?: string): Transport {
   };
 }
 
+
+/** 带超时的等待：读二维码这一段不能把整个登录流程卡死 */
+function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    p.catch(() => fallback),
+    new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms))
+  ]);
+}
+
 /* ---------------- BrowserWindow → LoginWindowHost ---------------- */
 
 export interface ElectronHostOptions {
@@ -111,9 +120,9 @@ export interface ElectronHostOptions {
  *   - 读 cookie 用 `get({})` 全量再按名字白名单挑，绝不按 domain 过滤（子域会漏）。
  */
 export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowHost & { userAgent: string } {
-  const ua =
-    opts.userAgent ??
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  // 默认不覆盖 UA：沿用 Electron 自带 UA（与真实浏览器一致、且酷狗登录页对其更宽容）；
+  // 需要伪装时由调用方显式传 userAgent。
+  const ua = opts.userAgent ?? '';
   let win: any = null;
   let partition = '';
   let watchers: Array<() => void> = [];
@@ -141,7 +150,7 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
           backgroundThrottling: false
         }
       });
-      win.webContents.setUserAgent(ua);
+      if (ua) win.webContents.setUserAgent(ua);
       // 回调页就地打开：cookie 必须落在我们正在读的那个会话上
       win.webContents.setWindowOpenHandler(({ url: target }: { url: string }) => {
         if (/^https?:/i.test(target)) win.loadURL(target).catch(() => {});
@@ -149,6 +158,26 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
       });
       await win.loadURL(url);
       await sleep(opts.settleMs ?? 600);
+      // 有的站点要用户先点「登录」才挂出二维码的 iframe（QQ 音乐首页即如此）。
+      // 这里只点页面上本来就有、用户可见的那个按钮，不注入任何伪造参数。
+      if (o.clickText) {
+        const text = JSON.stringify(o.clickText);
+        const clicked = await win.webContents
+          .executeJavaScript(
+            `(() => {
+              const want = ${text};
+              const els = Array.from(document.querySelectorAll('a,button,div,span')).filter(
+                (e) => (e.innerText || '').trim() === want && e.offsetParent
+              );
+              if (!els.length) return false;
+              els[els.length - 1].click();
+              return true;
+            })()`,
+            true
+          )
+          .catch(() => false);
+        if (clicked) await sleep(1600);
+      }
     },
     async readCookies(names) {
       const sess = win ? win.webContents.session : electron().session.fromPartition(partition);
@@ -162,18 +191,63 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
       return out;
     },
     async readQrImage() {
-      const script = `(() => {
-        const cs = document.querySelectorAll('canvas');
-        for (const c of cs) { if (c.width >= 120 && c.height >= 120) { try { return c.toDataURL('image/png'); } catch (e) {} } }
-        const imgs = Array.from(document.images).filter(i => i.naturalWidth >= 120 && i.naturalHeight >= 120);
-        const hit = imgs.sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)[0];
-        return hit ? hit.src : null;
-      })()`;
-      try {
-        return (await requireWin().webContents.executeJavaScript(script, true)) as string | null;
-      } catch {
+      const w = requireWin();
+      const wc = w.webContents;
+      const frames: any[] = [];
+      const walk = (f: any) => {
+        if (!f) return;
+        frames.push(f);
+        for (const c of f.frames || []) walk(c);
+      };
+      walk(wc.mainFrame);
+
+      const PICK = `(() => {
+        for (const c of document.querySelectorAll('canvas')) {
+          if (c.width >= 120 && c.height >= 120) {
+            try { const d = c.toDataURL('image/png'); if (d.length >= 1500) return { kind: 'data', src: d }; } catch (e) {}
+          }
+        }
+        const imgs = Array.from(document.images)
+          .filter((i) => i.naturalWidth >= 150 && i.naturalHeight >= 150)
+          .sort((a, b) => b.naturalWidth - a.naturalWidth);
+        for (const i of imgs) {
+          const src = i.currentSrc || i.src || '';
+          if (src.startsWith('data:image') && src.length >= 1500) return { kind: 'data', src };
+          if (/^https?:/i.test(src) && !src.split('?')[0].toLowerCase().endsWith('.svg')) {
+            return { kind: 'remote', src };
+          }
+        }
         return null;
+      })()`;
+
+      for (let i = 0; i < frames.length; i++) {
+        const f = frames[i];
+        const isMain = i === 0;
+        const url = (f.url || '') as string;
+        if (!url && isMain) continue;
+        let cand: { kind: string; src: string } | null = null;
+        try {
+          cand = await within(f.executeJavaScript(PICK, true) as Promise<{ kind: string; src: string } | null>, 2_500, null);
+        } catch {
+          continue;
+        }
+        if (!cand) continue;
+        if (cand.kind === 'data') return cand.src;
+        // 主窗口里的大图通常是封面，不当作二维码
+        if (isMain) continue;
+        // 二维码常常是普通 PNG 地址（微信 / QQ）：用同一个会话取字节，转成 data URL 交给渲染层
+        try {
+          const res = await within<any>(wc.session.fetch(cand.src), 4_000, null);
+          if (!res || !res.ok) continue;
+          const buf = Buffer.from(await within<ArrayBuffer>(res.arrayBuffer(), 4_000, new ArrayBuffer(0)));
+          if (buf.length < 400) continue;
+          const mime = String(res.headers.get('content-type') || 'image/png').split(';')[0];
+          return `data:${mime};base64,${buf.toString('base64')}`;
+        } catch {
+          continue;
+        }
       }
+      return null;
     },
     async readPageText() {
       try {

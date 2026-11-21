@@ -265,6 +265,31 @@
       <div class="line"><div class="k">音源适配<small>搜索与取流走网页接口（需 WBI 签名），非正式契约；只取音频轨道</small></div><div class="v dim">已接入</div></div>
     </div>
 
+    <div class="lbl">QQ 音乐 / 酷狗音乐</div>
+    <div class="group">
+      <div class="line"><div class="k">登录状态<small>手机 App 扫码；凭据用系统密钥库加密，只存在本机</small></div><div class="v" id="accAuthState">未登录</div></div>
+      <div class="seg" id="accSeg"><b data-p="qq">QQ 音乐</b><b data-p="kugou">酷狗音乐</b></div>
+      <div class="line col">
+        <div class="authrow">
+          <button class="ghost" id="btnAccQr">扫码登录</button>
+          <button class="ghost mini" id="btnAccCancel">取消</button>
+        </div>
+      </div>
+      <div class="qrwrap" id="accQrWrap">
+        <div class="qrbox" id="accQrBox">
+          <div class="qrimg" id="accQrShot"></div>
+          <div class="qrmask" id="accQrMask"></div>
+        </div>
+        <div class="qrstate" id="accQrState">正在获取二维码…</div>
+        <div class="qrhelp" id="accQrHelp">手机打开对应 App → 扫一扫。二维码约 3 分钟有效，失效后点「重新获取」。</div>
+        <div class="qracts">
+          <button class="ghost" id="btnAccRetry">重新获取</button>
+        </div>
+      </div>
+      <div class="line col"><div class="acc-list" id="accList"></div></div>
+      <div class="line"><div class="k">取流<small>需要配置合规上游网关；未配置时只做登录与账号管理</small></div><div class="v dim" id="accUp">未配置</div></div>
+    </div>
+
     <div class="lbl">音频输出</div>
     <div class="group">
       <div class="line"><div class="k">输出设备</div><div class="v" id="setDev">默认设备</div></div>
@@ -310,6 +335,7 @@
 <div class="scrim" id="scrim"></div>
 <div class="toast" id="toast"></div>
 
+<script src="accpanel.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

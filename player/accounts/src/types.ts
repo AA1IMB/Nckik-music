@@ -138,7 +138,10 @@ export interface Cipher {
 /** 隐藏登录窗口：主进程用 BrowserWindow 实现（官方登录页 + 读 cookie），测试用假实现 */
 export interface LoginWindowHost {
   /** 打开官方登录页并等页面稳定 */
-  open(url: string, opts: { partition: string; size?: { width: number; height: number } }): Promise<void>;
+  open(
+    url: string,
+    opts: { partition: string; size?: { width: number; height: number }; clickText?: string }
+  ): Promise<void>;
   /** 读到指定名字的 cookie（值可能为空串，表示尚未写入） */
   readCookies(names: readonly string[]): Promise<Record<string, string>>;
   /** 读页面上的二维码图（canvas.toDataURL 或 img.src）；没有则 null */
