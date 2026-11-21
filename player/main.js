@@ -1525,7 +1525,8 @@ ipcMain.handle('acc:meta', async (_e, key, albumMid) => {
 
 ipcMain.handle('acc:playlists', async (_e, arg) => {
   const provider = (arg && arg.provider) || '';
-  const cred = credOf(provider);
+  /* 酷狗歌单接口只认 App 体系 token：配了上游网关就用网关那份（见 kugouCred） */
+  const cred = provider === 'kugou' ? kugouCred() : credOf(provider);
   if (!cred) return { ok: false, error: { code: 'E_AUTH_REQUIRED', message: '还没有登录该音源' } };
   try {
     let items;
@@ -1542,7 +1543,7 @@ ipcMain.handle('acc:playlists', async (_e, arg) => {
  * 真去取一次链，能取到才算有会员（见 upstream-library.kgVip）。 */
 ipcMain.handle('acc:vip', async () => {
   try {
-    const cred = credOf('kugou');
+    const cred = kugouCred();
     if (!cred) return { ok: false, error: { code: 'E_AUTH_REQUIRED', message: '还没有登录酷狗音乐' } };
     /* 账号字段在 extra 里（userid/dfid），cookie 是单独一段 —— 和 acc:playlists 同一套拼法 */
     const v = await upstream.kgVip({ ...cred.extra, cookie: cred.cookie });
@@ -1552,11 +1553,57 @@ ipcMain.handle('acc:vip', async () => {
   }
 });
 
+/* 酷狗的歌单/搜索接口只认 App 客户端体系的 token；我们自己的扫码登录发的是
+ * h5 体系的 token，cloudlist 会回 20017。若配置了本地上游网关（它自己登录过），
+ * 就用网关那套 cookie 里的 token/mid/dfid —— 那份是 App 体系的，实测可用。 */
+function kugouCred() {
+  const base = credOf('kugou');
+  const jar = upstreamCookieOf('kugou');
+  if (!jar) return base;
+  const pick = name => {
+    const m = new RegExp('(?:^|;\\s*)' + name + '=([^;]*)').exec(jar);
+    return m ? m[1] : '';
+  };
+  const token = pick('token');
+  const userid = pick('userid');
+  if (!token || !userid) return base;
+  const extra = Object.assign({}, (base && base.extra) || {}, {
+    token, userid, mid: pick('KUGOU_API_MID') || pick('mid'), dfid: pick('KUGOU_API_DEV') || pick('dfid')
+  });
+  /* KUGOU_API_DEV 是设备号（10 位），网关 cookie 里没有就直接不带 */
+  return { cookie: jar, extra, updatedAt: Date.now(), verifiedAt: Date.now() };
+}
+
+/* 上游搜索：酷狗走 mobilecdn（免签），QQ 走 musicu Lite */
+ipcMain.handle('acc:search', async (_e, arg) => {
+  const provider = String((arg && arg.provider) || '');
+  const keyword = String((arg && arg.keyword) || '').trim();
+  const page = Number((arg && arg.page) || 1) || 1;
+  if (!keyword) return { ok: true, items: [] };
+  try {
+    if (provider === 'kugou') {
+      const cred = kugouCred();
+      if (!cred) throw Object.assign(new Error('酷狗音乐还没有登录'), { code: 'E_AUTH_REQUIRED' });
+      return { ok: true, items: await upstream.kgSearch(cred, keyword, page) };
+    }
+    if (provider === 'qqapp') {
+      const cred = credOf('qqapp');
+      if (!cred) throw Object.assign(new Error('QQ 音乐还没有登录'), { code: 'E_AUTH_REQUIRED' });
+      return { ok: true, items: await upstream.qqSearch(cred, keyword, page) };
+    }
+    return { ok: false, error: { code: 'E_BAD_ARGS', message: '未知音源' } };
+  } catch (e) {
+    const code = (e && e.code) || 'E_UPSTREAM';
+    return { ok: false, error: { code, message: (e && e.message) || '搜索失败' } };
+  }
+});
+
 ipcMain.handle('acc:tracks', async (_e, arg) => {
   const provider = (arg && arg.provider) || '';
   const id = (arg && arg.id) || '';
   const dirId = (arg && arg.dirId) || 0;
-  const cred = credOf(provider);
+  /* 酷狗的音源接口只认 App 体系 token：配了上游网关就用网关那份（见 kugouCred） */
+  const cred = provider === 'kugou' ? kugouCred() : credOf(provider);
   if (!cred) return { ok: false, error: { code: 'E_AUTH_REQUIRED', message: '还没有登录该音源' } };
   try {
     const items = provider === 'qqapp'

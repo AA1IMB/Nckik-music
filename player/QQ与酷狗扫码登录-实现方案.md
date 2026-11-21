@@ -553,3 +553,22 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 - 模块级：`kgResolve(vipHash, 'high', cred, 'http://127.0.0.1:39001', cookie)` → `http://fsandroid.tx.kugou.com/…`（会员曲也拿到直链）。
 - 应用级：真实播放器点酷狗歌单里的曲目，主进程日志 `[up] kugou 206 audio/mpeg http://fsandroid.tx.kugou.com/…`，界面进度条正常推进（截图 `player/demo/shot-kg-vip.png`）。
 - 回归：`test-accounts 76/76`、`probe-home 50/50`、`probe-playlist 53/53`、`probe-playmode 48/48`。
+
+## 二十六、酷狗「我创建的歌单」与上游搜索（2026-11-21）
+
+### 26.1 歌单读不到自己的
+- 现象：登录酷狗后，歌单列表全是「2026车载必备动感DJ」这类公共歌单，看不到自己建的。
+- 根因：`kgPlaylists` 用的是 `m.kugou.com/plist/index?json=true&uid=…`，这个接口**忽略 uid**，永远返回公共索引（300 条）。
+- 正解：`POST https://gateway.kugou.com/v7/get_all_list`（header `x-router: cloudlist.service.kugou.com`），body `{userid, token, total_ver:979, type:2, page, pagesize}`，走 **android 签名**（salt `OIlwieks28dk2k092lksi2UIkp`，`md5(salt + 排序后的 k=v 串 + body + salt)`），返回 `data.info[]`（`list_create_listid` / `name` / `m_count`）。
+- **坑**：cloudlist 只认 **App 客户端体系（appid 1005）** 的 token；我们自己扫码拿的是 h5 体系（appid 1001）token，直接调回 `20017`。所以 `main.js` 里新增 `kugouCred()`：配置了本地上游网关时，优先用网关 cookie 里的 `token/mid/dfid`（那份是 App 体系的，实测可用），播放/歌单/搜索三处统一走它。
+- 实测：`3 个歌单` —— 默认收藏(44)、我喜欢(1226)、11111(247)。
+
+### 26.2 搜索
+- 酷狗：`GET http://mobilecdn.kugou.com/api/v3/search/song?keyword=&page=&pagesize=30&plat=0&version=8000&showtype=1`（免签，移动 UA），`data.info[]` → `{hash, filename, duration, privilege}`；`privilege>8` 标为会员曲。实测「晴天」30 条，首条周杰伦。
+- QQ 音乐：`music.search.SearchCgiService / DoSearchForQQMusicLite`（comm 带 `qq/authst/tmeLoginType:2`）**返回 `code:0` 但 `item_song` 为空**；换 `Desktop`/`Mobile` 方法、`search_type` 0/7、补 `uid/sid` 都一样。判断是搜索接口需要更完整的客户端会话字段（QIMEI 等），暂未打通，面板会显示「QQ 音乐搜索暂时返回空结果（需要客户端会话）」。
+- 界面：曲库切到 QQ 音乐/酷狗时，顶部搜索框改为**网络搜索**（380ms 防抖，回车立即搜），结果行与歌单曲目同版式，点行即进播放列表播放。
+
+### 26.3 验证
+- IPC：`accPlaylists('kugou')` → `n=3`（默认收藏/我喜欢）；`accSearch('kugou','晴天')` → `n=30`，首条「晴天 / 周杰伦」。
+- 界面：搜索框输入「晴天」→ `30 首`，首行「晴天」（截图 `player/demo/shot-kg-search.png`）。
+- 回归：`probe-home 50/50`、`probe-playlist 53/53`、`test-accounts 76/76`。

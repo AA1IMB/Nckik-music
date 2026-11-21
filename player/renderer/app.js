@@ -1604,10 +1604,82 @@ function upPlay(provider, idx) {
   plSyncBadge();
 }
 
+/* 上游搜索：输入即搜（380ms 防抖），结果和歌单曲目共用一套行样式 */
+async function upSearch(provider, keyword) {
+  const st = S.up[provider] || (S.up[provider] = { status: 'idle', items: [], tracks: [] });
+  const kw = String(keyword || '').trim();
+  if (!st.search) st.search = { q: '', status: 'idle', err: '', items: [], at: 0 };
+  st.search.q = kw;
+  if (!kw) {
+    st.search.status = 'idle'; st.search.items = []; st.search.err = '';
+    if (S.srcMode === provider) renderUp(provider);
+    return;
+  }
+  st.search.status = 'loading'; st.search.err = ''; st.search.at = Date.now();
+  if (S.srcMode === provider) renderUp(provider);
+  let r;
+  try { r = await window.api.accSearch(provider, kw); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (st.search.q !== kw) return;              /* 期间又改了关键字：丢弃这次结果 */
+  if (!r || !r.ok) {
+    st.search.status = 'error';
+    st.search.err = (r && r.error && r.error.message) || '搜索失败';
+    st.search.items = [];
+  } else {
+    st.search.status = 'ready';
+    st.search.items = (r.items || []).map(t => ({ ...t, path: String(t.id) }));
+  }
+  if (S.srcMode === provider) renderUp(provider);
+}
+
+function upPlaySearch(provider, idx) {
+  const st = S.up[provider];
+  const it = st && st.search && st.search.items[idx];
+  if (!it) return;
+  const list = st.search.items.map(t => plToItem({ ...t, album: '搜索：' + st.search.q }));
+  S.settings.playlist = list;
+  plSave();
+  rebuildQueue('id');
+  const qi = S.q.findIndex(x => x.id === it.path);
+  playAt(qi >= 0 ? qi : 0);
+  plSyncBadge();
+}
+
 function renderUp(provider) {
   const st = S.up[provider] || {};
   const list = $('#libList');
   const label = provider === 'kugou' ? '酷狗音乐' : 'QQ 音乐';
+
+  /* 搜索态：输入框有内容时只显示搜索结果，清空就回到歌单列表 */
+  const sr = st.search;
+  if (sr && sr.q) {
+    if (sr.status === 'loading') {
+      list.innerHTML = emptyRow('正在搜索「' + sr.q + '」…');
+      $('#libCount').textContent = '';
+      list.onclick = null;
+      return;
+    }
+    if (sr.status === 'error') {
+      $('#libCount').textContent = '搜索失败';
+      list.innerHTML = emptyRow(sr.err || '搜索失败');
+      list.onclick = null;
+      return;
+    }
+    const items = sr.items || [];
+    $('#libCount').textContent = items.length ? '搜索「' + sr.q + '」· ' + items.length + ' 首' : '搜索「' + sr.q + '」· 没有结果';
+    list.innerHTML = items.length
+      ? items.map((t, i) => `<div class="item" data-ups="${i}">
+          <div class="th"><span>${esc((t.title || '?').slice(0, 1))}</span></div>
+          <div class="ii"><div class="n">${esc(t.title || '未知曲目')}</div>
+          <div class="d">${esc(t.artist || '未知歌手')}</div></div>
+          <div class="r">${esc(fmt(Number(t.duration) || 0))}</div></div>`).join('')
+      : emptyRow('没有找到「' + sr.q + '」');
+    list.onclick = e => {
+      const row = e.target.closest('[data-ups]');
+      if (row) upPlaySearch(provider, Number(row.dataset.ups));
+    };
+    return;
+  }
   if (st.status === 'loading') {
     list.innerHTML = emptyRow('正在读取' + label + '的歌单…（首次会慢几秒）');
     $('#libCount').textContent = '';
@@ -4207,6 +4279,14 @@ function bind() {
         return;
       }
       qTimer = setTimeout(bilSearch, 380);   // B 站接口有频控，比本地列表等得更久
+    } else if (S.srcMode === 'qqapp' || S.srcMode === 'kugou') {
+      const provider = S.srcMode;
+      const v = ($('#q').value || '').trim();
+      if (!v) {
+        upSearch(provider, '');
+        return;
+      }
+      qTimer = setTimeout(() => upSearch(provider, v), 380);
     } else {
       qTimer = setTimeout(renderLibrary, 110);
     }
@@ -4217,6 +4297,7 @@ function bind() {
     clearTimeout(qTimer);
     if (S.srcMode === 'net') neSearch();
     else if (S.srcMode === 'bil') bilSearch();
+    else if (S.srcMode === 'qqapp' || S.srcMode === 'kugou') upSearch(S.srcMode, ($('#q').value || '').trim());
     else renderLibrary();
   };
 

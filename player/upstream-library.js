@@ -202,16 +202,87 @@ function kgCredFields(cred) {
   };
 }
 
+/* 「我创建的歌单」走 cloudlist 的 v7/get_all_list（App 协议，需要 android 签名）。
+ * 老的 m.kugou.com/plist/index?uid= 会忽略 uid，返回公共歌单索引 —— 这就是
+ * 「登录了却看不到自己歌单」的原因。 */
+const KG_APP_UA = 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi';
+const KG_ANDROID_SALT = 'OIlwieks28dk2k092lksi2UIkp';
+
+function kgAppSign(params, data) {
+  const raw = Object.keys(params).sort()
+    .map(k => `${k}=${typeof params[k] === 'object' ? JSON.stringify(params[k]) : params[k]}`)
+    .join('');
+  return md5(KG_ANDROID_SALT + raw + (data || '') + KG_ANDROID_SALT);
+}
+
+async function kgMyPlaylistsOnce(f, appid, clientver) {
+  const clienttime = Math.floor(Date.now() / 1000);
+  const body = { userid: Number(f.uid), token: f.token, total_ver: 979, type: 2, page: 1, pagesize: 100 };
+  const data = JSON.stringify(body);
+  const params = {
+    dfid: f.dfid || '-', mid: f.mid, uuid: '-', appid, clientver, clienttime,
+    token: f.token, userid: Number(f.uid), plat: 1, total_ver: 979, type: 2, page: 1, pagesize: 100
+  };
+  params.signature = kgAppSign(params, data);
+  const r = await fetch('https://gateway.kugou.com/v7/get_all_list?' + new URLSearchParams(params), {
+    method: 'POST',
+    headers: {
+      'User-Agent': KG_APP_UA, 'x-router': 'cloudlist.service.kugou.com',
+      dfid: params.dfid, mid: params.mid, clienttime: String(clienttime),
+      'kg-rc': '1', 'kg-thash': '5d816a0', 'kg-rec': '1', 'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F',
+      Cookie: `token=${f.token}; userid=${f.uid}`, 'Content-Type': 'application/json'
+    },
+    body: data
+  });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `酷狗歌单列表返回 ${r.status}`);
+  const j = await r.json();
+  if (j && j.error_code) {
+    const err = fail('E_UPSTREAM_CODE', `酷狗歌单列表失败（${j.error_code}）`);
+    err.code2 = j.error_code;
+    throw err;
+  }
+  const arr = (j && j.data && (j.data.info || j.data.list)) || [];
+  return arr.map(p => ({
+    id: String(p.list_create_listid || p.listid || p.specialid || ''),
+    name: String(p.name || p.list_name || p.specialname || '歌单'),
+    count: Number(p.m_count || p.song_count || p.songcount || p.per_num || 0),
+    cover: ''
+  })).filter(p => p.id);
+}
+
+/* 「我创建的歌单」：cloudlist v7/get_all_list 只认 App 客户端（appid 1005）体系的 token。
+ * 我们自己的扫码登录发的是 appid 1001 的 token，所以这里按 appid 逐个试，
+ * 哪个通就用哪个；全不通再回落到公共索引（至少不是空白）。 */
+const KG_CLOUD_CANDIDATES = [[1005, 20489], [1001, 20489], [1001, 20489], [1005, 11430]];
+
+async function kgMyPlaylists(f) {
+  let lastErr = null;
+  for (const [appid, clientver] of KG_CLOUD_CANDIDATES) {
+    try {
+      const list = await kgMyPlaylistsOnce(f, appid, clientver);
+      if (list.length) return list;
+    } catch (e) { lastErr = e; }
+  }
+  if (lastErr) throw lastErr;
+  return [];
+}
+
 async function kgPlaylists(cred) {
   const f = kgCredFields(cred);
-  const cookie = f.cookie;
-  const uid = f.uid || cred.KugooID || '';
-  if (!cookie || !uid) throw fail('E_AUTH_REQUIRED', '酷狗音乐还没有登录');
-  /* 接口每页最多给 30 个，超过就得翻页；只取第一页会出现「有些歌单看不到」 */
+  if (!f.cookie || !f.uid) throw fail('E_AUTH_REQUIRED', '酷狗音乐还没有登录');
+  /* 先问「我创建的歌单」；接口不可用（老版本账号/风控）才回落到公共索引，保证不至于全空 */
+  try {
+    const mine = await kgMyPlaylists(f);
+    if (mine.length) return mine;
+  } catch (e) {
+    if (!e || e.code === 'E_AUTH_REQUIRED') throw e;
+    /* 我创建的歌单失败时静默回落，但要在主进程日志里留痕，方便排查 */
+    console.log('[up] 我创建的歌单读取失败：', (e && e.code) || '', (e && e.message) || '');
+  }
   const out = [];
   const seen = new Set();
   for (let page = 1; page <= 10; page++) {
-    const j = await kgGet(cookie, `https://m.kugou.com/plist/index?json=true&uid=${encodeURIComponent(uid)}&page=${page}&pagesize=100`);
+    const j = await kgGet(f.cookie, `https://m.kugou.com/plist/index?json=true&uid=${encodeURIComponent(f.uid)}&page=${page}&pagesize=100`);
     const arr = (j.plist && j.plist.list && j.plist.list.info) || [];
     if (!arr.length) break;
     let added = 0;
@@ -219,16 +290,58 @@ async function kgPlaylists(cred) {
       const id = String(p.specialid || '');
       if (!id || seen.has(id)) continue;
       seen.add(id); added++;
-      out.push({
-        id,
-        name: String(p.specialname || p.listname || '歌单'),
-        count: Number(p.songcount || 0),
-        cover: String(p.imgurl || '').replace('{size}', '240')
-      });
+      out.push({ id, name: String(p.specialname || p.listname || '歌单'), count: Number(p.songcount || 0), cover: '' });
     }
     if (!added) break;
   }
   return out;
+}
+
+/* 搜索：酷狗走 mobilecdn（免签）；QQ 走 musicu 的 Lite 搜索，返回体把各类型放在 body 里 */
+async function kgSearch(cred, keyword, page) {
+  const f = kgCredFields(cred);
+  const kw = String(keyword || '').trim();
+  if (!kw) return [];
+  const q = new URLSearchParams({
+    keyword: kw, page: String(page || 1), pagesize: '30', plat: '0', version: '8000', showtype: '1'
+  });
+  const r = await fetch('http://mobilecdn.kugou.com/api/v3/search/song?' + q, {
+    headers: { 'User-Agent': KG_MUA, Cookie: f.cookie || '' }
+  });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `酷狗搜索返回 ${r.status}`);
+  const j = await r.json();
+  const arr = (j && j.data && j.data.info) || [];
+  return arr.map(s => {
+    const name = String(s.filename || s.songname || '');
+    const cut = name.indexOf(' - ');
+    return {
+      id: 'kg:' + String(s.hash || '').toUpperCase(),
+      title: cut > 0 ? name.slice(cut + 3) : name,
+      artist: cut > 0 ? name.slice(0, cut) : String(s.singername || ''),
+      duration: Number(s.duration || 0),
+      vip: Number(s.privilege || 0) > 8
+    };
+  }).filter(x => x.id.length > 3);
+}
+
+async function qqSearch(cred, keyword, page) {
+  const c = qqComm(cred);
+  const param = {
+    search_id: String(Date.now()), remoteplace: 'txt.mqq.all', query: String(keyword || ''),
+    search_type: 0, num_per_page: 30, page_num: Number(page) || 1,
+    highlight: 0, nqc_flag: 0, page_id: 1, grp: 1
+  };
+  const j = await musicu(c, 'music.search.SearchCgiService', 'DoSearchForQQMusicLite', param);
+  const body = (((j || {}).data || {}).body) || {};
+  const arr = body.item_song || [];
+  if (!arr.length) throw fail('E_UPSTREAM_UNAVAILABLE', 'QQ 音乐搜索暂时返回空结果（需要客户端会话）');
+  return arr.map(s => ({
+    id: 'qq:' + String(s.mid || ''),
+    title: String(s.name || s.title || ''),
+    artist: (s.singer || []).map(x => x.name).filter(Boolean).join('/'),
+    duration: Number(s.interval || 0),
+    albumMid: String((s.album && s.album.mid) || '')
+  })).filter(x => x.id.length > 3);
 }
 
 /* 歌单曲目：m.kugou.com 的 plist 详情并不直接给「干净的歌曲数组」——
@@ -351,4 +464,5 @@ function kgResolveLazy() {
 }
 
 module.exports = {
-  kgVip, kgPrivilege, albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks };
+  kgVip, kgPrivilege, albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks,
+  kgSearch, qqSearch };

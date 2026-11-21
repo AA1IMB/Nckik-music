@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('api', {
   accVip: () => ipcRenderer.invoke('acc:vip'),
   accPlaylists: (provider) => ipcRenderer.invoke('acc:playlists', { provider }),
   accTracks: (provider, id, dirId) => ipcRenderer.invoke('acc:tracks', { provider, id, dirId }),
+  accSearch: (provider, keyword, page) => ipcRenderer.invoke('acc:search', { provider, keyword, page }),
   idnGet: () => ipcRenderer.invoke('idn:get'),
   idnSet: (provider, accountId) => ipcRenderer.invoke('idn:set', { provider, accountId }),
   onIdnChanged: (cb) => ipcRenderer.on('idn:changed', (_e, p) => cb(p)),
