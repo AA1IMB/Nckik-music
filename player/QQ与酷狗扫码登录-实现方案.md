@@ -565,10 +565,38 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 
 ### 26.2 搜索
 - 酷狗：`GET http://mobilecdn.kugou.com/api/v3/search/song?keyword=&page=&pagesize=30&plat=0&version=8000&showtype=1`（免签，移动 UA），`data.info[]` → `{hash, filename, duration, privilege}`；`privilege>8` 标为会员曲。实测「晴天」30 条，首条周杰伦。
-- QQ 音乐：`music.search.SearchCgiService / DoSearchForQQMusicLite`（comm 带 `qq/authst/tmeLoginType:2`）**返回 `code:0` 但 `item_song` 为空**；换 `Desktop`/`Mobile` 方法、`search_type` 0/7、补 `uid/sid` 都一样。判断是搜索接口需要更完整的客户端会话字段（QIMEI 等），暂未打通，面板会显示「QQ 音乐搜索暂时返回空结果（需要客户端会话）」。
+- QQ 音乐（2026-11-21 打通，§27）：`music.search.SearchCgiService / DoSearchForQQMusicLite`，但 **comm 必须换成「精简版客户端」那一套**（`tmeAppID:'qqmusiclight'`、`cv:'1003006'`、`v:'1003006'`、`nettype:'NETWORK_WIFI'`、`udid:'0'`、`uid:<uin>`、`tmeLoginType:2`），headers `User-Agent: okhttp/3.14.9` + `Cookie: uin=<uin>; qm_keyst=<musickey>`，且 `search_type` 必须是 **7**（送 0 会回 2001）。用 App 那套 comm（cv 14090008）永远 `item_song` 为空——之前就是栽在这里。
 - 界面：曲库切到 QQ 音乐/酷狗时，顶部搜索框改为**网络搜索**（380ms 防抖，回车立即搜），结果行与歌单曲目同版式，点行即进播放列表播放。
 
 ### 26.3 验证
 - IPC：`accPlaylists('kugou')` → `n=3`（默认收藏/我喜欢）；`accSearch('kugou','晴天')` → `n=30`，首条「晴天 / 周杰伦」。
 - 界面：搜索框输入「晴天」→ `30 首`，首行「晴天」（截图 `player/demo/shot-kg-search.png`）。
 - 回归：`probe-home 50/50`、`probe-playlist 53/53`、`test-accounts 76/76`。
+
+## 二十七、QQ 音乐搜索打通（2026-11-21）
+
+### 27.1 根因
+`DoSearchForQQMusicLite` 有两套 comm：
+
+| comm | 结果 |
+| --- | --- |
+| App 播放那套（`ct:11, cv:14090008, v:14090008, chid:10003505, tmeAppID:'qqmusic', tmeLoginType:2, qq, authst`） | `code:0`，但 `body.item_song` **恒为空** |
+| 精简版（`tmeAppID:'qqmusiclight', cv:'1003006', v:'1003006', nettype:'NETWORK_WIFI', udid:'0', uid, tmeLoginType:2`） | 有结果，但 `search_type` 必须是 **7**；送 0 回 `2001` |
+
+之前一直用第一套，所以怎么调都是 0 条。
+
+### 27.2 实现
+`player/upstream-library.js` 的 `qqSearch(cred, keyword, page)`：
+
+- comm 用精简版，`uid` 取 `cred.extra` 的 `uin/musicid`，`tmeLoginType` 登录时 2、未登录 -1；
+- headers `User-Agent: okhttp/3.14.9`，登录时带 `Cookie: uin=…; qm_keyst=…`，未登录带 `Cookie: tmeLoginType=-1`；
+- `param.search_type = 7`、`remoteplace: 'search.android.keyboard'`、`num_per_page: 30`；
+- 条目映射 `{id:'qq:'+mid, title, artist(singer[].name), duration: interval, albumMid: album.mid, vip: pay.pay_play===1}`；
+- 错误分档：`2001` → `E_UPSTREAM_CODE`「QQ 音乐搜索被限流（2001），等一两分钟再试」；其他非 0 → 带码；空结果 → `E_UPSTREAM_UNAVAILABLE`。
+- 面板搜索行对 `vip:true` 追加 `VIP` 小标（与歌单曲目一致）。
+
+### 27.3 验证
+- `node -e`：`qqSearch(cred,'晴天')` → `n=30`，首条 `{"id":"qq:0039MnYb0qxYhV","title":"晴天","artist":"周杰伦","duration":269,"albumMid":"000MkMni19ClKG","vip":true}`。
+- 应用内 IPC（`diag-upserch`）：`{"pl":{"n":3,"first":"默认收藏"},"sr":{"n":30,"first":"晴天 / 周杰伦"},"qq":{"n":30}}`。
+- 回归：`probe-home 50/50`、`probe-playlist 53/53`。
+- 限流说明：短时间连发几十次搜索会转成 `2001`，登录态与匿名都会影响，等 1–2 分钟恢复；面板已给明确文案。

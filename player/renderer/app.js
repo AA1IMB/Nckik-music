@@ -1670,7 +1670,7 @@ function renderUp(provider) {
     list.innerHTML = items.length
       ? items.map((t, i) => `<div class="item" data-ups="${i}">
           <div class="th"><span>${esc((t.title || '?').slice(0, 1))}</span></div>
-          <div class="ii"><div class="n">${esc(t.title || '未知曲目')}</div>
+          <div class="ii"><div class="n">${esc(t.title || '未知曲目')}${t.vip ? '<span class="tag">VIP</span>' : ''}</div>
           <div class="d">${esc(t.artist || '未知歌手')}</div></div>
           <div class="r">${esc(fmt(Number(t.duration) || 0))}</div></div>`).join('')
       : emptyRow('没有找到「' + sr.q + '」');

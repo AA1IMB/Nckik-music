@@ -324,23 +324,52 @@ async function kgSearch(cred, keyword, page) {
   }).filter(x => x.id.length > 3);
 }
 
+/* QQ 音乐搜索：走「精简版客户端」的 comm（tmeAppID=qqmusiclight）。
+ * 2026-11 实测：
+ *  - 带 App 的 comm（cv 14090008 / tmeAppID qqmusic）搜出去 code 0 但 item_song 恒空；
+ *  - 精简版 comm + search_type **7** 才有结果（0 会回 2001，folia 的注释也记了这点）；
+ *  - 它是按 IP/会话限流的：短时间连发几十次会转成 2001，稍等即可恢复，所以要给清楚的文案；
+ *  - 条目字段：mid / title / singer[].name / interval（秒）/ album.mid / pay.pay_play（1=会员曲）。
+ */
 async function qqSearch(cred, keyword, page) {
-  const c = qqComm(cred);
+  const c = (cred && (cred.extra || cred)) || {};
+  const uin = String(c.musicid || c.uin || c.qq || '');
+  const key = String(c.musickey || '');
+  const logged = !!(uin && key);
+  const comm = {
+    ct: 11, cv: '1003006', v: '1003006', tmeAppID: 'qqmusiclight',
+    nettype: 'NETWORK_WIFI', udid: '0',
+    uid: uin || '0', tmeLoginType: logged ? 2 : -1
+  };
+  const headers = {
+    'User-Agent': 'okhttp/3.14.9',
+    Cookie: logged ? `uin=${uin}; qm_keyst=${key}` : 'tmeLoginType=-1'
+  };
   const param = {
-    search_id: String(Date.now()), remoteplace: 'txt.mqq.all', query: String(keyword || ''),
-    search_type: 0, num_per_page: 30, page_num: Number(page) || 1,
+    search_id: String(Date.now()) + String(Math.floor(Math.random() * 1000)),
+    remoteplace: 'search.android.keyboard', query: String(keyword || ''),
+    search_type: 7, num_per_page: 30, page_num: Number(page) || 1,
     highlight: 0, nqc_flag: 0, page_id: 1, grp: 1
   };
-  const j = await musicu(c, 'music.search.SearchCgiService', 'DoSearchForQQMusicLite', param);
-  const body = (((j || {}).data || {}).body) || {};
-  const arr = body.item_song || [];
-  if (!arr.length) throw fail('E_UPSTREAM_UNAVAILABLE', 'QQ 音乐搜索暂时返回空结果（需要客户端会话）');
+  const body = {
+    comm,
+    req_0: { module: 'music.search.SearchCgiService', method: 'DoSearchForQQMusicLite', param }
+  };
+  const r = await fetch(MUSICU, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `QQ 音乐搜索返回 ${r.status}`);
+  const j = await r.json();
+  const r0 = (j && j.req_0) || {};
+  if (r0.code === 2001) throw fail('E_UPSTREAM_CODE', 'QQ 音乐搜索被限流（2001），等一两分钟再试');
+  if (r0.code !== 0) throw fail('E_UPSTREAM_CODE', `QQ 音乐搜索失败（${r0.code}）`);
+  const arr = (((r0.data || {}).body || {}).item_song) || [];
+  if (!arr.length) throw fail('E_UPSTREAM_UNAVAILABLE', 'QQ 音乐没有返回结果（换个关键词或稍后再试）');
   return arr.map(s => ({
     id: 'qq:' + String(s.mid || ''),
-    title: String(s.name || s.title || ''),
+    title: String(s.title || s.name || ''),
     artist: (s.singer || []).map(x => x.name).filter(Boolean).join('/'),
     duration: Number(s.interval || 0),
-    albumMid: String((s.album && s.album.mid) || '')
+    albumMid: String((s.album && s.album.mid) || ''),
+    vip: !!(s.pay && Number(s.pay.pay_play) === 1)
   })).filter(x => x.id.length > 3);
 }
 
