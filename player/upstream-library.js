@@ -183,9 +183,29 @@ async function kgGetText(cookie, url) {
   return await r.text();
 }
 
+/* 凭据有两种形态：老版把 userid 放在顶层，新版（App 扫码）放在 extra 里、
+ * cookie 串里也有 token/userid/mid/dfid。这里统一读出来，避免各调用点各写一套。 */
+function kgCredFields(cred) {
+  const c = cred || {};
+  const ex = c.extra || {};
+  const cookie = String(c.cookie || '');
+  const fromCookie = name => {
+    const m = new RegExp('(?:^|;\\s*)' + name + '=([^;]*)').exec(cookie);
+    return m ? m[1] : '';
+  };
+  return {
+    cookie,
+    uid: String(c.userid || ex.userid || fromCookie('userid') || ''),
+    token: String(c.token || ex.token || fromCookie('token') || ''),
+    mid: String(c.mid || ex.mid || fromCookie('mid') || ''),
+    dfid: String(c.dfid || ex.dfid || fromCookie('dfid') || '')
+  };
+}
+
 async function kgPlaylists(cred) {
-  const cookie = cred.cookie || '';
-  const uid = cred.userid || cred.KugooID || '';
+  const f = kgCredFields(cred);
+  const cookie = f.cookie;
+  const uid = f.uid || cred.KugooID || '';
   if (!cookie || !uid) throw fail('E_AUTH_REQUIRED', '酷狗音乐还没有登录');
   /* 接口每页最多给 30 个，超过就得翻页；只取第一页会出现「有些歌单看不到」 */
   const out = [];
@@ -291,6 +311,7 @@ let __kgVipCache = { at: 0, val: null };
  * 旧实现拿免费取流去试，失败就说「免费账号」——那是错的（免费链路永远不认会员权益）。
  * 现在直接向 trackercdn 问权限：priv_status>0 或拿到直链 = 有权益。 */
 async function kgVip(cred) {
+  cred = cred || {};
   const now = Date.now();
   if (__kgVipCache.val && now - __kgVipCache.at < 10 * 60 * 1000) return __kgVipCache.val;
   const cookie = (cred && cred.cookie) || '';
