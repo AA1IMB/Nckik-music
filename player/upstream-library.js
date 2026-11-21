@@ -122,7 +122,7 @@ async function qqPlaylists(cred) {
   if (!uid || !musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
   const data = await musicu(qqComm(uid, musickey), 'music.musicasset.PlaylistBaseRead', 'GetPlaylistByUin', { uin: String(uid) });
   const list = Array.isArray(data.v_playlist) ? data.v_playlist : [];
-  return list
+  const mapped = list
     .filter(p => p && (p.dirType === undefined || p.dirType === 0))
     .map(p => ({
       id: String(p.tid || p.dirId || ''),
@@ -130,9 +130,90 @@ async function qqPlaylists(cred) {
       /* QQ 的字段名和别处不一样：dirName / songNum / picUrl（大写 N） */
       name: String(p.dirName || p.name || p.dissname || p.title || '歌单'),
       count: Number(p.songNum || p.songnum || p.song_count || 0),
-      cover: String(p.picUrl || p.bigpicUrl || p.cover || p.logo || '')
+      /* QQ 有些封面是 http://，渲染层 CSP 只放行 https，统一升级成 https */
+      cover: String(p.picUrl || p.bigpicUrl || p.cover || p.logo || '').replace(/^http:/i, 'https:')
     }))
     .filter(p => p.id);
+  return qqFillCovers(cred, mapped);
+}
+
+/* QQ 的歌单封面经常是空的（自建歌单尤其常见）。用户要求：没封面就用歌单里第一首歌的专辑封面。
+ * 只对缺封面的那几个补一次「取第一首」的请求，并发 4、最多补 20 个，避免列表页拖太久。 */
+async function qqFillCovers(cred, list) {
+  const uid = cred.uin || cred.musicid || '';
+  const musickey = cred.musickey || '';
+  if (!uid || !musickey) return list;
+  const need = list.filter(p => !p.cover && p.id).slice(0, 20);
+  if (!need.length) return list;
+  const pick = s => String((s && s.album && s.album.mid) || '');
+  const queue = need.slice();
+  async function worker() {
+    while (queue.length) {
+      const p = queue.shift();
+      try {
+        const d = await musicu(qqComm(uid, musickey), 'music.srfDissInfo.DissInfo', 'CgiGetDiss', {
+          disstid: Number(p.id) || 0, dirid: Number(p.dirId) || 0,
+          song_begin: 0, song_num: 1, userinfo: false, orderlist: true
+        });
+        const first = (Array.isArray(d.songlist) && d.songlist[0]) || null;
+        const mid = pick(first);
+        if (mid) p.cover = 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + mid + '.jpg';
+      } catch { /* 补封面失败不影响列表 */ }
+    }
+  }
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return list;
+}
+
+/* 每日推荐（30 首）：实测拿到的 songlist 条目和 CgiGetDiss 同构。 */
+async function qqDaily(cred) {
+  const uid = cred.uin || cred.musicid || '';
+  const musickey = cred.musickey || '';
+  if (!uid || !musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
+  const d = await musicu(qqComm(uid, musickey), 'music.srfDissInfo.aiDissInfo', 'uniform_get_Dissinfo', {
+    dirid: 202, optype: 3, tag: 1, userinfo: 0, pic_dpi: 300
+  });
+  const arr = Array.isArray(d.songlist) ? d.songlist : [];
+  return arr.map(s => ({
+    id: 'qq:' + String(s.mid || s.songmid || ''),
+    title: String(s.name || s.title || '未知曲目'),
+    artist: Array.isArray(s.singer) ? s.singer.map(x => x && x.name).filter(Boolean).join('/') : '',
+    duration: Number(s.interval || 0),
+    albumMid: String((s.album && s.album.mid) || ''),
+    vip: !!(s.pay && Number(s.pay.pay_play) === 1)
+  })).filter(t => t.id !== 'qq:');
+}
+
+/* 推荐歌单：客户端首页 feed 里只取「歌单卡」（type 500 / jumptype 3003 / subtype 513）。 */
+async function qqRecommend(cred) {
+  const uid = cred.uin || cred.musicid || '';
+  const musickey = cred.musickey || '';
+  if (!uid || !musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
+  const d = await musicu(qqComm(uid, musickey), 'music.recommend.RecommendFeed', 'get_recommend_feed', {
+    page: 1, direction: 0, s_num: 0, client_time: Math.floor(Date.now() / 1000), v_cache: [],
+    ext: { has_login: '1', phone_language: 'zh-TW', client_time_zone: 'Asia/Taipei' }
+  });
+  const out = [];
+  const seen = new Set();
+  for (const shelf of (Array.isArray(d.v_shelf) ? d.v_shelf : [])) {
+    for (const niche of (Array.isArray(shelf.v_niche) ? shelf.v_niche : [])) {
+      for (const card of (Array.isArray(niche.v_card) ? niche.v_card : [])) {
+        if (!card || card.type !== 500 || card.jumptype !== 3003 || card.subtype !== 513) continue;
+        const id = String(card.id || '');
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push({
+          id,
+          name: String(card.title || '推荐歌单'),
+          count: 0,
+          cover: String(card.cover || ''),
+          dirId: 0,
+          rec: true
+        });
+      }
+    }
+  }
+  return out;
 }
 
 async function qqPlaylistTracks(cred, id, dirId) {
@@ -507,4 +588,4 @@ function kgResolveLazy() {
 
 module.exports = {
   kgVip, kgPrivilege, albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks,
-  kgSearch, qqSearch };
+  kgSearch, qqSearch, qqDaily, qqRecommend };

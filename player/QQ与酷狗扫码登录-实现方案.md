@@ -620,3 +620,25 @@ total = data.total_song_num || data.total
 - 应用内 IPC：`accTracks('qqapp','6878369743',201)` → `{"ok":true,"n":116}`。
 - 回归：`probe-playlist 53/53`。
 - 说明：播放列表本身没有容量上限（v0.6.0 起 `S.q` 任意长度 + 虚拟滚动），所以「导入无上限」只取决于这一步能否翻页取全。
+
+## 二十九、QQ 音乐曲库：每日推荐 / 推荐歌单 / 歌单封面（2026-11-21）
+
+### 29.1 每日推荐（30 首）
+`music.srfDissInfo.aiDissInfo / uniform_get_Dissinfo`，`param {dirid:202, optype:3, tag:1, userinfo:0, pic_dpi:300}`，comm 与歌单曲目同一套（`qq/authst/tmeLoginType:2`），返回 `data.songlist[]`，条目结构与 `CgiGetDiss` 相同（`mid/name/singer[].name/interval/album.mid/pay.pay_play`）。实测 30 首。
+
+### 29.2 推荐歌单
+`music.recommend.RecommendFeed / get_recommend_feed`，`param {page:1, direction:0, s_num:0, client_time, v_cache:[], ext:{has_login:'1', phone_language:'zh-TW', client_time_zone:'Asia/Taipei'}}`。
+只收「歌单卡」：`type===500 && jumptype===3003 && subtype===513`，取 `id / title / cover`。实测 3 个（百万收藏 / 歌手漫游 / 新歌推荐）。
+
+### 29.3 歌单封面（含「没有封面就用第一首专辑封面」）
+- `GetPlaylistByUin` 的 `picUrl` 有时为空（自建歌单常见），有时是 **http** 链接——渲染层 CSP 只放行 `https:`，所以一律 `replace(/^http:/i,'https:')`。
+- 缺封面的补一次 `CgiGetDiss`（`song_begin:0, song_num:1`）取第一首的 `album.mid`，拼 `https://y.gtimg.cn/music/photo_new/T002R300x300M000<albumMid>.jpg`；并发 4、最多补 20 个，失败不影响列表。
+- 渲染层仍有兜底：`img.onerror` 先换 `T002R500x500M000`，再退回首字磁贴。
+
+### 29.4 界面
+QQ 音乐分段的歌单页现在分成三块（与网易云对齐）：`每日推荐`（点击进 30 首曲目页）、`推荐歌单`、`我创建的歌单`；封面用 40px 圆角磁贴，与曲目行同一版式。
+
+### 29.5 验证
+- IPC：`accRecommend('qqapp')` → `{"ok":true,"daily":30,"rec":3,"firstRec":"百万收藏"}`。
+- 界面：`sects=["每日推荐","推荐歌单","我创建的歌单"]`、`rows=6`、`coverImgs=5`；点「每日推荐」→ `30 首 · 每日推荐`；截图 `player/demo/shot-qq-lib-recommend.png`。
+- 回归：`probe-home 50/50`、`probe-playlist 53/53`。

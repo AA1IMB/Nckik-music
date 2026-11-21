@@ -1562,6 +1562,13 @@ async function upEnsure(provider, force) {
   } else {
     st.status = 'ready';
     st.items = r.items || [];
+    /* QQ 音乐额外要「每日推荐 + 推荐歌单」（和网易云那两栏对齐） */
+    if (provider === 'qqapp' && (!st.rec || force)) {
+      try {
+        const rr = await window.api.accRecommend(provider);
+        if (rr && rr.ok) st.rec = { daily: rr.daily || [], playlists: rr.playlists || [] };
+      } catch { /* 推荐失败不影响「我创建的歌单」 */ }
+    }
   }
   if (S.srcMode === provider) renderUp(provider);
   if (PL.view === 'pick') renderPl();
@@ -1645,6 +1652,18 @@ function upPlaySearch(provider, idx) {
   plSyncBadge();
 }
 
+/* QQ 音乐的「每日推荐」：数据在 upEnsure 里一起拉好，这里只把视图切到曲目页 */
+function upOpenDaily(provider) {
+  const st = S.up[provider];
+  if (!st || !st.rec || !st.rec.daily || !st.rec.daily.length) { toast('每日推荐还没有加载好'); return; }
+  st.view = 'tracks';
+  st.tracks = st.rec.daily.slice();
+  st.name = '每日推荐';
+  st.id = 0;
+  st.trackErr = '';
+  renderUp(provider);
+}
+
 function renderUp(provider) {
   const st = S.up[provider] || {};
   const list = $('#libList');
@@ -1699,17 +1718,44 @@ function renderUp(provider) {
   }
   if (st.view !== 'tracks') {
     const items = st.items || [];
-    $('#libCount').textContent = items.length ? items.length + ' 个歌单' : '0 个歌单';
-    list.innerHTML = items.length
-      ? items.map(p => `<div class="item" data-pl="${esc(String(p.id))}" data-name="${esc(p.name || '')}">
-          <div class="th"><span>${esc((p.name || '歌').slice(0, 1))}</span></div>
+    const rec = (provider === 'qqapp' && st.rec) ? st.rec : null;
+    const daily = (rec && rec.daily) || [];
+    const recPls = (rec && rec.playlists) || [];
+    const rowHTML = (p, attr) => `<div class="item" ${attr}>
+          <div class="th${p.cover ? ' art' : ''}" data-ch="${esc((p.name || '歌').slice(0, 1))}">${p.cover ? `<img src="${esc(String(p.cover).replace(/^http:/i, 'https:'))}" alt="">` : `<span>${esc((p.name || '歌').slice(0, 1))}</span>`}</div>
           <div class="ii"><div class="n">${esc(p.name || '未命名歌单')}</div>
-          <div class="d">${esc((p.count || 0) + ' 首')}</div></div>
-          <div class="r">›</div></div>`).join('')
-      : emptyRow(label + '账号下还没有歌单');
+          <div class="d">${esc(p.count ? (p.count + ' 首') : (p.sub || ''))}</div></div>
+          <div class="r">›</div></div>`;
+    let html = '';
+    if (daily.length) {
+      html += '<div class="sect">每日推荐</div>'
+        + rowHTML({ name: '每日推荐 · ' + daily.length + ' 首', count: 0, sub: '每天更新' }, 'data-daily="1"');
+    }
+    if (recPls.length) {
+      html += '<div class="sect">推荐歌单</div>'
+        + recPls.map(p => rowHTML(p, `data-recpl="${esc(String(p.id))}" data-name="${esc(p.name || '')}"`)).join('');
+    }
+    html += `<div class="sect">我创建的歌单</div>`;
+    html += items.length
+      ? items.map(p => rowHTML(p, `data-pl="${esc(String(p.id))}" data-name="${esc(p.name || '')}"`)).join('')
+      : emptyRow(label + '账号下还没有自建歌单');
+    $('#libCount').textContent = items.length ? items.length + ' 个自建歌单' : '';
+    list.innerHTML = html;
+    /* 上游给的封面 URL 偶尔 404（尤其自建歌单第一首的专辑图）；
+     * 先试 500x500，再退回首字磁贴，别留一个碎图标。 */
+    list.querySelectorAll('.th.art img').forEach(im => {
+      im.onerror = () => {
+        const th = im.parentNode;
+        const src = im.getAttribute('src') || '';
+        if (src.includes('T002R300x300M000')) { im.src = src.replace('T002R300x300M000', 'T002R500x500M000'); return; }
+        th.classList.remove('art');
+        th.innerHTML = `<span>${esc(th.dataset.ch || '歌')}</span>`;
+      };
+    });
     list.onclick = e => {
-      const row = e.target.closest('[data-pl]');
-      if (row) upOpen(provider, row.dataset.pl, row.dataset.name);
+      if (e.target.closest('[data-daily]')) { upOpenDaily(provider); return; }
+      const row = e.target.closest('[data-pl],[data-recpl]');
+      if (row) upOpen(provider, row.dataset.pl || row.dataset.recpl, row.dataset.name);
     };
     return;
   }

@@ -1575,6 +1575,25 @@ function kugouCred() {
 }
 
 /* 上游搜索：酷狗走 mobilecdn（免签），QQ 走 musicu Lite */
+ipcMain.handle('acc:recommend', async (_e, arg) => {
+  const provider = String((arg && arg.provider) || '');
+  try {
+    if (provider === 'qqapp') {
+      const cred = credOf('qqapp');
+      if (!cred) throw Object.assign(new Error('QQ 音乐还没有登录'), { code: 'E_AUTH_REQUIRED' });
+      const c = { ...cred.extra, cookie: cred.cookie };
+      const [daily, playlists] = await Promise.all([
+        upstream.qqDaily(c).catch(() => []),
+        upstream.qqRecommend(c).catch(() => [])
+      ]);
+      return { ok: true, daily, playlists };
+    }
+    return { ok: false, error: { code: 'E_UPSTREAM_UNSUPPORTED', message: '这个音源没有推荐接口' } };
+  } catch (e) {
+    return { ok: false, error: { code: (e && e.code) || 'E_UPSTREAM', message: String((e && e.message) || e) } };
+  }
+});
+
 ipcMain.handle('acc:search', async (_e, arg) => {
   const provider = String((arg && arg.provider) || '');
   const keyword = String((arg && arg.keyword) || '').trim();
