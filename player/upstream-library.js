@@ -114,14 +114,28 @@ async function kgPlaylists(cred) {
   const cookie = cred.cookie || '';
   const uid = cred.userid || cred.KugooID || '';
   if (!cookie || !uid) throw fail('E_AUTH_REQUIRED', '酷狗音乐还没有登录');
-  const j = await kgGet(cookie, `https://m.kugou.com/plist/index?json=true&uid=${encodeURIComponent(uid)}&page=1&pagesize=100`);
-  const arr = (j.plist && j.plist.list && j.plist.list.info) || [];
-  return arr.map(p => ({
-    id: String(p.specialid || ''),
-    name: String(p.specialname || p.listname || '歌单'),
-    count: Number(p.songcount || 0),
-    cover: String(p.imgurl || '').replace('{size}', '240')
-  })).filter(p => p.id);
+  /* 接口每页最多给 30 个，超过就得翻页；只取第一页会出现「有些歌单看不到」 */
+  const out = [];
+  const seen = new Set();
+  for (let page = 1; page <= 10; page++) {
+    const j = await kgGet(cookie, `https://m.kugou.com/plist/index?json=true&uid=${encodeURIComponent(uid)}&page=${page}&pagesize=100`);
+    const arr = (j.plist && j.plist.list && j.plist.list.info) || [];
+    if (!arr.length) break;
+    let added = 0;
+    for (const p of arr) {
+      const id = String(p.specialid || '');
+      if (!id || seen.has(id)) continue;
+      seen.add(id); added++;
+      out.push({
+        id,
+        name: String(p.specialname || p.listname || '歌单'),
+        count: Number(p.songcount || 0),
+        cover: String(p.imgurl || '').replace('{size}', '240')
+      });
+    }
+    if (!added) break;
+  }
+  return out;
 }
 
 /* 歌单曲目：m.kugou.com 的 plist 详情并不直接给「干净的歌曲数组」——

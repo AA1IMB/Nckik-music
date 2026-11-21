@@ -950,6 +950,21 @@ ipcMain.handle('track:detail', async (_e, file) => {
   return readTrack(file, true);
 });
 
+/* 上游曲目为什么播不了：给渲染层一个「人话」的理由（VIP/版权/超时），
+ * 别让 <audio> 只能报「格式不支持」。解析结果在主进程有 90s 缓存，问了不亏。 */
+ipcMain.handle('up:check', async (_e, key) => {
+  const s = String(key || '');
+  const m = /^(kg|qq):(.+)$/.exec(s);
+  if (!m) return { ok: false, code: 'E_BAD_KEY', message: '未知的上游曲目' };
+  const provider = m[1] === 'kg' ? 'kugou' : 'qqapp';
+  try {
+    await upResolve(provider, m[2]);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, code: String((e && e.code) || 'E_UPSTREAM'), message: String((e && e.message) || '上游取流失败') };
+  }
+});
+
 ipcMain.handle('track:lyric', async (_e, file) => {
   /* 上游曲目（kg:<hash> / qq:<mid>）的歌词同样在这里返回，
    * 渲染层不用为「歌词从哪来」分叉。 */

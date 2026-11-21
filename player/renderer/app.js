@@ -4356,6 +4356,13 @@ function bind() {
     const name = (k && k.title) || '该曲目';
     if (isNet(k)) k.unavailable = '加载失败';
     if (k && S.settings.playMode === 'shuffle') markShufFail(k.path);   // 连着坏两次就先别抽它
+    /* 上游曲目先问一句「为什么播不了」：VIP/版权/超时 都该说人话，
+     * 否则 <audio> 只会给一个「格式不支持」的假象。 */
+    if (k && /^(kg|qq):/.test(String(k.path || ''))) {
+      window.api.upCheck(k.path).then(r => {
+        if (r && !r.ok && r.message) toast(`跳过：${name}（${r.message}）`);
+      }).catch(() => {});
+    }
     if (S.q.length > 1 && errStreak < 3) {
       errStreak++;
       toast(isNet(k) ? `跳过：${name}（网易云加载失败）` : `跳过无法播放的曲目：${name}`);

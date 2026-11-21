@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   cancelScan: () => ipcRenderer.invoke('scan:cancel'),
   onScanProgress: (cb) => ipcRenderer.on('scan:progress', (_e, p) => cb(p)),
   trackDetail: (p) => ipcRenderer.invoke('track:detail', p),
+  upCheck: (key) => ipcRenderer.invoke('up:check', key),
   trackLyric: (p) => ipcRenderer.invoke('track:lyric', p),
   trackCover: (p) => ipcRenderer.invoke('track:cover', p),
   mediaUrl: (p) => ipcRenderer.invoke('media:url', p),
