@@ -19,6 +19,7 @@ const S = {
   lyIdx: -1,
   lyricSrc: '',
   accent: '#5b5b66',
+  idn: { current: '', providers: [] },   // 当前账号（标题栏右上角头像）
   settings: null,
   devices: [],
   seekDrag: false,
@@ -1687,32 +1688,52 @@ function scrollCurIntoView() {
 
 /* ---- 可选歌单：本地曲库 / 当前打开的网易云歌单 / 我的歌单 ---- */
 function plSources() {
+  /* 列什么取决于「当前账号」（标题栏右上角头像）：
+   * 切到酷狗/QQ 音乐时，把网易云歌单塞进来只会让人点进去报错，
+   * 所以这里按 S.idn.current 过滤；本地曲库任何账号下都在。 */
   const out = [];
+  const cur = (S.idn && S.idn.current) || '';
   const local = S.tracks.filter(t => !isNet(t));
   if (local.length) {
     out.push({ key: 'local', name: '本地曲库', sub: local.length + ' 首 · 本机文件', tracks: local });
   }
-  const coll = S.ne.coll;
-  if (coll && coll.status === 'ready' && coll.tracks && coll.tracks.length) {
-    out.push({
-      key: 'coll', name: coll.name || '当前歌单',
-      sub: coll.tracks.length + ' 首 · 网易云', tracks: coll.tracks
-    });
-  }
-  const d = S.ne.home.data;
-  const mine = d && d.mine && d.mine.list;
-  if (Array.isArray(mine)) {
-    for (const p of mine) {
-      if (!p || !p.id) continue;
+  if (!cur || cur === 'ne') {
+    const coll = S.ne.coll;
+    if (coll && coll.status === 'ready' && coll.tracks && coll.tracks.length) {
       out.push({
-        key: 'ne', id: p.id, name: p.name || '网易云歌单',
-        sub: (p.count || 0) + ' 首 · 网易云（打开时读取）'
+        key: 'coll', name: coll.name || '当前歌单',
+        sub: coll.tracks.length + ' 首 · 网易云', tracks: coll.tracks
       });
+    }
+    const d = S.ne.home.data;
+    const mine = d && d.mine && d.mine.list;
+    if (Array.isArray(mine)) {
+      for (const p of mine) {
+        if (!p || !p.id) continue;
+        out.push({
+          key: 'ne', id: p.id, name: p.name || '网易云歌单',
+          sub: (p.count || 0) + ' 首 · 网易云（打开时读取）'
+        });
+      }
+    }
+  }
+  /* 哔哩哔哩收藏夹只读已有结果：不为一个下拉框去发网络请求，
+   * 列表本身在曲库抽屉里刷新（bilEnsureFavs）。 */
+  if (cur === 'bil') {
+    const f = S.bil.favs;
+    if (f && f.status === 'ready' && Array.isArray(f.items)) {
+      for (const it of f.items) {
+        if (!it || !it.id) continue;
+        /* 收藏夹条目的字段是 name / sub（不是 title/count），与曲库抽屉里的行同源 */
+        out.push({
+          key: 'bil', kind: 'bil', id: it.id, name: it.name || '收藏夹',
+          sub: (it.sub ? it.sub + ' · ' : '') + '哔哩哔哩（打开时读取）'
+        });
+      }
     }
   }
   return out;
 }
-
 function renderPlPick(body) {
   const src = plSources();
   PL.sources = src;
@@ -1793,7 +1814,11 @@ async function plSelectSource(src) {
     PL.busy = true;
     renderPl();
     try {
-      const r = await window.api.nePlaylist(src.id);
+      /* 哔哩哔哩走收藏夹接口，网易云走歌单接口：两者的返回都是 { ok, tracks }，
+       * 只有入口不同，所以在这里分一次叉，下面的覆盖逻辑完全复用。 */
+      const r = src.kind === 'bil'
+        ? await window.api.bilFavList(src.id, 1)
+        : await window.api.nePlaylist(src.id);
       if (!r || !r.ok) throw new Error((r && r.error && r.error.message) || '读取失败');
       tracks = r.tracks || [];
     } catch (e) {
@@ -4312,6 +4337,174 @@ function applyTransVisibility() {
   if (S.lastLy >= 0) centerLine(S.lastLy);
 }
 
+/* ------------------------------------------------------------------ 当前账号 */
+/* 标题栏右上角的头像就是「现在用谁在听歌」：
+ *   - 右键（或点击）展开下拉，四个音源各自的登录账号一览；
+ *   - 点一条 → 主进程写 identity.json 并（QQ/酷狗）真正 switchTo；
+ *   - 切完刷新歌单来源：网易云重拉首页、哔哩哔哩重置收藏夹、QQ/酷狗清缓存；
+ *   - 播放列表的「选择歌单」按 S.idn.current 过滤，见 plSources()。
+ * 身份只存 id 与昵称，凭证仍在主进程各自的安全存储里。
+ */
+const IDN = { open: false };
+
+function idnRow(id) {
+  return (S.idn.providers || []).find(x => x.id === id) || null;
+}
+
+function idnActiveAccount() {
+  const row = idnRow(S.idn.current);
+  if (!row) return null;
+  const list = row.accounts || [];
+  return list.find(a => a.id === (row.activeId || '')) || list[0] || null;
+}
+
+function idnPaint() {
+  const btn = $('#btnIdn');
+  const box = $('#idnAva');
+  const now = $('#idnNow');
+  if (!btn || !box) return;
+  const row = idnRow(S.idn.current);
+  const a = idnActiveAccount();
+  const label = row ? row.label : '';
+  btn.title = '当前账号：' + (a ? a.name + '（' + label + '）' : '未登录')
+    + '\n右键切换音源账号';
+  btn.classList.toggle('on', !!a);
+  const ch = a ? String(a.name || '?').trim().charAt(0) : '';
+  if (a && a.avatarUrl) {
+    box.innerHTML = '<img alt="" src="' + esc(a.avatarUrl) + '">';
+    /* 头像 URL 可能是别人的 CDN，过期/防盗链都正常发生：
+     * 加载失败就回落到首字母，别留一个破图标。 */
+    const im = box.querySelector('img');
+    if (im) im.onerror = () => { box.textContent = ch || '·'; };
+  } else {
+    box.textContent = ch || '·';
+  }
+  if (now) now.textContent = a ? (a.name + ' · ' + label) : '未登录（点设置里的播放账号登录）';
+}
+
+function idnRenderList() {
+  const box = $('#idnList');
+  if (!box) return;
+  const rows = [];
+  for (const p of (S.idn.providers || [])) {
+    const accs = p.accounts || [];
+    const cur = p.id === S.idn.current;
+    rows.push('<div class="idn-sec' + (cur ? ' on' : '') + '">' + esc(p.label)
+      + '<small>' + (accs.length ? accs.length + ' 个账号' : (p.error ? '读取失败' : '未登录')) + '</small></div>');
+    if (!accs.length) {
+      rows.push('<div class="idn-empty">在「设置 → 播放账号」里扫码登录</div>');
+      continue;
+    }
+    for (const a of accs) {
+      const on = cur && (a.id === (p.activeId || '') || (!p.activeId && accs[0] === a));
+      rows.push('<button class="idn-item' + (on ? ' on' : '') + '" data-p="' + esc(p.id)
+        + '" data-a="' + esc(a.id) + '">'
+        + '<span class="idn-ico" data-ch="' + esc(String(a.name || '?').trim().charAt(0) || '·') + '">'
+        + (a.avatarUrl ? '<img alt="" src="' + esc(a.avatarUrl) + '">'
+          : esc(String(a.name || '?').trim().charAt(0) || '·')) + '</span>'
+        + '<span class="idn-meta"><b>' + esc(a.name) + '</b><small>' + esc(a.sub || '') + '</small></span>'
+        + (on ? '<span class="idn-tick">当前</span>' : '') + '</button>');
+    }
+  }
+  box.innerHTML = rows.join('') || '<div class="idn-empty">还没有任何账号</div>';
+  box.querySelectorAll('.idn-ico img').forEach(im => {
+    im.onerror = () => { im.parentNode.textContent = im.parentNode.dataset.ch || '·'; };
+  });
+  box.querySelectorAll('.idn-item').forEach(b => {
+    b.onclick = () => idnSwitch(b.dataset.p, b.dataset.a);
+  });
+}
+
+function idnPlace() {
+  const pop = $('#idnPop');
+  const btn = $('#btnIdn');
+  if (!pop || !btn) return;
+  const r = btn.getBoundingClientRect();
+  pop.style.top = Math.round(r.bottom + 6) + 'px';
+  pop.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+}
+
+function idnOpen(on) {
+  const pop = $('#idnPop');
+  if (!pop) return;
+  IDN.open = !!on;
+  pop.hidden = !IDN.open;
+  if (IDN.open) { idnPlace(); idnLoad(true); }
+}
+
+function idnHide() { if (IDN.open) idnOpen(false); }
+
+async function idnLoad(force) {
+  try {
+    const r = await window.api.idnGet();
+    if (!r || !r.ok) throw new Error((r && r.error && r.error.message) || '读取失败');
+    S.idn.current = r.current || '';
+    S.idn.providers = r.providers || [];
+  } catch (e) {
+    if (force) toast('账号信息读取失败：' + ((e && e.message) || e));
+    S.idn.providers = S.idn.providers || [];
+  }
+  idnPaint();
+  if (IDN.open) idnRenderList();
+}
+
+/* 切过去之后，各音源要做的事不一样：
+ *   网易云 → 重拉「我创建的歌单」，否则列表还是上一个人的；
+ *   哔哩哔哩 → 清掉收藏夹缓存，下一次读会按新账号拉；
+ *   QQ / 酷狗 → 清封面与取流缓存（歌单接口待接上游，如实提示）。 */
+async function idnSwitch(provider, accountId) {
+  idnHide();
+  const row = idnRow(provider);
+  const label = row ? row.label : provider;
+  let r;
+  try { r = await window.api.idnSet(provider, accountId); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (!r || !r.ok) {
+    toast('切换失败：' + ((r && r.error && r.error.message) || '未知原因'), 3200);
+    return;
+  }
+  if (r.snapshot) { S.idn.current = r.snapshot.current || provider; S.idn.providers = r.snapshot.providers || []; }
+  idnPaint();
+  thumbUrl.clear();
+  try { await window.api.accInvalidate(provider); } catch {}
+
+  if (provider === 'ne') {
+    S.ne.home = { status: 'idle', err: '', data: null };
+    S.ne.coll = null;
+    neEnsureHome();
+  } else if (provider === 'bil') {
+    /* 先把登录态取回来再拉收藏夹：S.bil.status 还没就绪时
+     * bilEnsureFavs 会直接按「未登录」返回，收藏夹就永远空着。 */
+    await updateBilNote();
+    bilFavsReset();
+    bilEnsureFavs(true);
+  }
+  if (PL.view === 'pick') renderPl(); else if ($('#dLib').classList.contains('show')) renderLibrary();
+  toast('已切换到 ' + label + (accountId ? '' : '（未登录）'), 2400);
+}
+
+function idnInit() {
+  const btn = $('#btnIdn');
+  if (!btn || !window.api.idnGet) return;
+  btn.onclick = (e) => { e.stopPropagation(); idnOpen(!IDN.open); };
+  btn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); idnOpen(true); };
+  document.addEventListener('click', (e) => {
+    if (!IDN.open) return;
+    if (e.target.closest('#idnPop') || e.target.closest('#btnIdn')) return;
+    idnHide();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') idnHide(); });
+  window.addEventListener('resize', () => { if (IDN.open) idnPlace(); });
+  window.api.onIdnChanged ? window.api.onIdnChanged((snap) => {
+    if (!snap) return;
+    S.idn.current = snap.current || '';
+    S.idn.providers = snap.providers || [];
+    idnPaint();
+    if (IDN.open) idnRenderList();
+  }) : null;
+  idnLoad(false);
+}
+
 /* ------------------------------------------------------------------ 启动 */
 (async function init() {
   if (!window.api) {                       // preload 没加载起来时不要抛一堆看不懂的错
@@ -4380,6 +4573,7 @@ function applyTransVisibility() {
   healNetCovers();                       // 补齐老数据里缺失的网易云封面（后台跑，不挡启动）
 
   loadDevices();
+  idnInit();
   registerGlobalKeys();
   const op = new URLSearchParams(location.search).get('open');
   if (op === 'lib') openDrawer($('#dLib'));

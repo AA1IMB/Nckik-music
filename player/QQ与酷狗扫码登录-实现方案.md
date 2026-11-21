@@ -392,3 +392,27 @@ const out = await this.host.evalInPage(KgUser.QRCodeLogin(...));  // ← 页面�
 - `npx tsc -p player/tsconfig.accounts.json` → 0 error；
 - `node player/tools/test-accounts.mjs` → **76/76**（新增 8 条：初始 revision=0、切号后 +1、第一版事件无 `library`、第二版事件带 `library.message`、`status.dataRevision` 与事件同源、反注册后不再推）；
 - 真机（`.tmp/diag-acc4.js`）：`[shape] {"cards":["qqapp","kugou"],"seg":false}`、点 QQ 音乐卡出码 `{"len":606,"w":150,"state":"请用手机 QQ 音乐 App 扫一扫"}`，截图 `player/demo/shot-acc-cards.png`。
+
+## 二十、主界面当前账号切换（v0.9.2）
+
+### 20.1 为什么要有这一层
+四个音源各有自己的登录态，但用户真正关心的是「我现在用谁的歌单」。以前这个信息只藏在设置抽屉里，而「选择歌单」又无条件把网易云歌单塞进列表 —— 切到哔哩哔哩后点一个网易云歌单只会报错。这一版把「当前账号」提到主界面，并让歌单来源跟着它走。
+
+### 20.2 数据与通道
+| 位置 | 内容 |
+| --- | --- |
+| `userData/identity.json` | `{ version, current, active: { ne/qqapp/kugou/bil → 账号主键 } }`，只存主键，不存任何凭证 |
+| `player/main.js` | `identitySnapshot()` 把四个音源归一成 `{ id, label, activeId, accounts[] }`；`idn:get` / `idn:set` 两个通道；`idn:set` 对 QQ/酷狗会额外调 `manager.switchTo()` |
+| `player/preload.js` | `idnGet` / `idnSet` / `onIdnChanged` |
+| `player/renderer/index.html` | 标题栏 `#btnIdn`（头像）+ `#idnPop` 下拉 |
+| `player/renderer/app.js` | `idnPaint / idnRenderList / idnSwitch / idnInit`；`plSources()` 按 `S.idn.current` 过滤；`plSelectSource()` 增加哔哩哔哩分支 |
+
+### 20.3 三处容易踩空的细节
+1. **身份回落**：当前账号退出登录后，`identitySnapshot()` 会自动回落到第一个有账号的音源并落盘，界面不会卡在一个已不存在的人身上。
+2. **先取状态再拉收藏夹**：切到哔哩哔哩时若 `S.bil.status` 还没就绪，`bilEnsureFavs()` 会按「未登录」直接返回，收藏夹永远空 —— 所以先 `await updateBilNote()` 再拉。
+3. **收藏夹字段是 `name/sub`**（不是 `title/count`），「选择歌单」里照抄 drawer 行的字段才不会全叫「收藏夹」。
+
+### 20.4 验证
+- `node --check` 四个文件全通过。
+- 真机：`.tmp/diag-idn.js` → `[pop] items 4`（网易云/QQ/酷狗/哔哩哔哩各 1 个账号）、`[src-before]` 17 条网易云歌单、切到哔哩哔哩后 `[after-switch]` 出现 8 个收藏夹（默认收藏夹/学习/摄影/键盘/pr/电脑…）、切回网易云 17 条复原；截图 `player/demo/shot-idn-pop.png`。
+- 头像加载失败自动回落首字母（QQ 音乐当前没有头像 URL、酷狗只有 uid）。

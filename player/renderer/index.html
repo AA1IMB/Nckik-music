@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; media-src media: neaudio:; font-src 'self' file:; connect-src 'self' file:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: https:; media-src media: neaudio:; font-src 'self' file:; connect-src 'self' file:">
 <title>Nckik′s music</title>
 <link rel="stylesheet" href="app.css">
 </head>
@@ -20,6 +20,9 @@
     </div>
     <div class="drag" id="drag"></div>
     <div class="bar-r">
+      <button class="ibtn acc-ava" id="btnIdn" title="当前账号（右键切换）">
+        <span class="acc-ava-in" id="idnAva">·</span>
+      </button>
       <button class="ibtn" id="btnSet" title="设置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
           <circle cx="12" cy="12" r="3.05"/><path d="M19.3 14.9a1.6 1.6 0 00.32 1.77l.06.06a1.95 1.95 0 11-2.76 2.76l-.06-.06a1.6 1.6 0 00-1.77-.32 1.6 1.6 0 00-.97 1.47V21a1.95 1.95 0 11-3.9 0v-.1a1.6 1.6 0 00-1.04-1.47 1.6 1.6 0 00-1.77.32l-.06.06a1.95 1.95 0 11-2.76-2.76l.06-.06a1.6 1.6 0 00.32-1.77 1.6 1.6 0 00-1.47-.97H4.2a1.95 1.95 0 110-3.9h.1a1.6 1.6 0 001.47-1.04 1.6 1.6 0 00-.32-1.77l-.06-.06A1.95 1.95 0 118.15 4.7l.06.06a1.6 1.6 0 001.77.32h.08a1.6 1.6 0 00.97-1.47V3.5a1.95 1.95 0 113.9 0v.1a1.6 1.6 0 00.97 1.47 1.6 1.6 0 001.77-.32l.06-.06a1.95 1.95 0 112.76 2.76l-.06.06a1.6 1.6 0 00-.32 1.77v.08a1.6 1.6 0 001.47.97h.1a1.95 1.95 0 110 3.9h-.1a1.6 1.6 0 00-1.47.97z"/>
@@ -35,6 +38,12 @@
       </div>
     </div>
   </header>
+
+  <div class="idn-pop" id="idnPop" hidden>
+    <div class="idn-head">当前账号<b id="idnNow">未登录</b></div>
+    <div class="idn-list" id="idnList"></div>
+    <div class="idn-foot">右键头像随时切换 · 「选择歌单」只列出当前账号的内容</div>
+  </div>
 
   <button class="fs-exit" id="fsExit" title="退出全屏 (Esc)">
     <svg viewBox="0 0 16 16"><path d="M6.2 2.6v3.6H2.6M9.8 2.6v3.6h3.6M13.4 9.8h-3.6v3.6M2.6 9.8h3.6v3.6"/></svg>

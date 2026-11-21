@@ -1236,6 +1236,144 @@ ipcMain.handle('bil:logout', () => {
   return { ok: true, status: bil.status() };
 });
 
+/* ---------------- 主界面「当前账号」 ----------------
+ * 四个音源各有自己的登录态，界面要能回答一句「我现在用的是谁的歌单」，
+ * 所以单独存一份身份文件：当前音源 + 每个音源选中的账号。
+ * 这里只存主键和展示用的昵称/头像，凭证仍在各自的安全存储里
+ * （ne-auth.bin / bil-auth.bin / accounts.bin），不在这里出现明文。
+ */
+const identityPath = path.join(userDir, 'identity.json');
+const IDN_LIST = [
+  { id: 'ne', label: '网易云音乐' },
+  { id: 'qqapp', label: 'QQ 音乐' },
+  { id: 'kugou', label: '酷狗音乐' },
+  { id: 'bil', label: '哔哩哔哩' }
+];
+
+function readIdentity() {
+  const raw = readJSON(identityPath, null);
+  const out = { current: '', active: {} };
+  if (!raw || typeof raw !== 'object') return out;
+  if (IDN_LIST.some(x => x.id === raw.current)) out.current = raw.current;
+  if (raw.active && typeof raw.active === 'object') {
+    for (const [k, v] of Object.entries(raw.active)) {
+      if (typeof v === 'string' && v) out.active[k] = v;
+    }
+  }
+  return out;
+}
+
+function writeIdentity(idn) {
+  writeJSON(identityPath, { version: 1, current: idn.current || '', active: idn.active || {} });
+}
+
+/* 把四个音源归一成 { id, label, activeId, accounts[] }：
+ * 渲染层只认这一种形状，不必知道网易云只有一份登录态、QQ/酷狗有多账号。 */
+async function identitySnapshot() {
+  const idn = readIdentity();
+  const out = { ok: true, current: idn.current, providers: [] };
+
+  const neRow = { id: 'ne', label: '网易云音乐', activeId: '', accounts: [] };
+  try {
+    const a = ne.hasCookie() ? await ne.account() : null;
+    if (a && a.loggedIn) {
+      const id = 'ne:' + (a.userId || 0);
+      neRow.accounts.push({
+        id, name: a.nickname || ('uid ' + a.userId), sub: '网易云',
+        avatarUrl: a.avatarUrl || '', current: true
+      });
+      neRow.activeId = id;
+    }
+  } catch (e) { neRow.error = String((e && e.message) || e); }
+  out.providers.push(neRow);
+
+  for (const id of ['qqapp', 'kugou']) {
+    const row = { id, label: id === 'qqapp' ? 'QQ 音乐' : '酷狗音乐', activeId: '', accounts: [] };
+    try {
+      if (accAccounts && accAccounts.manager) {
+        const cur = accAccounts.manager.current(id);
+        row.activeId = (cur && cur.id) || '';
+        for (const a of accAccounts.manager.list(id)) {
+          row.accounts.push({
+            id: a.id, name: a.name || a.id,
+            sub: row.label, avatarUrl: a.avatarUrl || '',
+            current: a.id === row.activeId
+          });
+        }
+      }
+    } catch (e) { row.error = String((e && e.message) || e); }
+    out.providers.push(row);
+  }
+
+  const bilRow = { id: 'bil', label: '哔哩哔哩', activeId: '', accounts: [] };
+  try {
+    /* 重启后只恢复了凭证、还没验过：这里补一次，否则下拉里只能显示 uid */
+    if (bil.loggedIn() && !bil.authInfo().verified) await bil.verify().catch(() => null);
+    const st = bil.status();
+    if (st && st.loggedIn) {
+      const id = 'bil:' + (st.userId || 0);
+      bilRow.accounts.push({
+        id, name: st.nickname || ('uid ' + st.userId), sub: '哔哩哔哩',
+        avatarUrl: st.avatarUrl || '', current: true
+      });
+      bilRow.activeId = id;
+    }
+  } catch (e) { bilRow.error = String((e && e.message) || e); }
+  out.providers.push(bilRow);
+
+  /* 当前账号如果已经退出登录，别把界面卡在一个不存在的人身上：
+   * 顺手回落到「第一个有账号的音源」，并把回落结果落盘。 */
+  const curRow = out.providers.find(x => x.id === out.current);
+  if (!curRow || !curRow.accounts.length) {
+    const fallback = out.providers.find(x => x.accounts.length);
+    if (fallback) {
+      out.current = fallback.id;
+      out.fallback = true;
+      const next = readIdentity();
+      next.current = fallback.id;
+      if (fallback.activeId) next.active[fallback.id] = fallback.activeId;
+      writeIdentity(next);
+    } else {
+      out.current = '';
+    }
+  }
+  return out;
+}
+
+ipcMain.handle('idn:get', async () => {
+  try { return await identitySnapshot(); }
+  catch (e) {
+    return { ok: false, error: { code: 'IDN_ERROR', message: String((e && e.message) || e) } };
+  }
+});
+
+ipcMain.handle('idn:set', async (_e, arg) => {
+  const provider = arg && arg.provider;
+  const accountId = (arg && arg.accountId) || '';
+  if (!IDN_LIST.some(x => x.id === provider)) {
+    return { ok: false, error: { code: 'IDN_BAD_PROVIDER', message: '未知的音源' } };
+  }
+  const idn = readIdentity();
+  idn.current = provider;
+  if (accountId) idn.active[provider] = String(accountId);
+  writeIdentity(idn);
+
+  /* QQ 音乐 / 酷狗是多账号：选中的那条要真的切过去，
+   * 否则界面显示 A、取流用的是 B。切换会触发 acc:event（带 revision）。 */
+  if ((provider === 'qqapp' || provider === 'kugou') && accountId && accAccounts && accAccounts.manager) {
+    try { accAccounts.manager.switchTo(provider, String(accountId)); }
+    catch (e) {
+      return {
+        ok: false,
+        error: { code: (e && e.code) || 'IDN_SWITCH_FAILED', message: String((e && e.message) || e) }
+      };
+    }
+  }
+  const snapshot = await identitySnapshot().catch(() => null);
+  if (win && !win.isDestroyed()) win.webContents.send('idn:changed', snapshot);
+  return { ok: true, snapshot };
+});
+
 ipcMain.handle('win:min', () => { if (win && !win.isDestroyed()) win.minimize(); });
 ipcMain.handle('win:max', () => {
   if (!win || win.isDestroyed()) return false;
