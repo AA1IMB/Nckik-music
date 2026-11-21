@@ -1560,6 +1560,8 @@ async function upOpen(provider, id, name) {
     }));
   }
   if (S.srcMode === provider) renderUp(provider);
+  if (r && r.ok) toast('「' + (name || '歌单') + '」共 ' + st.tracks.length + ' 首');
+  else toast(st.trackErr || '曲目读取失败');
 }
 
 function upPlay(provider, idx) {
@@ -1702,12 +1704,16 @@ const PL = { view: 'list', ask: null, busy: false, sources: [], cands: [] };
 const plItems = () => (Array.isArray(S.settings.playlist) ? S.settings.playlist : []);
 
 function plToItem(t) {
-  return {
+  const it = {
     id: String((t && (t.path || t.id)) || ''),
     title: String((t && t.title) || '未知曲目').slice(0, 120),
     artist: String((t && t.artist) || '').slice(0, 80),
     duration: Number(t && t.duration) || 0
   };
+  /* 上游曲目要带 albumMid：QQ 的封面地址是按「专辑 mid」拼的，丢了就只剩占位图 */
+  if (t && t.albumMid) it.albumMid = String(t.albumMid);
+  if (t && t.album) it.album = String(t.album).slice(0, 120);
+  return it;
 }
 
 /* 手改过 settings.json 的人可以把这里写成任何东西：逐条校验、按 id 去重（不设上限） */
