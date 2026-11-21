@@ -1519,6 +1519,20 @@ ipcMain.handle('acc:playlists', async (_e, arg) => {
   }
 });
 
+/* 账号权限：酷狗 VIP 不看 cookie 里有没有 vip 字段，而是拿一首「需要权限」的歌
+ * 真去取一次链，能取到才算有会员（见 upstream-library.kgVip）。 */
+ipcMain.handle('acc:vip', async () => {
+  try {
+    const cred = credOf('kugou');
+    if (!cred) return { ok: false, error: { code: 'E_AUTH_REQUIRED', message: '还没有登录酷狗音乐' } };
+    /* 账号字段在 extra 里（userid/dfid），cookie 是单独一段 —— 和 acc:playlists 同一套拼法 */
+    const v = await upstream.kgVip({ ...cred.extra, cookie: cred.cookie });
+    return { ok: true, ...v };
+  } catch (e) {
+    return { ok: false, error: { code: (e && e.code) || 'E_UPSTREAM', message: String((e && e.message) || e) } };
+  }
+});
+
 ipcMain.handle('acc:tracks', async (_e, arg) => {
   const provider = (arg && arg.provider) || '';
   const id = (arg && arg.id) || '';

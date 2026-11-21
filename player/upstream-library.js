@@ -110,6 +110,16 @@ async function kgGet(cookie, url) {
   catch { throw fail('E_UPSTREAM_BAD_JSON', '酷狗接口没有返回 JSON（可能被风控）'); }
 }
 
+const KG_MUA = 'Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+async function kgGetText(cookie, url) {
+  /* 详情页是移动版页面：桌面 UA 会拿到另一个模板（没有内嵌 JSON），
+   * 必须用移动 UA + m.kugou.com 的 Referer 才和浏览器里看到的一致。 */
+  const r = await fetch(url, { headers: { Cookie: cookie, 'User-Agent': KG_MUA, Referer: 'https://m.kugou.com/' } });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `酷狗接口返回 ${r.status}`);
+  return await r.text();
+}
+
 async function kgPlaylists(cred) {
   const cookie = cred.cookie || '';
   const uid = cred.userid || cred.KugooID || '';
@@ -142,40 +152,114 @@ async function kgPlaylists(cred) {
  * 每页返回 30 个歌单卡片，每张卡片里带 3 首 songs[]；把多页的 songs[] 摊平、
  * 按 hash 去重就能拿到整张歌单（page1 得 89 首、page2 累到 178 首，已覆盖 156 首的歌单）。
  */
+/* 从 m.kugou.com 的歌单详情页里抠出内嵌 JSON：
+ * 页面是 HTML 外壳 + 一段 `{...,"list":{"list":{"total":156,"info":[...]}}}`
+ * 没有可用的 JSON 接口（/plist/index?specialid= 会忽略参数、永远返回首页那批卡片，
+ * 这正是「导入任何歌单都导入同一个」的根因）。 */
+function sliceBracket(text, from, open, close) {
+  let depth = 0, inStr = false, esc = false;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === open) depth++;
+    else if (c === close) { depth--; if (!depth) return text.slice(from, i + 1); }
+  }
+  return '';
+}
+
+async function kgPlaylistPage(cookie, id, page) {
+  /* 只有 mobilecdn 的 v3 接口给你「整张歌单 + 正确的 total」：
+   *   - m.kugou.com/plist/index?specialid= 会忽略参数，永远返回首页那批卡片（旧 bug 根因）
+   *   - m.kugou.com/plist/list/<id> 只内嵌前 10 首，且 page 参数无效
+   * 这个接口必须用 http（https 证书在 Node 里握手失败）。 */
+  const url = 'http://mobilecdn.kugou.com/api/v3/special/song'
+    + `?specialid=${encodeURIComponent(id)}&page=${page}&pagesize=100&plat=0&version=8000`;
+  const r = await fetch(url, { headers: { Cookie: cookie, 'User-Agent': KG_UA } });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `酷狗接口返回 ${r.status}`);
+  let j = null;
+  try { j = await r.json(); } catch { throw fail('E_UPSTREAM_BAD_JSON', '酷狗歌单接口没有返回 JSON'); }
+  const d = (j && j.data) || {};
+  return { total: Number(d.total || 0), songs: Array.isArray(d.info) ? d.info : [] };
+}
+
 async function kgPlaylistTracks(cred, id) {
   const cookie = cred.cookie || '';
   if (!cookie) throw fail('E_AUTH_REQUIRED', '酷狗音乐还没有登录');
   const seen = new Set();
   const out = [];
-  let target = 0;
-  for (let page = 1; page <= 6; page++) {
-    const j = await kgGet(cookie, `https://m.kugou.com/plist/index?json=true&specialid=${encodeURIComponent(id)}&page=${page}&pagesize=100`);
-    const cards = (j.plist && j.plist.list && j.plist.list.info) || [];
-    if (!cards.length) break;
-    if (!target) target = Number(cards[0].songcount || 0);
+  let total = 0;
+  for (let page = 1; page <= 10; page++) {
+    const r = await kgPlaylistPage(cookie, id, page);
+    if (!total) total = r.total;
+    if (!r.songs.length) break;
     let added = 0;
-    for (const c of cards) {
-      for (const s of (c.songs || [])) {
-        const hash = String(s.hash || '').toUpperCase();
-        if (!hash || seen.has(hash)) continue;
-        seen.add(hash);
-        added++;
-        const name = String(s.filename || s.songname || '');
-        out.push({
-          id: hash,
-          title: s.songname ? String(s.songname) : name.replace(/^.*?\s-\s/, ''),
-          artist: String(s.singername || s.author_name || (name.includes(' - ') ? name.split(' - ')[0] : '')),
-          duration: Number(s.duration || s.time_length || 0)
-        });
-      }
+    for (const s of r.songs) {
+      const hash = String(s.hash || '').toUpperCase();
+      if (!hash || seen.has(hash)) continue;
+      seen.add(hash);
+      added++;
+      const name = String(s.filename || s.songname || '');
+      out.push({
+        id: hash,
+        title: s.songname ? String(s.songname) : name.replace(/^.*?\s-\s/, ''),
+        artist: String(s.singername || s.author_name || (name.includes(' - ') ? name.split(' - ')[0] : '')),
+        duration: Number(s.duration || s.timelength || 0),
+        /* privilege: 8 = 免费可播，>=10 = 需要付费/会员（实测 10 取链必回 E_NO_COPYRIGHT）。
+         * pay_type 在这份接口里恒为 3，不能拿它判断，否则整张歌单都被标成 VIP。 */
+        vip: Number(s.privilege || 0) > 8
+      });
     }
     if (!added) break;
-    /* 卡片里带的是「整张歌单的前 N 首」，翻页只是把窗口往后挪；
-     * 拿到 songcount 就收工，否则会一路涨到几百首。 */
-    if (target && out.length >= target) break;
-    if (!target && out.length >= 300) break;
+    if (total && out.length >= total) break;
   }
-  return target ? out.slice(0, target) : out;
+  return total ? out.slice(0, total) : out;
 }
 
-module.exports = { albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks };
+/* 账号是不是 VIP：不做「猜 cookie」这种事，直接拿一首需要权限的歌去取链，
+ * 能取到直链就说明这个账号有权限（换号/过期都会自然失效，且只花一次请求）。 */
+let __kgVipCache = { at: 0, val: null };
+async function kgVip(cred) {
+  const now = Date.now();
+  if (__kgVipCache.val && now - __kgVipCache.at < 10 * 60 * 1000) return __kgVipCache.val;
+  const cookie = cred.cookie || '';
+  const uid = cred.userid || cred.KugooID || '';
+  if (!cookie || !uid) return { vip: false, reason: 'E_AUTH_REQUIRED', message: '酷狗音乐还没有登录' };
+  let probe = null;
+  try {
+    const pls = await kgPlaylists(cred);
+    const withSongs = pls.find(p => p.count > 0);
+    if (withSongs) {
+      const page = await kgPlaylistPage(cookie, withSongs.id, 1);
+      probe = page.songs.find(s => Number(s.privilege || 0) > 8) || null;
+    }
+  } catch { /* 拿不到样本就退化成「未知」 */ }
+  if (!probe) {
+    const val = { vip: false, reason: 'E_NO_SAMPLE', message: '没有找到需要权限的样本来判断' };
+    __kgVipCache = { at: now, val };
+    return val;
+  }
+  const hash = String(probe.hash || '').toUpperCase();
+  try {
+    await kgResolveLazy()(hash);
+    const val = { vip: true, reason: '', hash: hash.slice(0, 8), privilege: Number(probe.privilege || 0) };
+    __kgVipCache = { at: now, val };
+    return val;
+  } catch (e) {
+    const val = { vip: false, reason: String((e && e.code) || 'E_UPSTREAM'), hash: hash.slice(0, 8), privilege: Number(probe.privilege || 0), message: String((e && e.message) || '') };
+    __kgVipCache = { at: now, val };
+    return val;
+  }
+}
+/* 取流器在 stream-resolve.js：这里延迟 require，避免两个模块互相 require 成环 */
+function kgResolveLazy() {
+  return require('./stream-resolve.js').kgResolve;
+}
+
+module.exports = {
+  kgVip, albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks };

@@ -228,6 +228,12 @@
       const acc = (status && status.account) || null;
       c.state.textContent = acc ? acc.name : '未登录';
       c.state.classList.toggle('off', !acc);
+      if (acc && c.def.id === 'kugou' && api().accVip) {
+        api().accVip().then(v => {
+          if (!v || !v.ok) return;
+          c.state.textContent = acc.name + (v.vip ? ' · VIP' : ' · 免费账号');
+        }).catch(() => {});
+      }
       c.upV.textContent = status && status.upstreamReady ? '已配置' : '未配置';
       c.upV.classList.toggle('dim', !(status && status.upstreamReady));
     }
