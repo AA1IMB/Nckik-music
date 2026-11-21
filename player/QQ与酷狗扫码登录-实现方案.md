@@ -284,3 +284,28 @@ if (this.cfg.requiredCookieNames.every(n => !!cookies[n])) { ... confirmed ... }
 
 验证：`host.writeCookies({token:'FAKE_TOKEN_123', userid:'987654321'}, '.kugou.com')` 后
 `readCookies(['token','userid'])` 立刻读回两值，分区里落到 `.kugou.com`；`tsc` 0 error、自测 49/49。
+
+## 十七、酷狗「已扫码」卡死的真正原因：`executeJavaScript` 挂住（2026-11-21）
+
+日志里已经看到 `[acc] 酷狗直接写入 token { userId: '1348766016' }`，分区里也确实出现了
+`token`（64 字符）与 `userid`，但面板仍停在「已扫码、请确认」，账号列表无条目。
+
+原因不在 cookie，而是紧接着那一步：
+
+```ts
+const out = await this.host.evalInPage(KgUser.QRCodeLogin(...));  // ← 页面正在跳转
+```
+
+`webContents.executeJavaScript()` 在页面跳转（酷狗确认后会走 `regok`）时**可能永远不返回**，
+于是 `poll()` 卡在这个 `await` 上：既不会重新读 cookie，也不会返回新的 phase ——
+表现就是「token 已经写进去，界面却一直停在已扫码」。
+
+修复：
+
+| 改动 | 说明 |
+| --- | --- |
+| 删掉 `KgUser.QRCodeLogin` 调用 | 已经能自己写 token，没必要再依赖页面函数 |
+| 写入后 `sleep(500)` 再 `super.poll()`，并打一行 `[acc] 酷狗写入后重判 { phase }` | 有日志可查，不再是黑盒 |
+| `PageProviderConfig.clearSession`（默认 true，酷狗设 false） | 酷狗分区不再每次登录都清空 —— 已经扫过的 `token/userid` 会留着，重启后第一拍 poll 即可恢复登录态；QQ 仍清空（避免快捷登录旧账号） |
+
+`tsc` 0 error、`tools/test-accounts.mjs` 49/49。

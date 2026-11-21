@@ -147,6 +147,8 @@ export interface LoginWindowHost {
       clickTexts?: readonly string[];
       /** 兼容单条文案写法 */
       clickText?: string;
+      /** 打开前是否清空该分区的 cookie（默认 true；酷狗需要在重开时保留已登录态） */
+      clearCookies?: boolean;
     }
   ): Promise<void>;
   /** 读到指定名字的 cookie（值可能为空串，表示尚未写入） */

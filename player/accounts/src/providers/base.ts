@@ -62,6 +62,8 @@ export interface PageProviderConfig {
    * 只做「点这个可见按钮」，不注入任何伪造参数。
    */
   clickText?: string;
+  /** 打开登录页前是否清空分区 cookie（默认 true；酷狗设为 false 以保留已登录态） */
+  clearSession?: boolean;
   /** 需要按顺序点击多个入口时才出码（QQ 音乐：登录 → QQ登录 → 扫码登录） */
   clickTexts?: readonly string[];
   /** 二维码出现后状态行的提示语（默认「请用手机 App 扫码」） */
@@ -126,6 +128,7 @@ export class PageLoginProvider implements Provider {
           clickTexts: this.cfg.clickTexts,
           clickText: this.cfg.clickText,
           partition: this.cfg.partition,
+          clearCookies: this.cfg.clearSession !== false,
           size: { width: 960, height: 720 }
         });
       } catch (err) {

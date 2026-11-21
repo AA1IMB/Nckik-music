@@ -36,6 +36,8 @@ export const KUGOU_CONFIG: PageProviderConfig = {
   loginUrl: 'https://login-user.kugou.com/login/?appid=1014',
   partition: 'persist:acc-kugou',
   qrMessage: '请用手机酷狗 App 扫一扫',
+  // 不清分区：已经扫码成功过的 token/userid 留在里面，重启后第一拍 poll 就能直接恢复登录态
+  clearSession: false,
   cookieNames: ['token', 'userid', 'dfid', 'kugouid', 'kg_mid', 'kg_dfid', 'NickName'],
   requiredCookieNames: ['token', 'userid'],
   qrTimeoutMs: 15_000,
@@ -98,21 +100,12 @@ export class KugouProvider extends PageLoginProvider {
         await this.host.writeCookies({ token: this.watch.token, userid: this.watch.userId }, '.kugou.com');
         this.logger.info('[acc] 酷狗直接写入 token', { userId: this.watch.userId });
       }
-      const args = JSON.stringify([1014, this.watch.userId || '0', this.watch.token]);
-      const code = `new Promise(r => {
-        const done = v => { try { r(String(v).slice(0, 120)); } catch { r('cb-error'); } };
-        const t = setTimeout(() => r('timeout'), 8000);
-        try {
-          if (!window.KgUser || typeof KgUser.QRCodeLogin !== 'function') { clearTimeout(t); return r('no-fn'); }
-          const a = ${args};
-          KgUser.QRCodeLogin(a[0], a[1], a[2], function (res) { clearTimeout(t); done(res); });
-        } catch (e) { clearTimeout(t); done('throw ' + e.message); }
-      })`;
-      const out = await this.host.evalInPage?.(code);
-      this.logger.info('[acc] 酷狗换会话', { result: String(out ?? '').slice(0, 60) });
-      // 换会话后 cookie 立刻可读，再判一次
-      await new Promise(res => setTimeout(res, 600));
+      // 写完立刻重判：此时 requiredCookieNames 已命中，正常应直接 confirmed。
+      // 不调用页面的 KgUser.QRCodeLogin —— executeJavaScript 在页面跳转时会一直不返回，
+      // 曾把整个 poll() 挂住（界面就永远停在「已扫码」）。
+      await new Promise(res => setTimeout(res, 500));
       r = await super.poll();
+      this.logger.info('[acc] 酷狗写入后重判', { phase: r.phase });
     }
     if (this.watch.status === 4 && r.phase !== 'confirmed') {
       // 已确认但 cookie 还没读到：保持 scanned，别退回 waiting

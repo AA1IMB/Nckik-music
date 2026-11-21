@@ -163,11 +163,13 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
         }
       });
       if (ua) win.webContents.setUserAgent(ua);
-      // 每次开始登录都用干净的分区：否则平台会拿上一次留下的「快捷登录」账号
-      // 直接出授权页/旧二维码，扫码后还会报「参数错误，网页未正确配置 QQ 登录」。
-      try {
-        await win.webContents.session.clearStorageData({ storages: ['cookies'] });
-      } catch { /* 清不掉就继续，至少不阻断登录 */ }
+      // QQ 那个分区里残留的「快捷登录」账号会直接出旧二维码，手机扫完报
+      // 「参数错误，网页未正确配置 QQ 登录」，所以默认清空；酷狗要保留已登录态（重启后能直接恢复）。
+      if (o.clearCookies !== false) {
+        try {
+          await win.webContents.session.clearStorageData({ storages: ['cookies'] });
+        } catch { /* 清不掉就继续，至少不阻断登录 */ }
+      }
       // window.open 的回调页必须真的开出来：kugou 的 regok、QQ 的授权跳转都靠 opener
       // 交接（就地 loadURL 会把登录页本身顶掉，登录态就永远不会写进 cookie）。
       win.webContents.setWindowOpenHandler(() => ({
