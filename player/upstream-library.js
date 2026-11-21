@@ -145,11 +145,24 @@ async function qqPlaylistTracksInner(cred, id, dirId) {
   const uid = cred.uin || cred.musicid || '';
   const musickey = cred.musickey || '';
   if (!uid || !musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
-  const data = await musicu(qqComm(uid, musickey), 'music.srfDissInfo.DissInfo', 'CgiGetDiss', {
-    disstid: Number(id) || 0, dirid: Number(dirId) || 0,
-    song_begin: 0, song_num: 100, userinfo: true, orderlist: true
-  });
-  const songs = Array.isArray(data.songlist) ? data.songlist : [];
+  /* 以前这里写死 song_num:100、只取首页，于是任何超过 100 首的歌单都被截断。
+   * CgiGetDiss 其实支持 song_begin/song_num 分页，并且回 total_song_num：
+   * 按 100 一页翻到底，和网易云一样「导入多少就有多少」。 */
+  const PAGE = 100;
+  const MAX_PAGES = 200;              /* 兜底：最多 2 万首，防止上游 total 异常时死循环 */
+  const collected = [];
+  let total = 0;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const data = await musicu(qqComm(uid, musickey), 'music.srfDissInfo.DissInfo', 'CgiGetDiss', {
+      disstid: Number(id) || 0, dirid: Number(dirId) || 0,
+      song_begin: page * PAGE, song_num: PAGE, userinfo: true, orderlist: true
+    });
+    const got = Array.isArray(data.songlist) ? data.songlist : [];
+    total = Number(data.total_song_num || data.total || 0) || total;
+    for (const x of got) collected.push(x);
+    if (!got.length || got.length < PAGE || (total && collected.length >= total)) break;
+  }
+  const songs = collected;
   return songs.map(s => {
     const singers = Array.isArray(s.singer) ? s.singer.map(x => x && x.name).filter(Boolean).join('/') : '';
     return {

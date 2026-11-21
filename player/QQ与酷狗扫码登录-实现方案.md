@@ -600,3 +600,23 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 - 应用内 IPC（`diag-upserch`）：`{"pl":{"n":3,"first":"默认收藏"},"sr":{"n":30,"first":"晴天 / 周杰伦"},"qq":{"n":30}}`。
 - 回归：`probe-home 50/50`、`probe-playlist 53/53`。
 - 限流说明：短时间连发几十次搜索会转成 `2001`，登录态与匿名都会影响，等 1–2 分钟恢复；面板已给明确文案。
+
+## 二十八、QQ 音乐歌单导入不再截断在 100 首（2026-11-21）
+
+### 28.1 现象与根因
+- 现象：登录 QQ 音乐后，在「选择歌单」里导入一张 116 首的歌单，播放列表只进 100 首。
+- 根因：`player/upstream-library.js` 的 `qqPlaylistTracksInner()` 把 `CgiGetDiss` 的 `song_num` 写死成 `100`、`song_begin` 写死成 `0`，且只发一次请求 —— 上游其实支持分页并回 `total_song_num`。
+
+### 28.2 修复
+按 100 一页翻到底，直到 `collected.length >= total_song_num` 或本页不满 100 为止（`MAX_PAGES = 200` 作为兜底，避免上游 total 异常时死循环）：
+
+```
+song_begin: page * 100, song_num: 100
+total = data.total_song_num || data.total
+```
+
+### 28.3 验证
+- 模块级：`qqPlaylistTracks(cred,'6878369743',201)` → **116 首**（首条「不为谁而作的歌」、末条「Falling You」）。
+- 应用内 IPC：`accTracks('qqapp','6878369743',201)` → `{"ok":true,"n":116}`。
+- 回归：`probe-playlist 53/53`。
+- 说明：播放列表本身没有容量上限（v0.6.0 起 `S.q` 任意长度 + 虚拟滚动），所以「导入无上限」只取决于这一步能否翻页取全。
