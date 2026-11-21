@@ -184,6 +184,28 @@ function qTrack(qi) {
   return row.t;
 }
 
+/* 兜底查专辑 mid：只在队列/曲库条目里找不到时才用，失败一律当没有 */
+function albumMidOf(k, provider) {
+  try {
+    if (k && k.albumMid) return String(k.albumMid);
+    const id = String((k && k.path) || '');
+    if (!id) return '';
+    const pools = [];
+    if (typeof S !== 'undefined') {
+      if (S.up && S.up[provider] && Array.isArray(S.up[provider].tracks)) pools.push(S.up[provider].tracks);
+      if (Array.isArray(S.tracks)) pools.push(S.tracks);
+    }
+    for (const list of pools) {
+      for (const t of list) {
+        if (!t || !t.albumMid) continue;
+        const tid = String(t.id || '');
+        if (tid === id || ('qq:' + tid) === id || ('kg:' + tid) === id) return String(t.albumMid);
+      }
+    }
+  } catch { /* 兜底查询，失败当没有 */ }
+  return '';
+}
+
 const curTrack = () => (S.i >= 0 ? qTrack(S.i) : null);
 const curItem = () => (S.i >= 0 && S.q[S.i] ? S.q[S.i].item : null);
 
@@ -3554,7 +3576,7 @@ async function playAt(qi, opts) {
       /* 上游曲目没有本地文件，别去问 trackDetail（它会回「元数据读取失败」，
        * 界面就顶着一行红字）。封面与码率一起从上游拿。 */
       try {
-        const am = albumMidOf(k, 'qq');
+        const am = k.albumMid || albumMidOf(k, 'qq');
         const m = await window.api.accMeta(k.path, am);
         if (m && m.ok) {
           art = m.cover || null;

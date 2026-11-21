@@ -1475,7 +1475,8 @@ async function upstreamMetaOf(key, albumMid) {
   if (s.startsWith('qq:')) {
     const cred = credOf('qqapp') || {};
     const extra = cred.extra || {};
-    const am = albumMid || upmeta.albumMidOf(s);
+    /* albumMid 由渲染层带下来；没有也没关系 —— qqMeta 会按 songmid 自己反查专辑。 */
+    const am = albumMid || '';
     const m = await upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey }, am);
     if (m && m.cover) m.cover = await upmeta.coverDataUrl(m.cover, 'https://y.qq.com/');
     return m;
