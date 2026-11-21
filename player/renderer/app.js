@@ -1516,13 +1516,20 @@ function fillThumbs(root) {
  * 数据来自主进程 acc:playlists / acc:tracks（凭证在账号层，渲染层看不到 cookie）。 */
 async function upEnsure(provider, force) {
   const st = S.up[provider] || (S.up[provider] = { status: 'idle', err: '', items: [], view: 'list', tracks: [], name: '', id: 0 });
-  if (st.status === 'loading') return;
+  /* 卡在 loading 超过 20 秒就允许重来：上游偶尔会长时间不回应，
+   * 不放行的话「选择歌单」会永远停在「正在读取…」。 */
+  if (st.status === 'loading' && Date.now() - (st.at || 0) < 20000) return;
   if (!force && (st.status === 'ready' || st.status === 'error')) return;
-  st.status = 'loading'; st.err = '';
+  st.status = 'loading'; st.err = ''; st.at = Date.now();
   if (S.srcMode === provider) renderUp(provider);
   let r;
-  try { r = await window.api.accPlaylists(provider); }
-  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  try {
+    /* 上游偶尔长时间不回应：给一次硬上限，宁可显示失败也别一直转圈。 */
+    r = await Promise.race([
+      window.api.accPlaylists(provider),
+      new Promise(res => setTimeout(() => res({ ok: false, error: { message: '上游 30 秒没有回应，稍后重试' } }), 30000))
+    ]);
+  } catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
   if (!r || !r.ok) {
     st.status = 'error';
     st.err = (r && r.error && r.error.message) || '歌单读取失败';
@@ -1573,9 +1580,13 @@ function renderUp(provider) {
   const list = $('#libList');
   const label = provider === 'kugou' ? '酷狗音乐' : 'QQ 音乐';
   if (st.status === 'loading') {
-    list.innerHTML = emptyRow('正在读取' + label + '的歌单…');
+    list.innerHTML = emptyRow('正在读取' + label + '的歌单…（首次会慢几秒）');
     $('#libCount').textContent = '';
     list.onclick = null;
+    /* 兜底：万一上一次请求既没成功也没报错，22 秒后自动重来一次 */
+    setTimeout(() => {
+      if (st.status === 'loading' && Date.now() - (st.at || 0) > 20000) upEnsure(provider, true);
+    }, 22000);
     return;
   }
   if (st.status === 'error' || st.status === 'idle') {
