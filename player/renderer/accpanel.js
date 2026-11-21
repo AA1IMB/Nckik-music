@@ -107,7 +107,39 @@
     upLine.append(upK, upV);
 
     const title = h('div', 'acctitle');
-    title.append(h('span', 'acctitle-name', def.title), h('span', 'acctitle-tag', '官方 App 扫码'));
+    title.append(h('span', 'acctitle-name', def.title),
+      h('span', 'acctitle-tag', def.id === 'kugou' ? '即将上线' : '官方 App 扫码'));
+
+    /* 酷狗暂时整体关掉登录入口：面板只留一句「敬请期待」。
+     * 已登录的凭据仍在本地（不清除），只是不再从界面发起新的登录。 */
+    if (def.id === 'kugou') {
+      const coming = h('div', 'acc-coming');
+      coming.append(
+        h('div', 'acc-coming-t', '敬请期待'),
+        h('small', null, '酷狗音乐登录正在适配中，暂时不开放扫码与 Cookie 导入；曲库里的免费曲仍可正常试听。')
+      );
+      card.append(title, coming);
+      return {
+        def: Object.assign({}, def, { disabled: true }),
+        card,
+        state,
+        btnQr,
+        btnCancel,
+        box,
+        img,
+        mask,
+        qrState,
+        qrHelp: help,
+        btnRetry,
+        list,
+        upV,
+        accounts: [],
+        timer: null,
+        snapshot: null,
+        shownSrc: ''
+      };
+    }
+
     const kids = [title, head, acts, wrap];
     if (upRow) kids.push(upRow);
     kids.push(listLine, upLine);
@@ -281,6 +313,7 @@
     }
 
     async function refreshAccounts(c) {
+      if (c.def && c.def.disabled) return;
       const [st, list] = await Promise.all([
         api().accStatus ? api().accStatus(c.def.id) : null,
         api().accList ? api().accList(c.def.id) : null

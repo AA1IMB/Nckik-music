@@ -704,3 +704,15 @@ function backBtn(label, act) {
 - 静态：`grep "返回歌单\|返回收藏夹"` 命中 6 处，全部是 `backBtn(...)` 调用；`ne-back` 只剩注释与 CSS 别名，无内联硬编码。
 - 回归：`probe-playlist 53/53`（含「返回列表」相关断言，无回退）。
 - 截图：`player/demo/shot-back.png`（QQ 曲目页顶部「‹ 返回歌单」）。
+
+## 三十二、酷狗登录入口暂时下线（「敬请期待」, 2026-11-21）
+
+- 诉求（用户）：先把酷狗的登录界面关掉，位置写「敬请期待」。
+- 做法（`player/renderer/accpanel.js` 的 `makeCard`）：`def.id === 'kugou'` 时**只渲染标题 + 一句说明**，不建登录状态行、不建「扫码登录/取消」、不建二维码区、不建上游网关输入框、不建账号列表——即整块登录 UI 从 DOM 里消失，而不是灰掉让用户点。
+  - 标题右侧标签由「官方 App 扫码」改为「即将上线」。
+  - 文案：「敬请期待」+「酷狗音乐登录正在适配中，暂时不开放扫码与 Cookie 导入；曲库里的免费曲仍可正常试听。」
+  - 返回的卡片对象把 `def` 标成 `{ disabled: true }`，`refreshAccounts()` 遇到 disabled 直接 return —— 不再触发 `accStatus` / `accList` / `accVip` 这些网络请求。
+- 刻意保留：本地已存的酷狗凭据**不删除**（`accounts.bin` 不动），曲库「酷狗」段与免费曲播放链路照旧；只是不再从界面发起新的登录。
+- 样式：`player/renderer/app.css` 新增 `.acc-coming` / `.acc-coming-t` / `.acc-coming small`（13px 主文案 + 11px 说明，`--fg2/--fg3`），卡片高度随内容收缩，不再留空白的二维码框。
+- 验证（`.tmp/diag-coming.js`，真实主进程 + 真实 profile）：`{"cards":["qqapp","kugou"],"coming":"敬请期待","qr":false,"btn":false}` —— 酷狗卡还在（放在 QQ 卡下方），但二维码区与登录按钮均为 false；截图 `player/demo/shot-kugou-coming.png`。
+- 回归：`probe-playlist 53/53`。
