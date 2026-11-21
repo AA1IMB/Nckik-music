@@ -157,6 +157,14 @@ export interface LoginWindowHost {
   readPageText(): Promise<string>;
   /** 当前页面地址（判断是否已跳到登录成功页） */
   currentUrl(): Promise<string>;
+  /**
+   * 旁听页面自己的 XHR/fetch 响应（只读，读完立刻放行）。
+   * 酷狗的登录页自己轮询 `get_userinfo_qrcode`，返回体里的 `data.status` 才是权威状态，
+   * 4 表示手机上已确认、`data.token` 就是换会话要用的凭据。
+   */
+  tapJson?(patterns: readonly string[], onJson: (json: unknown) => void): () => void;
+  /** 在登录页主框架里执行一段脚本（只用于调用页面自己已有的函数） */
+  evalInPage?(code: string): Promise<unknown>;
   close(): Promise<void>;
   /** 订阅 cookie 变化；返回退订函数。凭据靠它「第一时间」拿到，避免轮询拍点错过 */
   onCookiesChanged(cb: (names: Record<string, string>) => void): () => void;

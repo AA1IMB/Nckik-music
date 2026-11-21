@@ -249,3 +249,24 @@ if (this.cfg.requiredCookieNames.every(n => !!cookies[n])) { ... confirmed ... }
 | `did-create-window` 收集子窗口并在 `close()` 里一并 `destroy` | 不留后台窗口 |
 
 验证：`tsc` 0 error；`tools/test-accounts.mjs` 49/49；真机面板复测 QQ `{"len":124598,"w":568,"h":568,"state":"请用手机 QQ 扫一扫","auth":"未登录"}`、酷狗 `{"len":1394,"w":423,"h":423,"auth":"未登录"}`，两个 `accStatus` 都是 `account:null`（不再误判）。
+
+## 十五、酷狗「已扫码」卡住：用页面自己的换会话函数收尾（2026-11-21）
+
+真机现象：手机酷狗 App 扫码后，面板停在「已扫码，请在手机上确认」，一直不跳登录成功。
+
+原因是酷狗登录页把「手机确认之后」的收尾交给 `regok.html` 的顶层回调（`KgUser.QRCodeLogin`），
+在隐藏窗口里这条链路有时不执行，于是分区里永远没有 `token`。
+
+处理办法沿用 v0.8.x 已验证的做法（不重写协议、不伪造签名）：
+
+1. `host.tapJson(patterns, onJson)`：用 DevTools 协议 `Fetch` 旁听页面**自己**发出的
+   `get_userinfo_qrcode` / `login_qr_check` 响应（只读，读完立刻 `continueRequest`）。
+   返回体形如 `{"status":1,"data":{"status":1|2|4, "token":"…", "userid":…}}`。
+2. `KugouProvider` 记住最新的 `data.status` / `data.token` / `data.userid`。
+3. 一旦拿到 `data.status === 4` 且带 `token`，就 `host.evalInPage(...)` 调页面自己的
+   `KgUser.QRCodeLogin(1014, userid, token, cb)` 完成换会话 —— 签名/加密全由官方页面做，我们只当「按键的人」。
+4. 换完 600ms 再读一次 cookie，`token` + `userid` 齐全即 `confirmed`；若已确认但 cookie 还没读到时
+   保持 `scanned`，不退回 `waiting`（避免面板文字来回跳）。
+
+验证：`tsc` 0 error；`tools/test-accounts.mjs` 49/49；旁听实测每 1s 拿到一条
+`{"status":1,"ds":1,"hasToken":false}`（未扫码时状态 1，符合预期），证明 CDP 旁听通道可用。

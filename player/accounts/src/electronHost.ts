@@ -300,6 +300,44 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
         return '';
       }
     },
+    tapJson(patterns, onJson) {
+      const wc = win?.webContents;
+      if (!wc) return () => undefined;
+      const dbg = (wc as any).debugger;
+      const onMessage = async (_e: unknown, method: string, params: any) => {
+        if (method !== 'Fetch.requestPaused') return;
+        const requestId = params.requestId;
+        try {
+          const body = await dbg.sendCommand('Fetch.getResponseBody', { requestId });
+          const text = body.base64Encoded
+            ? Buffer.from(body.body, 'base64').toString('utf8')
+            : String(body.body ?? '');
+          let json: unknown = null;
+          try { json = JSON.parse(text); } catch { json = null; }
+          if (json) onJson(json);
+        } catch { /* 读不到响应体不影响流程 */ }
+        try { await dbg.sendCommand('Fetch.continueRequest', { requestId }); } catch { /* ignore */ }
+      };
+      try {
+        if (!dbg.isAttached()) dbg.attach('1.3');
+        dbg.on('message', onMessage);
+        dbg.sendCommand('Fetch.enable', { patterns: patterns.map(p => ({ urlPattern: p, requestStage: 'Response' })) }).catch(() => undefined);
+      } catch {
+        return () => undefined;
+      }
+      watchers.push(() => {
+        try {
+          if (!dbg.isAttached()) return;
+          dbg.removeListener('message', onMessage);
+          dbg.sendCommand('Fetch.disable').catch(() => undefined);
+        } catch { /* 窗口销毁后忽略 */ }
+      });
+      return () => undefined;
+    },
+    async evalInPage(code) {
+      if (!win || win.isDestroyed()) return null;
+      return win.webContents.executeJavaScript(code, true).catch(() => null);
+    },
     async currentUrl() {
       try {
         return requireWin().webContents.getURL() as string;
