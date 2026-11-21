@@ -355,6 +355,16 @@ async function upResolve(provider, id) {
   const info = provider === 'kugou'
     ? await streams.kgResolve(id, 'high')
     : await streams.qqResolve(id, { uin: extra.uin, musickey: extra.musickey }, 'high');
+  /* QQ 的 purl 只在部分 CDN 主机上有效：dl 常常 404，isure/ws 才是真正给播放器的。
+   * 这里一次解析出候选主机列表，代理层按顺序试。 */
+  if (provider === 'qqapp' && info.url) {
+    const path = info.url.replace(/^https?:\/\/[^/]+\//, '');
+    info.urls = [
+      'https://isure.stream.qqmusic.qq.com/' + path,
+      'https://ws.stream.qqmusic.qq.com/' + path,
+      'https://dl.stream.qqmusic.qq.com/' + path
+    ];
+  }
   upCache.set(key, { at: now, info });
   return info;
 }
@@ -376,22 +386,23 @@ function registerUpProtocol() {
     }
 
     const range = request.headers.get('range');
+    const targets = info.urls && info.urls.length ? info.urls : [info.url];
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(new Error('UP_HEAD_TIMEOUT')), UP_HEAD_TIMEOUT);
-    let res;
-    try {
-      res = await net.fetch(info.url, {
-        headers: { ...(info.headers || {}), ...(range ? { Range: range } : {}) },
-        signal: ctrl.signal
-      });
-    } catch (e) {
-      clearTimeout(timer);
-      try { ctrl.abort(); } catch {}
-      upCache.delete(provider + ':' + id);
-      return new Response('upstream timeout', { status: 504, headers: { 'x-up-reason': 'UP_TIMEOUT' } });
+    let res = null;
+    for (const target of targets) {
+      try {
+        const r0 = await net.fetch(target, {
+          headers: { ...(info.headers || {}), ...(range ? { Range: range } : {}) },
+          signal: ctrl.signal
+        });
+        if (r0.status === 401 || r0.status === 403 || r0.status === 404 || r0.status === 410) { try { r0.body?.cancel(); } catch {} continue; }
+        res = r0; break;
+      } catch (e) { /* 换下一条 */ }
     }
+    if (!res) { clearTimeout(timer); return new Response('upstream expired', { status: 502, headers: { 'x-up-reason': 'UP_EXPIRED' } }); }
     clearTimeout(timer);
-
+    console.log('[up]', provider, res.status, String(res.headers.get('content-type') || ''), info.url.slice(0, 70));
     if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 410) {
       try { ctrl.abort(); } catch {}
       upCache.delete(provider + ':' + id);
