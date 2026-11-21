@@ -1538,6 +1538,7 @@ async function upEnsure(provider, force) {
     st.items = r.items || [];
   }
   if (S.srcMode === provider) renderUp(provider);
+  if (PL.view === 'pick') renderPl();
 }
 
 async function upOpen(provider, id, name) {
@@ -1834,28 +1835,6 @@ function scrollCurIntoView() {
 }
 
 /* ---- 可选歌单：本地曲库 / 当前打开的网易云歌单 / 我的歌单 ---- */
-/* 上游歌单（QQ 音乐 / 酷狗）：只在当前账号对应平台时去读，读完缓存到 S.up，
- * 这样「选择歌单」是同步渲染、不会因为网络卡住整个面板。 */
-async function upEnsure(provider, force) {
-  const st = S.up && S.up[provider];
-  if (!st || !window.api.accPlaylists) return;
-  if (!force && (st.status === 'ready' || st.status === 'loading')) return;
-  st.status = 'loading';
-  st.err = '';
-  let r;
-  try { r = await window.api.accPlaylists(provider); }
-  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
-  if (!r || !r.ok) {
-    st.status = 'error';
-    st.err = (r && r.error && r.error.message) || '读取歌单失败';
-    st.items = [];
-  } else {
-    st.status = 'ready';
-    st.items = r.items || [];
-  }
-  if (PL.view === 'pick') renderPl();
-}
-
 function plSources() {
   /* 列什么取决于「当前账号」（标题栏右上角头像）：
    * 切到酷狗/QQ 音乐时，把网易云歌单塞进来只会让人点进去报错，

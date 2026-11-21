@@ -502,3 +502,35 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 - 上游接口「`code:0` 但字段为空」时，先怀疑**接口选错**（musicu 的歌词接口对本项目凭证无效），再怀疑参数缺失。
 - 封面地址必须用**专辑** mid，不是歌曲 mid；歌单曲目列表里 `album.mid` 要一起带下来，否则渲染层没法补。
 - diag 里 `executeJavaScript` 传块体箭头函数（`(() => { obj })()`）会返回 `undefined`，必须 `return` 或写成表达式体 `(() => (obj))()`。
+
+## 二十四、QQ 音乐分段卡在「正在读取」与歌单名缺失（v0.9.6）
+
+### 24.1 现象
+
+曲库切到「QQ 音乐」后一直显示「正在读取QQ 音乐的歌单…（首次会慢几秒）」，但同一时刻在探针里调用 `acc:playlists` 只要 80–100ms 就返回了 2 个歌单。
+
+### 24.2 根因
+
+`player/renderer/app.js` 里**存在两个同名 `upEnsure`**（后加的曲库分段版本在文件前部，早期「选择歌单」版本在 `plSources()` 之上）。函数声明提升后**后者覆盖前者**，于是：
+- 走的是没有超时兜底、没有 `renderUp()` 的旧实现；
+- 它只 `renderPl()`，曲库那边 `st.status` 停在 `'loading'` 就再没人改回来，界面永远转圈。
+
+顺带修掉第二处：QQ 歌单字段名与别处不同（`dirName` / `songNum` / `picUrl`），映射时读的是 `name` / `songnum`，于是两个歌单都显示成「歌单 / 0 首」。
+
+### 24.3 改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `player/renderer/app.js` | 删除重复的 `upEnsure`（保留带 30s 上限 + 20s 看门狗 + `renderUp` 的那份）；完成后再 `if (PL.view === 'pick') renderPl()`，让「选择歌单」跟着刷新 |
+| `player/upstream-library.js` | QQ 歌单映射改读 `dirName` / `songNum` / `picUrl`（保留旧字段兜底） |
+
+### 24.4 验证
+
+- 界面：`#libList` 文本从「正在读取QQ 音乐的歌单…」变成 `我喜欢 / 116 首`、`1 / 26 首`。
+- 接口：`[{"id":"6878369743","name":"我喜欢","count":116},{"id":"8967642928","name":"1","count":26}]`。
+- 回归：`probe-home` 50/50、`probe-playlist` 53/53、`probe-playmode` 48/48。
+
+### 24.5 教训
+
+- 同名函数重复声明在 JS 里不报错，只按“后定义的赢”静默覆盖 —— 重构旧模块时要 grep 函数名，别只看调用点。
+- 曲库分段与「选择歌单」共用 `S.up` 缓存，任何一处只画自己那半屏都会让另一半停在中间态。

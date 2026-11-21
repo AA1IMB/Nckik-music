@@ -53,9 +53,10 @@ async function qqPlaylists(cred) {
     .map(p => ({
       id: String(p.tid || p.dirId || ''),
       dirId: Number(p.dirId || 0),
-      name: String(p.name || p.dissname || p.title || '歌单'),
-      count: Number(p.songnum || p.song_count || 0),
-      cover: String(p.cover || p.logo || '')
+      /* QQ 的字段名和别处不一样：dirName / songNum / picUrl（大写 N） */
+      name: String(p.dirName || p.name || p.dissname || p.title || '歌单'),
+      count: Number(p.songNum || p.songnum || p.song_count || 0),
+      cover: String(p.picUrl || p.bigpicUrl || p.cover || p.logo || '')
     }))
     .filter(p => p.id);
 }
