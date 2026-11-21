@@ -534,3 +534,22 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 
 - 同名函数重复声明在 JS 里不报错，只按“后定义的赢”静默覆盖 —— 重构旧模块时要 grep 函数名，别只看调用点。
 - 曲库分段与「选择歌单」共用 `S.up` 缓存，任何一处只画自己那半屏都会让另一半停在中间态。
+
+## 二十五、酷狗 VIP：改用本地上游网关（2026-11-21）
+
+### 25.1 为什么不能自己取 VIP 直链
+- 客户端签名通道 `trackercdn.kugou.com/v5/url`（Android 签名 + 全套 params/headers，照 `KuGouMusicApi@1.6.0` 一字不差重发）对免费曲正常返回直链，对会员曲恒回 `20018 / priv_status 0`；偶发 `20028 本次请求需要验证`（SSA 行为验证）。
+- `auth_through: []` 说明服务端不把当前 token 当会员通道；网页登录 token（appid 1014）与 App 扫码 token 都一样。
+- 上游包用 `generate_simulate` 伪造 `sid/edt` 行为指纹过 SSA —— **本项目不移植该逻辑**（属绕开人机验证）。
+
+### 25.2 走「合规上游」
+- `player/stream-resolve.js`：新增 `kgUpstreamResolve(upstreamBase, hash, qualityKey, cookie)`，GET `{上游}/song/url?hash=&quality=`（带 Cookie）；`kgResolve(...)` 顺序改为 **合规上游 → 客户端签名 → 免费 playInfo**。
+- 上游响应兼容三种形态：`{data:{url}}`、`{url:[...]}`、`{url:"..."}`（实测 `KuGouMusicApi` 直接把 CDN body 摊在顶层，`url` 是字符串）。
+- `player/main.js`：`upstreamOf(provider)`（`settings.upstream.kugou` → 环境变量 `NCKK_KUGOU_UPSTREAM`）、`upstreamCookieOf(provider)`（`settings.upstream.kugouCookie`）。
+- `player/renderer/accpanel.js`：酷狗卡片新增「上游网关」输入框，写入 `settings.upstream.kugou`。
+
+### 25.3 验证
+- 本地 `KuGouMusicApi@1.6.0`（`.tmp/kgapi/KuGouMusicApi-1.6.0`，`PORT=39001 node app.js`）用**手机酷狗 App 扫码**登录（`/login/qr/key` + `/login/qr/check`），拿到 8 个 cookie（含 `token/userid`）。
+- 模块级：`kgResolve(vipHash, 'high', cred, 'http://127.0.0.1:39001', cookie)` → `http://fsandroid.tx.kugou.com/…`（会员曲也拿到直链）。
+- 应用级：真实播放器点酷狗歌单里的曲目，主进程日志 `[up] kugou 206 audio/mpeg http://fsandroid.tx.kugou.com/…`，界面进度条正常推进（截图 `player/demo/shot-kg-vip.png`）。
+- 回归：`test-accounts 76/76`、`probe-home 50/50`、`probe-playlist 53/53`、`probe-playmode 48/48`。

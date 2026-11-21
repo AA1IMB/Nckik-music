@@ -346,6 +346,13 @@ function parseUpId(url) {
 
 /* 合规上游地址：优先用设置里的（可随时改），其次环境变量。
  * 配了就走上游取流，VIP 曲由上游那个合法身份决定；没配就走本地免费链路。 */
+function upstreamCookieOf(provider) {
+  try {
+    const st = readJSON(settingsPath, {});
+    return String((st && st.upstream && st.upstream[provider + 'Cookie']) || '').trim();
+  } catch { return ''; }
+}
+
 function upstreamOf(provider) {
   const env = process.env['NCKK_' + String(provider).toUpperCase() + '_UPSTREAM'] || '';
   let saved = '';
@@ -366,7 +373,7 @@ async function upResolve(provider, id) {
   if (!cred) throw Object.assign(new Error('还没有登录该音源'), { code: 'E_AUTH_REQUIRED' });
   const extra = cred.extra || {};
   const info = provider === 'kugou'
-    ? await streams.kgResolve(id, 'high', cred, upstreamOf('kugou'))
+    ? await streams.kgResolve(id, 'high', cred, upstreamOf('kugou'), upstreamCookieOf('kugou'))
     : await streams.qqResolve(id, { uin: extra.uin, musickey: extra.musickey }, 'high');
   /* QQ 的 purl 只在部分 CDN 主机上有效：dl 常常 404，isure/ws 才是真正给播放器的。
    * 这里一次解析出候选主机列表，代理层按顺序试。 */

@@ -112,10 +112,10 @@ async function kgPlayInfo(hash, qualityKey) {
 
 /* 合规上游：把自己的网关（或自建的酷狗 API 服务，例如 KuGouMusicApi）挂进来。
  * 这一路只调上游的 HTTP 接口，不在本地做任何风控/指纹模拟。 */
-async function kgUpstreamResolve(upstreamBase, hash, qualityKey) {
+async function kgUpstreamResolve(upstreamBase, hash, qualityKey, cookie) {
   const base = String(upstreamBase).replace(/\/$/, '');
   const url = base + '/song/url?' + new URLSearchParams({ hash: String(hash).toLowerCase(), quality: qualityKey }).toString();
-  const r = await fetch(url, { headers: { Accept: 'application/json' } });
+  const r = await fetch(url, { headers: cookie ? { Accept: 'application/json', Cookie: cookie } : { Accept: 'application/json' } });
   if (!r.ok) throw fail('E_UPSTREAM_HTTP', `上游取流返回 ${r.status}`);
   const j = await r.json();
   const body = (j && j.data) || j || {};
@@ -126,7 +126,7 @@ async function kgUpstreamResolve(upstreamBase, hash, qualityKey) {
   return null;
 }
 
-async function kgResolve(hash, prefer, cred, upstreamBase) {
+async function kgResolve(hash, prefer, cred, upstreamBase, upstreamCookie) {
   const h = String(hash || '').toUpperCase();
   if (!/^[0-9A-F]{32}$/.test(h)) throw fail('E_BAD_TRACK', '酷狗曲目 id 不正确');
   const order = prefer === 'standard' ? [...KG_QUALITY].reverse() : KG_QUALITY;
@@ -134,7 +134,7 @@ async function kgResolve(hash, prefer, cred, upstreamBase) {
   for (const q of order) {
     /* 配了合规上游就用上游（VIP 曲由上游的合法身份决定） */
     if (upstreamBase) {
-      const upUrl = await kgUpstreamResolve(upstreamBase, h, q.key).catch(() => null);
+      const upUrl = await kgUpstreamResolve(upstreamBase, h, q.key, upstreamCookie).catch(() => null);
       if (upUrl) return { url: upUrl, quality: q.label, headers: { 'User-Agent': KG_UA } };
     }
     /* 再问客户端签名通道：付费曲只有这条能给直链；免费曲也走它，失败再回落 playInfo */
