@@ -990,8 +990,11 @@ ipcMain.handle('track:lyric', async (_e, file) => {
   if (typeof file === 'string' && /^(kg|qq):/.test(file)) {
     try {
       const meta = await upstreamMetaOf(file);
-      const text = (meta.lyric || []).map(l => `[${String(Math.floor(l.t / 60)).padStart(2, '0')}:${String(Math.floor(l.t % 60)).padStart(2, '0')}.${String(Math.round((l.t % 1) * 100)).padStart(2, '0')}]${l.text}`).join('\n');
-      return { text, source: file.slice(0, 2) === 'kg' ? '酷狗' : 'QQ 音乐', note: text ? '' : '这首歌上游没有提供歌词' };
+      const toLrc = arr => (arr || []).map(l => `[${String(Math.floor(l.t / 60)).padStart(2, '0')}:${String(Math.floor(l.t % 60)).padStart(2, '0')}.${String(Math.round((l.t % 1) * 100)).padStart(2, '0')}]${l.text}`).join('\n');
+      const text = toLrc(meta.lyric);
+      /* 译文与原文同形（都是 LRC 文本），渲染层用既有的 mergeTranslation 按时间轴对齐 */
+      const tr = toLrc(meta.trans);
+      return { text, tr, source: file.slice(0, 2) === 'kg' ? '酷狗' : 'QQ 音乐', note: text ? '' : '这首歌上游没有提供歌词' };
     } catch (e) {
       return { text: '', source: '', note: String((e && e.message) || e) };
     }

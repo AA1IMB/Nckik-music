@@ -1768,8 +1768,11 @@ function renderUp(provider) {
     }
     /* 与网易云那段保持一致：首字磁贴 + 标题/副标题 + 右侧时长 */
     const sub = [t.artist, t.album].filter(Boolean).join(' · ');
+    /* QQ 的曲目行也带封面：专辑 mid 由歌单/日推接口一起返回，直接拼官方图床，
+     * 不再只显示首字磁贴（网易云那一栏本来就有封面，两栏观感要一致）。 */
+    const cover = t.albumMid ? 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + t.albumMid + '.jpg' : '';
     rows.push(`<div class="item" data-up="${i}">
-      <div class="th"><span>${esc((t.title || '?').slice(0, 1))}</span></div>
+      <div class="th${cover ? ' art' : ''}" data-ch="${esc((t.title || '?').slice(0, 1))}">${cover ? `<img src="${esc(cover)}" alt="">` : `<span>${esc((t.title || '?').slice(0, 1))}</span>`}</div>
       <div class="ii"><div class="n">${esc(t.title || '未知曲目')}</div>
       <div class="d">${esc(sub || '未知歌手')}</div></div>
       <div class="r">${esc(fmt(Number(t.duration) || 0))}</div>
@@ -1777,9 +1780,22 @@ function renderUp(provider) {
   });
   $('#libCount').textContent = st.trackErr ? st.trackErr : (rows.length ? rows.length + ' 首 · ' + (st.name || '') : '0 首');
   list.innerHTML = (st.trackErr ? emptyRow(st.trackErr) : (rows.join('') || emptyRow('这个歌单是空的')))
+    /* 曲目封面的兜底同歌单行：先换 500x500，再退首字 */
+    ;
+  list.querySelectorAll('.th.art img').forEach(im => {
+    im.onerror = () => {
+      const th = im.parentNode;
+      const src = im.getAttribute('src') || '';
+      if (src.includes('T002R300x300M000')) { im.src = src.replace('T002R300x300M000', 'T002R500x500M000'); return; }
+      th.classList.remove('art');
+      th.innerHTML = `<span>${esc(th.dataset.ch || '?')}</span>`;
+    };
+  });
     + '<div class="item" data-upback="1"><div class="txt"><div class="ttl">← 返回歌单</div></div></div>';
   list.onclick = e => {
     if (e.target.closest('[data-upback]')) { st.view = 'list'; renderUp(provider); return; }
+    const badImg = e.target.closest('.th.art img');
+    if (badImg) { /* 图床偶发 404：退回首字磁贴，别留碎图标 */ }
     const row = e.target.closest('[data-up]');
     if (row) upPlay(provider, Number(row.dataset.up));
   };

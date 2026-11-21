@@ -642,3 +642,24 @@ QQ 音乐分段的歌单页现在分成三块（与网易云对齐）：`每日�
 - IPC：`accRecommend('qqapp')` → `{"ok":true,"daily":30,"rec":3,"firstRec":"百万收藏"}`。
 - 界面：`sects=["每日推荐","推荐歌单","我创建的歌单"]`、`rows=6`、`coverImgs=5`；点「每日推荐」→ `30 首 · 每日推荐`；截图 `player/demo/shot-qq-lib-recommend.png`。
 - 回归：`probe-home 50/50`、`probe-playlist 53/53`。
+
+## 三十、QQ 曲库封面回归 + 上游歌词翻译（2026-11-21）
+
+### 30.1 封面：曲目行没有图，只显示首字磁贴
+- 根因：`renderUp` 的曲目行只渲染 `<div class="th"><span>首字</span></div>`；专辑 mid 已经从歌单/日推接口带下来了，但没用上。歌单行（上一节加的）有封面，曲目行没有 —— 观感不一致，看起来就像「封面获取不正确」。
+- 修复：`player/renderer/app.js` 的 `renderUp` 曲目行按 `t.albumMid` 拼 `https://y.gtimg.cn/music/photo_new/T002R300x300M000<albumMid>.jpg`，套 `.th.art`（基线 CSS 里 `img` 默认 `opacity:0`，只有 `.art` 才显示）；`onerror` 先换 `T002R500x500M000`，再退回首字磁贴。
+- 覆盖场景：歌单曲目、每日推荐曲目都走同一段渲染；歌单行缺封面时仍由 `qqFillCovers`（首曲专辑图）兜底。
+
+### 30.2 翻译歌词：上游曲目只有原文
+- 根因：`player/main.js` 的 `track:lyric` 在 `kg:`/`qq:` 分支只返回 `{text}`，没有 `tr`；而渲染层的 `mergeTranslation()` 只在 `tr` 存在时才合并，于是外文歌只有一行原文。
+- QQ 译文来源（实测旧接口的 `trans` 十几首全空）：走 `music.musichallSong.PlayLyricInfo / GetPlayLyricInfo`，参数照 folia 的 `playLyricTranslation`：`{songMID, crypt:0, trans:1, ct:19, cv:2111, type:0, …}`，comm 用匿名精简版（`tmeAppID=qqmusiclight`，`User-Agent: okhttp/3.14.9`，`Cookie: tmeLoginType=-1`），返回的 `data.trans` 是**可读的 base64 LRC**；用 `/\[\d{1,3}:\d{2}/` 判断是否可读，密文/乱码一律丢弃。
+- 酷狗：`m.kugou.com/app/i/krc.php` 与 `krcs.kugou.com` 均不提供翻译文件，`kgMeta` 返回 `trans: []`，渲染层自动降级为单行原文（符合「无翻译时单行显示」）。
+- 改动：
+  - `player/upstream-meta.js`：新增 `qqTrans(songmid)`；`qqMeta` 返回值加 `trans`（并进缓存）。
+  - `player/main.js`：`track:lyric` 上游分支用同一个 `toLrc()` 把 `meta.trans` 也拼成 LRC 文本，返回 `{text, tr, source, note}` —— 与网易云/本地分支同形，渲染层零改动。
+  - 渲染层既有的 `mergeTranslation(lrc, trs)`（按 0.4s 容差 + 正文归一化对齐）直接复用。
+
+### 30.3 验证
+- IPC：`trackLyric('qq:003In5MQ2SIjJ6')`（aespa《Drama》）→ `{"text":3141,"tr":2170}`；`qqMeta` 直接调 → `lyric 117 / trans 117`，首行 `{"t":0.33,"text":"QQ音乐享有本翻译作品的著作权"}`。
+- 曲库曲目行：`rows=116 / imgs=113`（3 首专辑图 404 已回落首字磁贴），截图 `player/demo/shot-qq-cover-tr.png`。
+- 回归：`probe-playlist 53/53`（原有 53 项无回退）。

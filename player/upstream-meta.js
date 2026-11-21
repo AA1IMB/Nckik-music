@@ -93,9 +93,41 @@ async function kgMeta(hash, durationSec) {
 }
 
 /* ---------------- QQ 音乐 ---------------- */
+/* QQ 音乐的「歌词翻译」补强接口：music.musichallSong.PlayLyricInfo / GetPlayLyricInfo。
+ * 参数照 folia 的 playLyricTranslation：crypt:0（要可读文本）、trans:1、ct:19、cv:2111；
+ * comm 用匿名精简版（tmeAppID=qqmusiclight），不需要登录。失败一律回空串。 */
+const LRC_TIME_TAG = /\[\d{1,3}:\d{2}/;
+async function qqTrans(songmid) {
+  try {
+    const body = {
+      comm: { ct: 11, cv: '1003006', v: '1003006', tmeAppID: 'qqmusiclight', nettype: 'NETWORK_WIFI', udid: '0', uid: '0' },
+      req_0: {
+        module: 'music.musichallSong.PlayLyricInfo', method: 'GetPlayLyricInfo',
+        param: {
+          songMID: songmid, songName: '', singerName: '', albumName: '', interval: 0,
+          crypt: 0, ct: 19, cv: 2111, lrc_t: 0, qrc: 0, qrc_t: 0, roma: 0, roma_t: 0,
+          trans: 1, trans_t: 0, type: 0
+        }
+      }
+    };
+    const r = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'okhttp/3.14.9', Cookie: 'tmeLoginType=-1' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) return '';
+    const j = await r.json();
+    const d = (j && j.req_0 && j.req_0.data) || {};
+    const raw = String(d.trans || '');
+    if (!raw) return '';
+    const text = Buffer.from(raw, 'base64').toString('utf8');
+    return LRC_TIME_TAG.test(text) ? raw : '';
+  } catch { return ''; }
+}
+
 async function qqMeta(mid, cred, albumMid) {
   const m = String(mid || '').trim();
-  if (!/^[0-9A-Za-z]{8,24}$/.test(m)) return { cover: '', lyric: [] };
+  if (!/^[0-9A-Za-z]{8,24}$/.test(m)) return { cover: '', lyric: [], trans: [] };
   const key = 'qq:' + m + (albumMid ? '|' + albumMid : '');
   const hit = get(key);
   if (hit) return hit;
@@ -125,6 +157,7 @@ async function qqMeta(mid, cred, albumMid) {
    * 返回的 lyric 是 **base64 的 UTF-8 文本**，不是 URL 编码；
    * musicu 的 PlayLyricInfo 在这里静默回空，别再用它。 */
   let lyric = [];
+  let trans = [];
   try {
     const u = 'https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=' + encodeURIComponent(m)
       + '&format=json&outCharset=utf-8&nobase64=0&g_tk=5381&pcachetime=' + Date.now();
@@ -142,10 +175,16 @@ async function qqMeta(mid, cred, albumMid) {
     const j = JSON.parse(text);
     const raw = String(j.lyric || '');
     if (raw) lyric = parseLrc(Buffer.from(raw, 'base64').toString('utf8'));
+    /* 旧接口的 trans 常常是空的（实测十几首外文歌全空），所以再做一次补强：
+     * GetPlayLyricInfo 带 crypt:0/trans:1 会回可读的 base64 LRC 翻译，
+     * 用匿名精简版身份即可，不需要会话。 */
+    let rawTr = String(j.trans || '');
+    if (!rawTr) rawTr = await qqTrans(m);
+    if (rawTr) trans = parseLrc(Buffer.from(rawTr, 'base64').toString('utf8'));
   } catch { /* 歌词拿不到就留空，界面会明确写「没有提供歌词」 */ }
 
-  put(key, { cover, lyric });
-  return { cover, lyric };
+  put(key, { cover, lyric, trans });
+  return { cover, lyric, trans };
 }
 
 function decodeURIComponentSafe(s) {
