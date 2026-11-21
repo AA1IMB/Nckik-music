@@ -199,3 +199,27 @@ powershell -ExecutionPolicy Bypass -File .\启动开发版.ps1 -Probe all
 真机取证：QQ 面板 `{"len":124598,"w":568,"h":568,"state":"请用手机 QQ 扫一扫","auth":"未登录"}`；酷狗 `{"len":1378,"w":423,"h":423,"state":"请用手机酷狗 App 扫一扫"}`；两者 `accStatus` 均为 `account:null`（没有误判登录）。`tsc` 0 error，`tools/test-accounts.mjs` 40/40。
 
 > 说明：QQ 这一路的二维码是 QQ 互联官方「扫码登录」页签生成的点阵码，用**手机 QQ** 扫；若想用微信，可点弹层里的「微信登录」页签（`open.weixin.qq.com` 的普通方形码，之前那版收到的是它）。
+
+## 十三、误判「一开码就登录 uid unknown」（2026-11-21）
+
+真机现象：QQ 二维码一出现，面板立刻显示「已登录」，账号列表里多出一条 `uid unknown`（不是用户自己的号）。
+
+根因在 `PageLoginProvider.poll()`：
+
+```ts
+if (this.cfg.requiredCookieNames.every(n => !!cookies[n])) { ... confirmed ... }
+```
+
+`[].every(...)` **恒为 true**，而 QQ 的 `requiredCookieNames` 恰好是空数组（它的判据写在子类 `QqProvider.poll()` 里），于是 `QqProvider` 在「还没扫」时把控制权交给父类，父类第一拍就 `confirmed`，`verify()` 在没有 `upstreamBase` 时回落 `localAccount()`，账号名写成 `uid unknown` 并被落盘。
+
+修复三处：
+
+| 位置 | 修复 |
+| --- | --- |
+| `providers/base.ts` `poll()` | 必须 `requiredCookieNames.length > 0` 且全部命中，**且** `pickExtra()` 能取到 uid，才允许 `confirmed` |
+| `accountManager.ts` `persist()` | 兜底：`userId` 为空或 `unknown` 时抛 `E_AUTH_REQUIRED`（「请在手机上点确认，或用手机 App 重新扫一次」），绝不落盘 |
+| `accountManager.ts` 构造函数 | 迁移：启动时清掉历史误判写进库里的 `unknown` 账号（用户本机 `accounts.bin` 里的 `qq:unknown` 已实测被清掉） |
+
+顺带把 QQ 的 uid 识别面放宽：`uin / p_uin / luin / euin / wxuin` 任一存在即算拿到账号标识（不同登录入口写的字段不同），并把这几个名字加进 cookie 白名单。
+
+回归：`tools/test-accounts.mjs` 从 40 条加到 **49 条**，新增用例覆盖「必填名单为空 + 无 cookie → waiting」「只有 qm_keyst 没有 uin → waiting」「token+userid 齐 → confirmed」「uqin 的 o 前缀被剥掉」「启动时清 uid unknown」。真机复测：QQ/酷狗都停在「请用手机扫码」，`accStatus` 均为 `account:null`。

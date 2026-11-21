@@ -164,10 +164,18 @@ export class PageLoginProvider implements Provider {
 
   protected async poll(): Promise<ProviderPollResult> {
     const cookies = await this.host.readCookies(this.cfg.cookieNames);
-    if (this.cfg.requiredCookieNames.every(n => !!cookies[n])) {
+    const extra = pickExtra(this.id, cookies);
+    /**
+     * 两个条件都要满足才可能 confirmed：
+     * 1. `requiredCookieNames` **非空**且全部命中 —— `[].every()` 恒真，早期版本就因此
+     *    在二维码刚出来、什么都没扫的时候直接判「已登录」（QQ 的必填名单恰好是空的）；
+     * 2. 能取到账号标识（uin / wxuin / userid）—— 没标识的账号落盘只会变成 `uid unknown`。
+     */
+    const namesOk = this.cfg.requiredCookieNames.length > 0 && this.cfg.requiredCookieNames.every(n => !!cookies[n]);
+    if (namesOk && extra.uid) {
       const credential: Credential = {
         cookie: cookiesToHeader(cookies, this.cfg.cookieNames),
-        extra: pickExtra(this.id, cookies),
+        extra,
         updatedAt: this.now(),
         verifiedAt: 0
       };
@@ -251,7 +259,8 @@ export function cookiesToHeader(cookies: Record<string, string>, order: readonly
 export function pickExtra(provider: ProviderId, cookies: Record<string, string>): Record<string, string> {
   const extra: Record<string, string> = {};
   for (const [k, v] of Object.entries(cookies)) if (v) extra[k] = v;
-  const rawUid = cookies.uin || cookies.wxuin || cookies.userid || cookies.kugouid || '';
+  // QQ 音乐不同入口写的 uid 字段不一样：uin / p_uin / luin / euin 都可能出现
+  const rawUid = cookies.uin || cookies.wxuin || cookies.p_uin || cookies.luin || cookies.euin || cookies.userid || cookies.kugouid || '';
   const uid = rawUid.replace(/^o/, '');
   if (uid) extra.uid = uid;
   if (provider === 'qq' && cookies.p_skey) extra.g_tk = gtkOf(cookies.p_skey);

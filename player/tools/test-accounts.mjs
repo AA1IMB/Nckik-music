@@ -349,6 +349,109 @@ const transportStub = { getJson: async () => ({ status: 200, body: {} }), postJs
   ok(authErr.hint && authErr.hint.includes('扫码'), '给出可读的下一步提示');
 }
 
+/* ---------------- 10. 误判回归：空必填名单 / 没有账号标识 ---------------- */
+
+{
+  // QQ 的 requiredCookieNames 是空数组：`[].every()` 恒真，早期版本因此在二维码刚出来时就 confirmed
+  const { PageLoginProvider } = require(path.join(dist, 'providers', 'base.js'));
+  const host = fakeHost({ qr: BIG_QR });
+  const provider = new PageLoginProvider({
+    cfg: {
+      id: 'qq',
+      label: 'QQ 音乐',
+      loginUrl: 'https://y.qq.com/',
+      partition: 'persist:t',
+      cookieNames: ['qm_keyst', 'qqmusic_key', 'uin'],
+      requiredCookieNames: [],
+      qrTimeoutMs: 1000,
+      qrTtlMs: 1000,
+      expiredPatterns: [/失效/],
+      scannedPatterns: [/已扫码/]
+    },
+    host,
+    transport: transportStub,
+    logger,
+    ladder: { standard: ['standard'], high: ['high'], lossless: ['lossless'], hires: ['hires'] },
+    fetchAudio: async () => ({ url: 'u' }),
+    now
+  });
+  const first = await provider.login.poll();
+  eq(first.phase, 'waiting', '必填名单为空 + 没有任何 cookie → 仍是 waiting');
+
+  // 有登录类 cookie 但拿不到 uin：不能确认（否则会落盘成 uid unknown）
+  host.state.cookies = { qm_keyst: 'k' };
+  const second = await provider.login.poll();
+  eq(second.phase, 'waiting', '只有 qm_keyst、没有 uin → 不确认');
+
+  // 必填名单非空时，命中 + 有 uid 才确认
+  const host2 = fakeHost({ qr: BIG_QR });
+  const provider2 = new PageLoginProvider({
+    cfg: {
+      id: 'kugou',
+      label: '酷狗',
+      loginUrl: 'https://login-user.kugou.com/',
+      partition: 'persist:t2',
+      cookieNames: ['token', 'userid'],
+      requiredCookieNames: ['token', 'userid'],
+      qrTimeoutMs: 1000,
+      qrTtlMs: 1000,
+      expiredPatterns: [/失效/],
+      scannedPatterns: [/已扫码/]
+    },
+    host: host2,
+    transport: transportStub,
+    logger,
+    ladder: { standard: ['standard'], high: ['high'], lossless: ['lossless'], hires: ['hires'] },
+    fetchAudio: async () => ({ url: 'u' }),
+    now
+  });
+  host2.state.cookies = { token: 't' };
+  eq((await provider2.login.poll()).phase, 'waiting', '只有 token、没有 userid → 不确认');
+  host2.state.cookies = { token: 't', userid: '555' };
+  const confirmed = await provider2.login.poll();
+  eq(confirmed.phase, 'confirmed', 'token + userid 都齐 → confirmed');
+  eq(confirmed.credential.extra.uid, '555', 'userid 进 extra.uid');
+
+  // QQ 自己的判据：qm_keyst 必须配 uin
+  const { QqProvider } = require(path.join(dist, 'providers', 'qq.js'));
+  const kh = fakeHost({ qr: BIG_QR });
+  const qq = new QqProvider({ host: kh, transport: transportStub, logger, now });
+  kh.state.cookies = { qm_keyst: 'k' };
+  eq((await qq.login.poll()).phase, 'waiting', 'QqProvider：只有 qm_keyst → waiting');
+  kh.state.cookies = { qm_keyst: 'k', uin: 'o777' };
+  const qqOk = await qq.login.poll();
+  eq(qqOk.phase, 'confirmed', 'QqProvider：qm_keyst + uin → confirmed');
+  eq(qqOk.credential.extra.uid, '777', 'uin 的 o 前缀被剥掉');
+}
+
+{
+  // 历史误判写进库里的 uid unknown 账号，构造时被清掉
+  const fsLike = fakeFs();
+  const store = new CredentialStore({ file: 'U/accounts.bin', cipher: fakeCipher(), fs: fsLike, logger, now });
+  store.upsert(
+    { id: 'qq:unknown', provider: 'qq', name: 'uid unknown', userId: 'unknown', avatarUrl: '', createdAt: now(), lastLoginAt: now() },
+    { cookie: 'c=1', extra: {}, updatedAt: now(), verifiedAt: now() }
+  );
+  store.upsert(
+    { id: 'qq:999', provider: 'qq', name: 'uid 999', userId: '999', avatarUrl: '', createdAt: now(), lastLoginAt: now() },
+    { cookie: 'c=2', extra: {}, updatedAt: now(), verifiedAt: now() }
+  );
+  const mod = new AccountManager({
+    store,
+    providers: {},
+    host: fakeHost({ qr: BIG_QR }),
+    transport: transportStub,
+    logger,
+    now
+  });
+  void mod;
+  eq(
+    store.list().map(a => a.userId),
+    ['999'],
+    '构造时清掉 uid unknown 的占位账号'
+  );
+}
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

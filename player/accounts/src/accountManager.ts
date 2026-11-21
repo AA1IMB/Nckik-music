@@ -45,6 +45,17 @@ export class AccountManager {
   constructor(deps: AccountManagerDeps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
+    // 迁移：清掉历史误判（没有账号标识的占位账号）
+    try {
+      for (const acc of this.deps.store.list()) {
+        if (!acc.userId || acc.userId === 'unknown') {
+          this.deps.store.remove(acc.id);
+          this.deps.logger.warn('清掉历史误判账号', { provider: acc.provider, id: acc.id });
+        }
+      }
+    } catch {
+      /* 账本坏了由 credentialStore 自己兜底 */
+    }
   }
 
   on(cb: (e: AccountEvent) => void): () => void {
@@ -254,6 +265,10 @@ export class AccountManager {
   }
 
   private async persist(provider: ProviderId, snapshotAccount: Account, credential: Credential): Promise<Account> {
+    // 兜底：没有账号标识的「登录成功」一定是误判，宁可报错让用户重扫，也不要往库里塞 uid unknown
+    if (!snapshotAccount.userId || snapshotAccount.userId === 'unknown') {
+      throw providerError(provider, 'E_AUTH_REQUIRED', '还没拿到账号标识：请在手机上点「确认登录」，或用手机 App 重新扫一次。');
+    }
     const account: Account = { ...snapshotAccount, provider, lastLoginAt: this.now() };
     this.deps.store.upsert(account, { ...credential, verifiedAt: this.now() });
     this.deps.store.setCurrent(provider, account.id);

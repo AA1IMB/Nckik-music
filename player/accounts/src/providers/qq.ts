@@ -43,7 +43,7 @@ export const QQ_CONFIG: PageProviderConfig = {
   clickTexts: ['登录', 'QQ登录', '扫码登录'],
   qrMessage: '请用手机 QQ 扫一扫',
   // 只读这些名字；qqmusic_key 是老版名，qm_keyst 是新版名，二者出现其一即算登录
-  cookieNames: ['qm_keyst', 'qqmusic_key', 'p_skey', 'skey', 'uin', 'wxuin', 'psrf_qqunionid', 'psrf_musickey_createtime'],
+  cookieNames: ['qm_keyst', 'qqmusic_key', 'p_skey', 'skey', 'uin', 'p_uin', 'luin', 'euin', 'wxuin', 'psrf_qqunionid', 'psrf_musickey_createtime'],
   requiredCookieNames: [],
   qrTimeoutMs: 15_000,
   qrTtlMs: 3 * 60 * 1000,
@@ -66,7 +66,7 @@ export class QqProvider extends PageLoginProvider {
     const hasKey = !!cookies.qm_keyst || !!cookies.qqmusic_key;
     // 只要 uin / wxuin 有一个，才是真的有人登录过（未登录时这两个都是空的，
     // 而登录层一打开就会写 qm_keyst 之类的占位值 —— 早期版本就栽在这里）。
-    const hasUid = !!cookies.uin || !!cookies.wxuin;
+    const hasUid = !!(cookies.uin || cookies.p_uin || cookies.luin || cookies.euin || cookies.wxuin);
     if (hasKey && hasUid) {
       const credential: Credential = {
         cookie: buildCookieHeader(cookies),
