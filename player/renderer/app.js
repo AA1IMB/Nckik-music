@@ -20,6 +20,7 @@ const S = {
   lyricSrc: '',
   accent: '#5b5b66',
   idn: { current: '', providers: [] },   // 当前账号（标题栏右上角头像）
+  up: { qqapp: { status: 'idle', items: [], err: '' }, kugou: { status: 'idle', items: [], err: '' } },
   settings: null,
   devices: [],
   seekDrag: false,
@@ -1687,6 +1688,28 @@ function scrollCurIntoView() {
 }
 
 /* ---- 可选歌单：本地曲库 / 当前打开的网易云歌单 / 我的歌单 ---- */
+/* 上游歌单（QQ 音乐 / 酷狗）：只在当前账号对应平台时去读，读完缓存到 S.up，
+ * 这样「选择歌单」是同步渲染、不会因为网络卡住整个面板。 */
+async function upEnsure(provider, force) {
+  const st = S.up && S.up[provider];
+  if (!st || !window.api.accPlaylists) return;
+  if (!force && (st.status === 'ready' || st.status === 'loading')) return;
+  st.status = 'loading';
+  st.err = '';
+  let r;
+  try { r = await window.api.accPlaylists(provider); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (!r || !r.ok) {
+    st.status = 'error';
+    st.err = (r && r.error && r.error.message) || '读取歌单失败';
+    st.items = [];
+  } else {
+    st.status = 'ready';
+    st.items = r.items || [];
+  }
+  if (PL.view === 'pick') renderPl();
+}
+
 function plSources() {
   /* 列什么取决于「当前账号」（标题栏右上角头像）：
    * 切到酷狗/QQ 音乐时，把网易云歌单塞进来只会让人点进去报错，
@@ -1715,6 +1738,21 @@ function plSources() {
           sub: (p.count || 0) + ' 首 · 网易云（打开时读取）'
         });
       }
+    }
+  }
+  /* QQ 音乐 / 酷狗：上游歌单（upEnsure 预取），按当前账号所属平台列 */
+  if ((cur === 'qqapp' || cur === 'kugou') && S.up[cur]) {
+    const st = S.up[cur];
+    const label = cur === 'qqapp' ? 'QQ 音乐' : '酷狗音乐';
+    if (st.status === 'ready') {
+      for (const p of st.items) {
+        out.push({
+          key: cur, kind: 'up', provider: cur, id: p.id, dirId: p.dirId || 0,
+          name: p.name, sub: (p.count ? p.count + ' 首 · ' : '') + label + '（打开时读取）'
+        });
+      }
+    } else if (st.status === 'error') {
+      out.push({ key: cur, name: label + '：歌单读取失败', sub: st.err || '稍后重试', disabled: true });
     }
   }
   /* 哔哩哔哩收藏夹只读已有结果：不为一个下拉框去发网络请求，
@@ -1816,11 +1854,17 @@ async function plSelectSource(src) {
     try {
       /* 哔哩哔哩走收藏夹接口，网易云走歌单接口：两者的返回都是 { ok, tracks }，
        * 只有入口不同，所以在这里分一次叉，下面的覆盖逻辑完全复用。 */
-      const r = src.kind === 'bil'
-        ? await window.api.bilFavList(src.id, 1)
-        : await window.api.nePlaylist(src.id);
+      let r;
+      if (src.kind === 'bil') r = await window.api.bilFavList(src.id, 1);
+      else if (src.kind === 'up') r = await window.api.accTracks(src.provider, src.id, src.dirId);
+      else r = await window.api.nePlaylist(src.id);
       if (!r || !r.ok) throw new Error((r && r.error && r.error.message) || '读取失败');
-      tracks = r.tracks || [];
+      /* 上游歌单给的是 { id, title, artist, duration }，没有 path：
+       * 用 id 当 path，这样列表能落盘；取流是否支持由播放层决定（见下方提示）。 */
+      tracks = (src.kind === 'up' ? (r.items || []).map(t => ({ ...t, path: t.path || t.id })) : (r.tracks || []));
+      if (src.kind === 'up' && tracks.length) {
+        toast('已读取 ' + tracks.length + ' 首；' + (src.provider === 'kugou' ? '酷狗' : 'QQ 音乐') + '取流尚未接入，暂只能进列表', 3600);
+      }
     } catch (e) {
       PL.busy = false;
       renderPl();
@@ -4479,6 +4523,9 @@ async function idnSwitch(provider, accountId) {
     bilFavsReset();
     bilEnsureFavs(true);
   }
+  else if (provider === 'qqapp' || provider === 'kugou') {
+    upEnsure(provider, true);
+  }
   if (PL.view === 'pick') renderPl(); else if ($('#dLib').classList.contains('show')) renderLibrary();
   toast('已切换到 ' + label + (accountId ? '' : '（未登录）'), 2400);
 }
@@ -4503,6 +4550,12 @@ function idnInit() {
     if (IDN.open) idnRenderList();
   }) : null;
   idnLoad(false);
+  /* 当前账号是 QQ 音乐 / 酷狗时先预取歌单：等用户打开「选择歌单」再请求，
+   * 那一下会看到空列表。失败也不打断启动（面板里会显示原因）。 */
+  setTimeout(() => {
+    const cur = S.idn.current;
+    if (cur === 'qqapp' || cur === 'kugou') upEnsure(cur, false);
+  }, 1200);
 }
 
 /* ------------------------------------------------------------------ 启动 */

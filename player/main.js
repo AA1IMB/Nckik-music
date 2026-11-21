@@ -7,6 +7,7 @@ const { Readable } = require('node:stream');
 const ne = require('./netease');
 const bil = require('./bilibili');
 const { createQrLogin } = require('./bilibili-qr');
+const upstream = require('./upstream-library');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -1339,6 +1340,48 @@ async function identitySnapshot() {
   }
   return out;
 }
+
+/* ---------------- 上游歌单（QQ 音乐 / 酷狗） ----------------
+ * 只读自己的歌单：列表 + 歌单内的曲目。凭证从账号层取（已经在 safeStorage 里），
+ * 这里不碰 cookie 的保存，失败一律回 { ok:false, error:{code,message} }。 */
+function credOf(provider) {
+  try {
+    if (!accAccounts || !accAccounts.manager) return null;
+    const c = accAccounts.manager.credentialOf(provider);
+    return c || null;
+  } catch { return null; }
+}
+
+ipcMain.handle('acc:playlists', async (_e, arg) => {
+  const provider = (arg && arg.provider) || '';
+  const cred = credOf(provider);
+  if (!cred) return { ok: false, error: { code: 'E_AUTH_REQUIRED', message: '还没有登录该音源' } };
+  try {
+    let items;
+    if (provider === 'qqapp') items = await upstream.qqPlaylists({ ...cred.extra, cookie: cred.cookie });
+    else if (provider === 'kugou') items = await upstream.kgPlaylists({ ...cred.extra, cookie: cred.cookie });
+    else return { ok: false, error: { code: 'E_UPSTREAM_UNSUPPORTED', message: '这个音源没有歌单接口' } };
+    return { ok: true, items };
+  } catch (e) {
+    return { ok: false, error: { code: (e && e.code) || 'E_UPSTREAM', message: String((e && e.message) || e) } };
+  }
+});
+
+ipcMain.handle('acc:tracks', async (_e, arg) => {
+  const provider = (arg && arg.provider) || '';
+  const id = (arg && arg.id) || '';
+  const dirId = (arg && arg.dirId) || 0;
+  const cred = credOf(provider);
+  if (!cred) return { ok: false, error: { code: 'E_AUTH_REQUIRED', message: '还没有登录该音源' } };
+  try {
+    const items = provider === 'qqapp'
+      ? await upstream.qqPlaylistTracks({ ...cred.extra, cookie: cred.cookie }, id, dirId)
+      : await upstream.kgPlaylistTracks({ ...cred.extra, cookie: cred.cookie }, id);
+    return { ok: true, items };
+  } catch (e) {
+    return { ok: false, error: { code: (e && e.code) || 'E_UPSTREAM', message: String((e && e.message) || e) } };
+  }
+});
 
 ipcMain.handle('idn:get', async () => {
   try { return await identitySnapshot(); }

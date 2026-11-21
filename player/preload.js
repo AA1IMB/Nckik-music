@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('api', {
   accLogout: (id, provider) => ipcRenderer.invoke('acc:logout', id ? { id } : { provider }),
   accAudio: (req) => ipcRenderer.invoke('acc:audio', req),
   accInvalidate: (provider) => ipcRenderer.invoke('acc:invalidate', provider ? { provider } : {}),
+  accPlaylists: (provider) => ipcRenderer.invoke('acc:playlists', { provider }),
+  accTracks: (provider, id, dirId) => ipcRenderer.invoke('acc:tracks', { provider, id, dirId }),
   idnGet: () => ipcRenderer.invoke('idn:get'),
   idnSet: (provider, accountId) => ipcRenderer.invoke('idn:set', { provider, accountId }),
   onIdnChanged: (cb) => ipcRenderer.on('idn:changed', (_e, p) => cb(p)),

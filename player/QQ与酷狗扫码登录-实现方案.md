@@ -416,3 +416,32 @@ const out = await this.host.evalInPage(KgUser.QRCodeLogin(...));  // ← 页面�
 - `node --check` 四个文件全通过。
 - 真机：`.tmp/diag-idn.js` → `[pop] items 4`（网易云/QQ/酷狗/哔哩哔哩各 1 个账号）、`[src-before]` 17 条网易云歌单、切到哔哩哔哩后 `[after-switch]` 出现 8 个收藏夹（默认收藏夹/学习/摄影/键盘/pr/电脑…）、切回网易云 17 条复原；截图 `player/demo/shot-idn-pop.png`。
 - 头像加载失败自动回落首字母（QQ 音乐当前没有头像 URL、酷狗只有 uid）。
+
+## 二十一、上游歌单接口（v0.9.3）
+
+### 21.1 协议与端点
+
+| 用途 | 平台 | 端点 / 模块 | 关键字段 |
+| --- | --- | --- | --- |
+| 我的歌单 | QQ 音乐 | musicu `music.musicasset.PlaylistBaseRead / GetPlaylistByUin` | `v_playlist[].tid/dirId/name/songnum` |
+| 歌单曲目 | QQ 音乐 | musicu `music.srfDissInfo.DissInfo / CgiGetDiss` | `songlist[].mid/name/singer[].name/interval` |
+| 我的歌单 | 酷狗 | `m.kugou.com/plist/index?json=true&uid=<userid>&page=1&pagesize=100` | `plist.list.info[].specialid/specialname/songcount/imgurl` |
+| 歌单曲目 | 酷狗 | `m.kugou.com/plist/index?json=true&specialid=<id>&page=N` | `plist.list.info[].songs[].hash/filename/duration` |
+
+QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 qqapp 扫码同一条通道；酷狗直接用登录落盘的 `token/userid` 走 `Cookie` 头。两者都不做签名、不碰写操作。
+
+### 21.2 实现
+
+- `player/upstream-library.js`：`qqPlaylists / qqPlaylistTracks / kgPlaylists / kgPlaylistTracks`，统一返回 `{id,name,count,cover}` 与 `{id,title,artist,duration}`；非 0 码转 `E_UPSTREAM_CODE`，1000/104400 转 `E_AUTH_REQUIRED`。
+- `player/main.js`：`acc:playlists` / `acc:tracks` 两个 IPC，凭证用 `accAccounts.manager.credentialOf(provider)`，失败统一 `{ok:false,error:{code,message}}`。
+- `player/renderer/app.js`：`S.up` 缓存 + `upEnsure()` 预取；当前账号是 QQ 音乐 / 酷狗时，「选择歌单」列出该账号的歌单；点选后 `accTracks` 拉曲目并整体覆盖播放列表。
+
+### 21.3 酷狗曲目为什么要摊平多页
+
+`m.kugou.com` 的歌单详情**不直接返回歌曲数组**：每页给 30 个歌单卡片、每张卡片带 3 首 `songs[]`。实测 page1 摊平去重得 89 首、page2 累到 178 首，而歌单 `songcount` 是 156。因此实现里「按页累加 + 按 hash 去重 + 到达 songcount 即停并截断」，得到 156 首（不再翻到 533 首）。
+
+### 21.4 边界
+
+- QQ 只接「自建歌单」；收藏歌单要 `encryptUin`（`PlaylistFavRead`），本版未接。
+- QQ 歌单不返回曲目数（`count` 可能为 0），列表里按「打开时读取」显示。
+- 曲目只能入列表，播放还需要取流（QQ 需合规上游，酷狗需 `kg:<hash>` 协议），面板会提示「取流尚未接入」。
