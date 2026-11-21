@@ -140,7 +140,14 @@ export interface LoginWindowHost {
   /** 打开官方登录页并等页面稳定 */
   open(
     url: string,
-    opts: { partition: string; size?: { width: number; height: number }; clickText?: string }
+    opts: {
+      partition: string;
+      size?: { width: number; height: number };
+      /** 必须先点一下才出码时的可见按钮文案，按顺序点（QQ 音乐要「登录」→「QQ登录」→「扫码登录」） */
+      clickTexts?: readonly string[];
+      /** 兼容单条文案写法 */
+      clickText?: string;
+    }
   ): Promise<void>;
   /** 读到指定名字的 cookie（值可能为空串，表示尚未写入） */
   readCookies(names: readonly string[]): Promise<Record<string, string>>;

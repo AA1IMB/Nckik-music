@@ -127,6 +127,17 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
   let partition = '';
   let watchers: Array<() => void> = [];
 
+  const collectFrames = (main: any): any[] => {
+    const out: any[] = [];
+    const walk = (f: any) => {
+      if (!f) return;
+      out.push(f);
+      for (const c of f.frames || []) walk(c);
+    };
+    walk(main);
+    return out;
+  };
+
   const requireWin = () => {
     if (!win) throw new Error('登录窗口未打开');
     return win;
@@ -158,25 +169,26 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
       });
       await win.loadURL(url);
       await sleep(opts.settleMs ?? 600);
-      // 有的站点要用户先点「登录」才挂出二维码的 iframe（QQ 音乐首页即如此）。
-      // 这里只点页面上本来就有、用户可见的那个按钮，不注入任何伪造参数。
-      if (o.clickText) {
-        const text = JSON.stringify(o.clickText);
-        const clicked = await win.webContents
-          .executeJavaScript(
-            `(() => {
-              const want = ${text};
-              const els = Array.from(document.querySelectorAll('a,button,div,span')).filter(
-                (e) => (e.innerText || '').trim() === want && e.offsetParent
-              );
-              if (!els.length) return false;
-              els[els.length - 1].click();
-              return true;
-            })()`,
-            true
-          )
-          .catch(() => false);
-        if (clicked) await sleep(1600);
+      // 有的站点要用户先点几下才挂出二维码（QQ 音乐是「登录」→ 弹层「QQ登录」→「扫码登录」）。
+      // 这里只点页面上本来就有、用户可见的按钮，不注入任何伪造参数。
+      // 弹层里的按钮可能落在跨域子帧（graph.qq.com），所以每个文案在主帧和子帧各找一遍。
+      const clicks = o.clickTexts ?? (o.clickText ? [o.clickText] : []);
+      for (const want of clicks) {
+        const CLICK = `(() => {
+          const want = ${JSON.stringify(want)};
+          const els = Array.from(document.querySelectorAll('a,button,div,span')).filter(
+            (e) => (e.innerText || '').trim() === want && e.offsetParent !== null
+          );
+          if (!els.length) return false;
+          els[els.length - 1].click();
+          return true;
+        })()`;
+        let clicked = false;
+        for (const f of collectFrames(win.webContents.mainFrame)) {
+          const ok = await within<any>(f.executeJavaScript(CLICK, true), 5_000, false).catch(() => false);
+          if (ok) { clicked = true; break; }
+        }
+        if (clicked) await sleep(1_200);
       }
     },
     async readCookies(names) {
@@ -193,29 +205,40 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
     async readQrImage() {
       const w = requireWin();
       const wc = w.webContents;
-      const frames: any[] = [];
-      const walk = (f: any) => {
-        if (!f) return;
-        frames.push(f);
-        for (const c of f.frames || []) walk(c);
-      };
-      walk(wc.mainFrame);
+      const frames = collectFrames(wc.mainFrame);
 
+      // 判据：方形容器 + 足够大的位图；长度门槛只用来排除「占位白图」（约 900 字符，
+      // 酷狗真正的二维码是调色板 PNG，data URL 只有 1414 字符，所以门槛必须低于它）。
       const PICK = `(() => {
+        const square = (w, h) => w >= 120 && h >= 120 && Math.abs(w - h) <= Math.max(8, w * 0.12);
+        const deco = /(logo|avatar|icon|sprite|scan-tip|placeholder|loading|default)/i;
         for (const c of document.querySelectorAll('canvas')) {
-          if (c.width >= 120 && c.height >= 120) {
-            try { const d = c.toDataURL('image/png'); if (d.length >= 1500) return { kind: 'data', src: d }; } catch (e) {}
+          if (square(c.width, c.height)) {
+            try { const d = c.toDataURL('image/png'); if (d.length >= 800) return { kind: 'data', src: d }; } catch (e) {}
           }
         }
+        // 只认「真正显示出来」的图：QQ 音乐弹层里另一路（微信）的二维码是 470×470 但 display:0x0，
+        // 有些站还会把二维码缩到 150~200px 显示，所以看渲染尺寸而不是原始尺寸。
+        const shown = (i) => {
+          const r = i.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 120 && Math.abs(r.width - r.height) <= Math.max(8, r.width * 0.12);
+        };
         const imgs = Array.from(document.images)
-          .filter((i) => i.naturalWidth >= 150 && i.naturalHeight >= 150)
+          .filter((i) => shown(i) && i.naturalWidth >= 120 && i.naturalHeight >= 120)
           .sort((a, b) => b.naturalWidth - a.naturalWidth);
         for (const i of imgs) {
           const src = i.currentSrc || i.src || '';
-          if (src.startsWith('data:image') && src.length >= 1500) return { kind: 'data', src };
-          if (/^https?:/i.test(src) && !src.split('?')[0].toLowerCase().endsWith('.svg')) {
-            return { kind: 'remote', src };
-          }
+          if (deco.test(src)) continue;
+          if (src.startsWith('data:image') && src.length >= 800) return { kind: 'data', src };
+          if (/^https?:/i.test(src) && !src.split('?')[0].toLowerCase().endsWith('.svg')) return { kind: 'remote', src };
+        }
+        // 有的站把二维码画成 CSS 背景图（QQ 互联的 .plain-qrcode 就是 background-image: url(data:p...
+        for (const e of Array.from(document.querySelectorAll('div,span,i,b,button'))) {
+          const r = e.getBoundingClientRect();
+          if (!square(r.width, r.height)) continue;
+          const bg = getComputedStyle(e).backgroundImage || '';
+          const m = /url\\(["']?(data:image\\/[^"')]+)["']?\\)/.exec(bg);
+          if (m && m[1].length >= 800) return { kind: 'data', src: m[1] };
         }
         return null;
       })()`;

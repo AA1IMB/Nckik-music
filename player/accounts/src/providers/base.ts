@@ -62,6 +62,10 @@ export interface PageProviderConfig {
    * 只做「点这个可见按钮」，不注入任何伪造参数。
    */
   clickText?: string;
+  /** 需要按顺序点击多个入口时才出码（QQ 音乐：登录 → QQ登录 → 扫码登录） */
+  clickTexts?: readonly string[];
+  /** 二维码出现后状态行的提示语（默认「请用手机 App 扫码」） */
+  qrMessage?: string;
   qrTimeoutMs: number;
   qrTtlMs: number;
   expiredPatterns: readonly RegExp[];
@@ -119,6 +123,7 @@ export class PageLoginProvider implements Provider {
     const openOnce = async (): Promise<string | null> => {
       try {
         await this.host.open(this.cfg.loginUrl, {
+          clickTexts: this.cfg.clickTexts,
           clickText: this.cfg.clickText,
           partition: this.cfg.partition,
           size: { width: 960, height: 720 }
@@ -127,7 +132,7 @@ export class PageLoginProvider implements Provider {
         this.logger.warn('[acc] 打开登录页失败，将重试一次', { provider: this.id, error: (err as Error).message });
         return null;
       }
-      const settle = this.now() + 4000;
+      const settle = this.now() + 7000;
       while (this.now() < settle) {
         const image = await this.host.readQrImage();
         if (image && isUsableQr(image)) return image;
@@ -142,13 +147,13 @@ export class PageLoginProvider implements Provider {
       await sleep(900);
       first = await openOnce();
     }
-    if (first) return { qr: { image: first, expiresAt: this.now() + this.cfg.qrTtlMs }, message: '请用手机 App 扫码' };
+    if (first) return { qr: { image: first, expiresAt: this.now() + this.cfg.qrTtlMs }, message: this.cfg.qrMessage || '请用手机 App 扫码' };
 
     const deadline = this.now() + this.cfg.qrTimeoutMs;
     while (this.now() < deadline) {
       const image = await this.host.readQrImage();
       if (image && isUsableQr(image)) {
-        return { qr: { image, expiresAt: this.now() + this.cfg.qrTtlMs }, message: '请用手机 App 扫码' };
+        return { qr: { image, expiresAt: this.now() + this.cfg.qrTtlMs }, message: this.cfg.qrMessage || '请用手机 App 扫码' };
       }
       await sleep(300);
     }
@@ -263,8 +268,9 @@ export function gtkOf(skey: string): string {
 /** 页面刚渲染时常见一张约 900 字符的占位白图，真码 base64 通常 4～8KB */
 export function isUsableQr(image: string): boolean {
   if (!image) return false;
-  if (image.startsWith('data:image/svg')) return image.length > 800;
-  return image.length >= 1500;
+  // 只要是一张有内容的位图就交给渲染层；「占位白图」约 900 字符，真实二维码最小也有 1.3KB
+  if (image.startsWith('data:image/svg')) return image.length > 400;
+  return image.length >= 800;
 }
 
 export function joinUrl(base: string, path: string): string {

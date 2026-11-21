@@ -183,3 +183,19 @@ powershell -ExecutionPolicy Bypass -File .\启动开发版.ps1 -Probe all
 - 既有回归：`npx tsc -p tsconfig.accounts.json` 0 error；`node tools/test-accounts.mjs` 40/40。
 
 **仍有限制**：①手机「确认」这一拍无法自动化，需真实扫一次；②取流需配置 `NCKK_QQ_UPSTREAM` / `NCKK_KUGOU_UPSTREAM`（未配置时面板显示「未配置」，只做登录与账号管理）；③酷狗冷启动偶发 `ERR_FAILED(-2)` 已有一次静默重试，若仍失败点「重新获取」。
+
+## 十二、二次修复：三个真机问题（2026-11-21）
+
+真机跑出 `player/demo/shot-acc-qq2.png` / `shot-acc-kugou2.png` 时暴露出三个问题，逐一定位并修好：
+
+| # | 现象 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | QQ 面板二维码一出来就盖着「已登录」遮罩，账号列表却是空的 | `QqProvider.poll()` 判据是「只要 `qm_keyst` 或 `qqmusic_key` 存在就算登录」，而 y.qq.com 的登录层在**未登录**时也会写这类占位 cookie | 加 `uin` / `wxuin` 必须存在（未登录时二者皆空），且两者都在白名单里 |
+| 2 | 只有微信二维码，没有 QQ 扫码入口 | QQ 音乐的 QQ 二维码不在 `<img>` / `<canvas>`，而是登录层「扫码登录」页签点开后由 `graph.qq.com` 子帧渲染的 `<div class="plain-qrcode">` 的 **CSS background-image**；而且必须先点「登录」→「QQ登录」→「扫码登录」三步，第三步的按钮在跨域子帧里 | `LoginWindowHost.open()` 支持 `clickTexts` 序列，逐帧查找并点击；`readQrImage()` 增加 CSS 背景图扫描，并按**渲染尺寸**（≥120px 且近似方形）判断，避免把另一页签里 `display:0x0` 的微信码扫进来 |
+| 3 | 酷狗二维码加载失败，面板报「登录页没有出现二维码」 | 酷狗真码是调色板 PNG，data URL 仅 **1414** 字符，而识别门槛是 `length >= 1500`，于是被跳过、转而命中 236px 的 `scan-tip.png` 装饰图，主帧远程图又被跳过 | 门槛降到 800（占位白图约 900 会落在这之下，真码最小 1.3KB）；图片要近似方形、显示尺寸 ≥120；跳过 `logo/avatar/icon/sprite/scan-tip/placeholder` 类装饰图 |
+
+附带：`qrMessage` 让状态行按平台说话（「请用手机 QQ 扫一扫」/「请用手机酷狗 App 扫一扫」），设置页帮助文案同步；点击等待放宽到 5s/1.2s、首屏找码窗口 4s→7s（QQ 登录层要点三次、还要等子帧渲染）。
+
+真机取证：QQ 面板 `{"len":124598,"w":568,"h":568,"state":"请用手机 QQ 扫一扫","auth":"未登录"}`；酷狗 `{"len":1378,"w":423,"h":423,"state":"请用手机酷狗 App 扫一扫"}`；两者 `accStatus` 均为 `account:null`（没有误判登录）。`tsc` 0 error，`tools/test-accounts.mjs` 40/40。
+
+> 说明：QQ 这一路的二维码是 QQ 互联官方「扫码登录」页签生成的点阵码，用**手机 QQ** 扫；若想用微信，可点弹层里的「微信登录」页签（`open.weixin.qq.com` 的普通方形码，之前那版收到的是它）。

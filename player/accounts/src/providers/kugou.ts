@@ -35,6 +35,7 @@ export const KUGOU_CONFIG: PageProviderConfig = {
   // 注意：带 callback 参数时酷狗会回 ERR_FAILED(-2) 加载失败，去掉即可正常出码
   loginUrl: 'https://login-user.kugou.com/login/?appid=1014',
   partition: 'persist:acc-kugou',
+  qrMessage: '请用手机酷狗 App 扫一扫',
   cookieNames: ['token', 'userid', 'dfid', 'kugouid', 'kg_mid', 'kg_dfid', 'NickName'],
   requiredCookieNames: ['token', 'userid'],
   qrTimeoutMs: 15_000,
