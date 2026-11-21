@@ -170,7 +170,8 @@ function synthUpTrack(item) {
     title: item.title || item.name || '未知曲目',
     artist: item.artist || '',
     duration: Number(item.duration || 0) || 0,
-    codec: id.startsWith('kg:') ? 'MP3' : 'AAC'
+    codec: id.startsWith('kg:') ? 'MP3' : 'AAC',
+    albumMid: item.albumMid ? String(item.albumMid) : ''
   };
 }
 
@@ -1236,7 +1237,10 @@ function paintMeta() {
           : '正在加载封面…';
       setCoverEmpty('暂无封面', sub);
     } else {
-      setCoverEmpty('暂无封面', k.error ? '元数据读取失败，封面未知' : '该文件没有内嵌封面，也没有同名图片');
+      const up = /^(kg|qq):/.test(String(k.path || ''));
+      setCoverEmpty('暂无封面', up
+        ? '上游这首歌没有提供封面'
+        : (k.error ? '元数据读取失败，封面未知' : '该文件没有内嵌封面，也没有同名图片'));
     }
   }
   renderFmtPopover();
