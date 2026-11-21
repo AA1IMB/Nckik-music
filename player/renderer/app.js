@@ -3440,6 +3440,15 @@ async function playAt(qi, opts) {
     }
     if (seq !== loadSeq) return;
 
+    /* 上游曲目（kg: / qq:）没有「详情」接口，封面单独问一次上游；
+     * 歌词不在这里处理 —— track:lyric 已经按同样前缀路由。 */
+    if (!art && /^(kg|qq):/.test(String(k.path || ''))) {
+      try {
+        const meta = await window.api.accMeta(k.path);
+        if (meta && meta.ok && meta.cover) art = meta.cover;
+      } catch { /* 封面拿不到就用兜底 */ }
+    }
+    if (seq !== loadSeq) return;
     if (art) {
       setCover(k.path, art);
       const c = await accentFrom(art);

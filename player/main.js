@@ -9,6 +9,7 @@ const bil = require('./bilibili');
 const { createQrLogin } = require('./bilibili-qr');
 const upstream = require('./upstream-library');
 const streams = require('./stream-resolve');
+const upmeta = require('./upstream-meta');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -950,6 +951,17 @@ ipcMain.handle('track:detail', async (_e, file) => {
 });
 
 ipcMain.handle('track:lyric', async (_e, file) => {
+  /* 上游曲目（kg:<hash> / qq:<mid>）的歌词同样在这里返回，
+   * 渲染层不用为「歌词从哪来」分叉。 */
+  if (typeof file === 'string' && /^(kg|qq):/.test(file)) {
+    try {
+      const meta = await upstreamMetaOf(file);
+      const text = (meta.lyric || []).map(l => `[${String(Math.floor(l.t / 60)).padStart(2, '0')}:${String(Math.floor(l.t % 60)).padStart(2, '0')}.${String(Math.round((l.t % 1) * 100)).padStart(2, '0')}]${l.text}`).join('\n');
+      return { text, source: file.slice(0, 2) === 'kg' ? '酷狗' : 'QQ 音乐', note: text ? '' : '这首歌上游没有提供歌词' };
+    } catch (e) {
+      return { text: '', source: '', note: String((e && e.message) || e) };
+    }
+  }
   if (isNeKey(file)) {
     try { return await ne.lyric(Number(file.slice(3))); }
     catch (e) { return { text: '', source: '', note: String((e && e.message) || e) }; }
@@ -1449,6 +1461,23 @@ function credOf(provider) {
     return c || null;
   } catch { return null; }
 }
+
+/* 上游曲目的封面/歌词统一入口；fail-safe：任何异常都回空，不影响播放。 */
+async function upstreamMetaOf(key) {
+  const s = String(key || '');
+  if (s.startsWith('kg:')) return upmeta.kgMeta(s.slice(3));
+  if (s.startsWith('qq:')) {
+    const cred = credOf('qqapp') || {};
+    const extra = cred.extra || {};
+    return upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey });
+  }
+  return { cover: '', lyric: [] };
+}
+
+ipcMain.handle('acc:meta', async (_e, key) => {
+  try { return { ok: true, ...(await upstreamMetaOf(key)) }; }
+  catch (e) { return { ok: false, error: { code: 'E_META', message: String((e && e.message) || e) } }; }
+});
 
 ipcMain.handle('acc:playlists', async (_e, arg) => {
   const provider = (arg && arg.provider) || '';
