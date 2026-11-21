@@ -1512,9 +1512,121 @@ function fillThumbs(root) {
 
 /* 列表用事件委托 + 预计算下标：原来 items.map 里 indexOf 是 O(n²)，
  * 2000 首时单次渲染 120ms 以上，切歌/搜索都会卡一下。 */
+/* QQ 音乐 / 酷狗 的曲库分段：两级视图（歌单 → 曲目），
+ * 数据来自主进程 acc:playlists / acc:tracks（凭证在账号层，渲染层看不到 cookie）。 */
+async function upEnsure(provider, force) {
+  const st = S.up[provider] || (S.up[provider] = { status: 'idle', err: '', items: [], view: 'list', tracks: [], name: '', id: 0 });
+  if (st.status === 'loading') return;
+  if (!force && (st.status === 'ready' || st.status === 'error')) return;
+  st.status = 'loading'; st.err = '';
+  if (S.srcMode === provider) renderUp(provider);
+  let r;
+  try { r = await window.api.accPlaylists(provider); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (!r || !r.ok) {
+    st.status = 'error';
+    st.err = (r && r.error && r.error.message) || '歌单读取失败';
+  } else {
+    st.status = 'ready';
+    st.items = r.items || [];
+  }
+  if (S.srcMode === provider) renderUp(provider);
+}
+
+async function upOpen(provider, id, name) {
+  const st = S.up[provider] || (S.up[provider] = {});
+  st.view = 'tracks'; st.id = id; st.name = name || ''; st.tracks = []; st.trackErr = '';
+  renderUp(provider);
+  toast('正在读取「' + (name || '歌单') + '」…', 0);
+  let r;
+  try { r = await window.api.accTracks(provider, id); }
+  catch (e) { r = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  if (!r || !r.ok) {
+    st.trackErr = (r && r.error && r.error.message) || '曲目读取失败';
+    st.tracks = [];
+  } else {
+    /* 上游曲目只有裸 id（酷狗 hash / QQ songmid），列表里必须存成带前缀的 path，
+     * 播放层才知道该走 kg: 还是 qq: —— 和「选择歌单」那条路保持一致。 */
+    st.tracks = (r.items || []).map(t => ({
+      ...t,
+      path: provider === 'kugou' ? 'kg:' + t.id : (String(t.id).startsWith('qq:') ? t.id : 'qq:' + t.id)
+    }));
+  }
+  if (S.srcMode === provider) renderUp(provider);
+}
+
+function upPlay(provider, idx) {
+  const st = S.up[provider];
+  if (!st || !st.tracks.length) return;
+  const list = st.tracks.map(t => plToItem({ ...t, album: t.album || st.name }));
+  S.settings.playlist = list;
+  plSave();
+  rebuildQueue('id');
+  const want = st.tracks[idx] && st.tracks[idx].path;
+  const qi = S.q.findIndex(x => x.id === want);
+  playAt(qi >= 0 ? qi : 0);
+  plSyncBadge();
+}
+
+function renderUp(provider) {
+  const st = S.up[provider] || {};
+  const list = $('#libList');
+  const label = provider === 'kugou' ? '酷狗音乐' : 'QQ 音乐';
+  if (st.status === 'loading') {
+    list.innerHTML = emptyRow('正在读取' + label + '的歌单…');
+    $('#libCount').textContent = '';
+    list.onclick = null;
+    return;
+  }
+  if (st.status === 'error' || st.status === 'idle') {
+    const msg = st.err || (label + '：还没有登录账号（设置 → 播放账号）');
+    list.innerHTML = emptyRow(msg);
+    $('#libCount').textContent = '';
+    list.onclick = null;
+    return;
+  }
+  if (st.view !== 'tracks') {
+    const items = st.items || [];
+    $('#libCount').textContent = items.length ? items.length + ' 个歌单' : '0 个歌单';
+    list.innerHTML = items.length
+      ? items.map(p => `<div class="item" data-pl="${esc(String(p.id))}" data-name="${esc(p.name || '')}">
+          <div class="txt"><div class="ttl">${esc(p.name || '未命名歌单')}</div>
+          <div class="sub">${esc((p.count || 0) + ' 首')}${p.cover ? '' : ''}</div></div>
+          <div class="dur">›</div></div>`).join('')
+      : emptyRow(label + '账号下还没有歌单');
+    list.onclick = e => {
+      const row = e.target.closest('[data-pl]');
+      if (row) upOpen(provider, row.dataset.pl, row.dataset.name);
+    };
+    return;
+  }
+  const q = ($('#q').value || '').trim().toLowerCase();
+  const rows = [];
+  st.tracks.forEach((t, i) => {
+    if (q) {
+      const hay = [t.title, t.artist].filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(q)) return;
+    }
+    rows.push(`<div class="item" data-up="${i}">
+      <div class="num"><span class="idx">${i + 1}</span></div>
+      <div class="txt"><div class="ttl">${esc(t.title || '')}</div>
+      <div class="sub">${esc(t.artist || '')}</div></div>
+      <div class="dur">${esc(fmt(Number(t.duration) || 0))}</div></div>`);
+  });
+  $('#libCount').textContent = st.trackErr ? st.trackErr : (rows.length ? rows.length + ' 首 · ' + (st.name || '') : '0 首');
+  list.innerHTML = (st.trackErr ? emptyRow(st.trackErr) : (rows.join('') || emptyRow('这个歌单是空的')))
+    + '<div class="item" data-upback="1"><div class="txt"><div class="ttl">← 返回歌单</div></div></div>';
+  list.onclick = e => {
+    if (e.target.closest('[data-upback]')) { st.view = 'list'; renderUp(provider); return; }
+    const row = e.target.closest('[data-up]');
+    if (row) upPlay(provider, Number(row.dataset.up));
+  };
+}
+
 function renderLibrary() {
   if (S.srcMode === 'net') { renderNet(); return; }
   if (S.srcMode === 'bil') { renderBil(); return; }
+  if (S.srcMode === 'qqapp' || S.srcMode === 'kugou') { renderUp(S.srcMode); return; }
   const q = ($('#q').value || '').trim().toLowerCase();
   const rows = [];
   for (let i = 0; i < S.tracks.length; i++) {
@@ -2095,11 +2207,12 @@ function plBind() {
  * 搜索结果不落盘，只有点过的曲目才进 S.tracks（和本地文件一起持久化）。
  */
 function setSource(mode) {
-  S.srcMode = mode === 'net' ? 'net' : mode === 'bil' ? 'bil' : 'local';
+  S.srcMode = (mode === 'net' || mode === 'bil' || mode === 'qqapp' || mode === 'kugou') ? mode : 'local';
   const net = S.srcMode === 'net';
   const bilMode = S.srcMode === 'bil';
+  const upMode = S.srcMode === 'qqapp' || S.srcMode === 'kugou';
   $$('#segSrc b').forEach(b => b.classList.toggle('on', b.dataset.s === S.srcMode));
-  $('#localActions').style.display = net || bilMode ? 'none' : 'flex';
+  $('#localActions').style.display = net || bilMode || upMode ? 'none' : 'flex';
   $('#netActions').style.display = net ? 'flex' : 'none';
   $('#neNote').style.display = net ? 'block' : 'none';
   const bilNote = $('#bilNote');
@@ -2110,12 +2223,14 @@ function setSource(mode) {
   q.value = '';
   q.placeholder = net ? '搜索网易云：曲名 / 艺人 / 专辑'
     : bilMode ? '搜索哔哩哔哩：视频标题 / UP 主'
-      : '搜索曲名 / 艺人 / 专辑';
+      : upMode ? '在已读取的歌单里筛选曲目'
+        : '搜索曲名 / 艺人 / 专辑';
   if (net) {
     updateNeNote();
     if (S.ne.view !== 'coll') S.ne.view = 'home';
     neEnsureHome();          // 首次进来才真的打接口，之后复用缓存
   }
+  if (upMode) upEnsure(S.srcMode, false);
   if (bilMode) {
     S.bil.items = [];
     S.bil.err = '';
@@ -3427,6 +3542,17 @@ async function playAt(qi, opts) {
     let art = null;
     if (net || bilT) {
       art = await loadArt(k);
+    } else if (/^(kg|qq):/.test(String(k.path || ''))) {
+      /* 上游曲目没有本地文件，别去问 trackDetail（它会回「元数据读取失败」，
+       * 界面就顶着一行红字）。封面与码率一起从上游拿。 */
+      try {
+        const m = await window.api.accMeta(k.path);
+        if (m && m.ok) {
+          art = m.cover || null;
+          if (m.codec) k.codec = m.codec;
+          if (m.bitrate) { k.bitrate = m.bitrate; S.libDirty = true; }
+        }
+      } catch {}
     } else {
       const detail = await window.api.trackDetail(k.path);
       if (seq !== loadSeq) return;
