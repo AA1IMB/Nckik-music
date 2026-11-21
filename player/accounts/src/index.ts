@@ -1,5 +1,5 @@
 import * as nodeFs from 'fs';
-import type { Account, Cipher, LoginWindowHost, Logger, ProviderId, Transport } from './types';
+import type { Account, Cipher, LibraryRefresh, LoginWindowHost, Logger, ProviderId, Transport } from './types';
 import { PROVIDER_LABEL } from './types';
 import { CredentialStore, type FsLike } from './credentialStore';
 import { AccountManager } from './accountManager';
@@ -47,6 +47,8 @@ export interface AccountsModule {
   manager: AccountManager;
   store: CredentialStore;
   providers: Record<ProviderId, Provider>;
+  /** 账号数据版本（登录/切换/退出各 +1）；渲染层据此作废该平台的收藏与歌单缓存 */
+  revision: { value: number };
   /** 统一释放：关掉隐藏登录窗口 */
   dispose(): Promise<void>;
 }
@@ -87,11 +89,15 @@ export function createAccountsModule(opts: AccountsModuleOptions): AccountsModul
   };
 
   const manager = new AccountManager({ store, providers, logger: opts.logger, now });
+  // 账号数据版本：每次登录/切换/退出 +1。渲染层拿到新版本就作废该平台的收藏/歌单缓存，
+  // 避免「切了账号还看着上一个人的歌单」。
+  const revision = { value: 0 };
 
   return {
     manager,
     store,
     providers,
+    revision,
     async dispose() {
       await Promise.all([manager.cancelLogin('qq'), manager.cancelLogin('kugou'), manager.cancelLogin('qqapp')]);
     }
@@ -113,6 +119,8 @@ export interface RegisterIpcOptions {
   /** 把事件推给渲染层；主进程传 `win.webContents.send` */
   sendEvent?: (channel: string, payload: AccEvent) => void;
   upstream?: Partial<Record<ProviderId, string>>;
+  /** 登录/切换/退出之后刷新该平台的收藏与歌单（主进程注入） */
+  refreshLibrary?: (provider: ProviderId, account: Account | null) => Promise<LibraryRefresh>;
 }
 
 /**
@@ -143,7 +151,8 @@ export function registerAccountsIpc(opts: RegisterIpcOptions): () => void {
       provider: req.provider,
       account,
       hasCredential: !!(account && manager.credentialOf(req.provider)),
-      upstreamReady: !!opts.upstream?.[req.provider]
+      upstreamReady: !!opts.upstream?.[req.provider],
+      dataRevision: module.revision.value
     };
     return payload;
   });
@@ -165,7 +174,23 @@ export function registerAccountsIpc(opts: RegisterIpcOptions): () => void {
   });
 
   const off = manager.on(event => {
-    opts.sendEvent?.(ACC.event, event);
+    const needsRefresh = event.type === 'login' || event.type === 'switch' || event.type === 'logout';
+    if (needsRefresh) module.revision.value += 1;
+    const revision = module.revision.value;
+    // 先发一版（界面立刻切到新账号），刷新结果到了再发一版（带 library）
+    opts.sendEvent?.(ACC.event, { ...event, revision });
+
+    if (!needsRefresh || !opts.refreshLibrary) return;
+    const account = 'account' in event ? event.account ?? null : manager.current(event.provider);
+    void opts.refreshLibrary(event.provider, account)
+      .then(library => opts.sendEvent?.(ACC.event, { ...event, revision, library }))
+      .catch(err =>
+        opts.sendEvent?.(ACC.event, {
+          ...event,
+          revision,
+          library: { refreshed: false, message: (err as Error).message }
+        })
+      );
   });
 
   return () => {

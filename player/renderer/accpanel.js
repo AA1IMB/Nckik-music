@@ -1,261 +1,349 @@
-'use strict';
-/* QQ 音乐 / 酷狗音乐 账号面板（渲染层）
- * -------------------------------------------------------------------------
- * 只负责画：二维码、状态行、账号列表，以及按主进程给的 retryAfterMs 定时轮询。
- * 所有相位判定、超时、过期、风控与错误码都在主进程的账号模块里（player/accounts），
- * 这里不再复制一份，避免两处文案与两种真相。
- */
-(() => {
-  const PROVIDERS = ['qq', 'qqapp', 'kugou'];
-  const LABEL = { qq: 'QQ 音乐', qqapp: 'QQ 音乐 App', kugou: '酷狗音乐' };
-  const HELP = {
-    qq: '用手机 QQ 扫一扫（官方登录页的「扫码登录」页签），在手机上确认后即登录 QQ 音乐；二维码约 3 分钟有效，失效后点「重新获取」。',
-    qqapp: '用手机 QQ 音乐 App 的「扫一扫」扫这个码，在手机上确认后即登录；二维码约 15 分钟有效，失效后点「重新获取」。',
-    kugou: '用手机酷狗 App 扫一扫，在手机上确认后即登录；二维码约 3 分钟有效，失效后点「重新获取」。'
-  };
-  const PHASE = {
-    idle: '未登录',
-    starting: '正在打开登录页…',
-    waiting: '请用手机 App 扫码',
+/* 播放账号面板：QQ 音乐（App 扫码）与酷狗音乐各一张卡，互不干扰。
+ * - 每张卡自己维护轮询（retryAfterMs 驱动），切平台不再清掉另一张卡的码；
+ * - 账号切换/登录/退出后，主进程会推一版带 revision 的 acc:event，
+ *   这里据此作废该平台的收藏/歌单缓存（window.__accOnAccountChange）并重画账号列表。 */
+(function () {
+  'use strict';
+
+  const CARDS = [
+    {
+      id: 'qqapp',
+      title: 'QQ 音乐',
+      help: '手机打开 QQ 音乐 → 我的 → 右上角「扫一扫」，确认后即登录。二维码约 15 分钟有效。'
+    },
+    {
+      id: 'kugou',
+      title: '酷狗音乐',
+      help: '手机打开酷狗音乐 → 我的 → 扫一扫，确认后即登录。二维码约 3 分钟有效。'
+    }
+  ];
+
+  const PHASE_TEXT = {
+    waiting: '正在等待手机扫码',
     scanned: '已扫码，请在手机上确认',
     confirmed: '登录成功',
     expired: '二维码已失效',
-    failed: '登录失败',
-    cancelled: '已取消'
+    failed: '获取失败'
   };
 
-  let provider = 'qq';
-  let timer = 0;
-  let polling = false;
+  const $ = (sel, root) => (root || document).querySelector(sel);
 
-  const $ = id => document.getElementById(id);
-  const el = {
-    seg: $('accSeg'),
-    state: $('accAuthState'),
-    qrBtn: $('btnAccQr'),
-    cancelBtn: $('btnAccCancel'),
-    retryBtn: $('btnAccRetry'),
-    wrap: $('accQrWrap'),
-    box: $('accQrBox'),
-    shot: $('accQrShot'),
-    mask: $('accQrMask'),
-    qrState: $('accQrState'),
-    help: $('accQrHelp'),
-    list: $('accList'),
-    up: $('accUp')
-  };
-  if (!el.seg || !window.api || !window.api.accBegin) return;
-
-  /* ---------------- 绘制 ---------------- */
-
-  function paintTabs() {
-    for (const b of el.seg.querySelectorAll('b')) b.classList.toggle('on', b.dataset.p === provider);
+  function h(tag, cls, text) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
   }
 
-  function showQr(wrapOn) {
-    el.wrap.classList.toggle('show', !!wrapOn);
+  function makeCard(def) {
+    const card = h('div', 'acccard');
+    card.dataset.p = def.id;
+
+    const head = h('div', 'line');
+    const k = h('div', 'k', '登录状态');
+    k.appendChild(h('small', null, '手机 App 扫码；凭据用系统密钥库加密，只存在本机'));
+    const state = h('div', 'v accstate', '未登录');
+    head.append(k, state);
+
+    const acts = h('div', 'line col');
+    const row = h('div', 'authrow');
+    const btnQr = h('button', 'ghost', '扫码登录');
+    const btnCancel = h('button', 'ghost mini', '取消');
+    row.append(btnQr, btnCancel);
+    acts.appendChild(row);
+
+    const wrap = h('div', 'qrwrap');
+    const box = h('div', 'qrbox');
+    const img = h('div', 'qrimg');
+    const mask = h('div', 'qrmask');
+    box.append(img, mask);
+    const qrState = h('div', 'qrstate', '正在获取二维码…');
+    const help = h('div', 'qrhelp', def.help);
+    const qrActs = h('div', 'qracts');
+    const btnRetry = h('button', 'ghost', '重新获取');
+    qrActs.appendChild(btnRetry);
+    wrap.append(box, qrState, help, qrActs);
+
+    const listLine = h('div', 'line col');
+    const list = h('div', 'acc-list');
+    listLine.appendChild(list);
+
+    const upLine = h('div', 'line');
+    const upK = h('div', 'k', '取流');
+    upK.appendChild(h('small', null, '需要配置合规上游网关；未配置时只做登录与账号管理'));
+    const upV = h('div', 'v dim', '未配置');
+    upLine.append(upK, upV);
+
+    const title = h('div', 'acctitle');
+    title.append(h('span', 'acctitle-name', def.title), h('span', 'acctitle-tag', '官方 App 扫码'));
+    card.append(title, head, acts, wrap, listLine, upLine);
+
+    return {
+      def,
+      card,
+      state,
+      btnQr,
+      btnCancel,
+      box,
+      img,
+      mask,
+      qrState,
+      wrap,
+      btnRetry,
+      list,
+      upV,
+      timer: 0,
+      shownSrc: '',
+      snapshot: null,
+      accounts: []
+    };
   }
 
-  function paintQr(snap) {
-    if (snap.qr && snap.qr.image) {
-      if (el.shot.dataset.src !== snap.qr.image) {
-        el.shot.dataset.src = snap.qr.image;
-        el.shot.innerHTML = '';
-        const img = document.createElement('img');
-        img.src = snap.qr.image;
-        img.alt = '二维码';
-        el.shot.append(img);
-      }
-      el.box.classList.remove('dead');
-    }
-    if (snap.phase === 'expired') {
-      el.box.classList.add('dead');
-      el.mask.textContent = '二维码已失效，点「重新获取」';
-    } else if (snap.phase === 'failed') {
-      el.box.classList.add('dead');
-      el.mask.textContent = '获取失败';
-    } else if (snap.phase === 'confirmed') {
-      el.box.classList.add('dead');
-      el.mask.textContent = '已登录';
-    } else if (snap.phase !== 'cancelled' && snap.phase !== 'idle') {
-      el.box.classList.remove('dead');
-    }
-    el.qrState.textContent = snap.message || PHASE[snap.phase] || '';
-    el.help.textContent = hintOf(snap.error) || el.help.dataset.base || '';
+  function api() {
+    return window.api || {};
   }
 
-  function hintOf(err) {
-    if (!err) return '';
-    const parts = [];
-    if (err.message) parts.push(err.message);
-    if (err.hint) parts.push(err.hint);
-    if (err.retryAfterMs) parts.push(Math.round(err.retryAfterMs / 1000) + ' 秒后可重试');
-    return parts.join(' · ');
-  }
-
-  /* ---------------- 轮询 ---------------- */
-
-  function stopTimer() {
-    if (timer) clearTimeout(timer);
-    timer = 0;
-  }
-
-  function schedule(ms) {
-    stopTimer();
-    timer = setTimeout(() => { void poll(); }, Math.max(300, ms || 2000));
-  }
-
-  async function handle(res, onOk) {
-    if (!res) return;
-    if (!res.ok) {
-      el.qrState.textContent = (res.error && res.error.message) || '请求失败';
-      el.help.textContent = hintOf(res.error);
-      stopTimer();
-      return;
-    }
-    onOk(res.data);
-  }
-
-  async function begin() {
-    stopTimer();
-    showQr(true);
-    el.shot.dataset.src = '';
-    el.shot.innerHTML = '';
-    el.box.classList.remove('dead');
-    el.mask.textContent = '';
-    el.qrState.textContent = PHASE.starting;
-    el.help.textContent = '';
-    const res = await window.api.accBegin(provider);
-    await handle(res, snap => {
-      paintQr(snap);
-      if (snap.phase === 'waiting' || snap.phase === 'starting') schedule(snap.retryAfterMs);
-      else if (snap.phase === 'confirmed') void refreshList();
+  function createPanel(mount) {
+    const cards = CARDS.map(def => {
+      const c = makeCard(def);
+      mount.appendChild(c.card);
+      bind(c);
+      return c;
     });
-  }
 
-  async function poll() {
-    if (polling) return;
-    polling = true;
-    try {
-      const res = await window.api.accPoll(provider);
-      await handle(res, snap => {
-        paintQr(snap);
-        if (snap.phase === 'starting' || snap.phase === 'waiting' || snap.phase === 'scanned') {
-          schedule(snap.retryAfterMs);
-        } else {
-          stopTimer();
-          if (snap.phase === 'confirmed') void refreshList();
+    function bind(c) {
+      c.btnQr.addEventListener('click', () => start(c));
+      c.btnRetry.addEventListener('click', () => start(c));
+      c.btnCancel.addEventListener('click', () => cancel(c));
+    }
+
+    /* ---------------- 交互 ---------------- */
+
+    async function start(c) {
+      const fn = api().accBegin;
+      if (!fn) return;
+      stopTimer(c);
+      c.qrState.textContent = '正在打开登录页…';
+      c.box.classList.remove('dead', 'ok');
+      c.mask.textContent = '';
+      c.wrap.classList.add('show');
+      const res = await fn(c.def.id);
+      if (!res || !res.ok) {
+        fail(c, res && res.error);
+        return;
+      }
+      handle(c, { phase: res.data.phase, qr: res.data.qr, message: res.data.message, retryAfterMs: 200 });
+    }
+
+    async function cancel(c) {
+      stopTimer(c);
+      const fn = api().accCancel;
+      if (fn) await fn(c.def.id).catch(() => null);
+      c.img.textContent = '';
+      c.shownSrc = '';
+      c.box.classList.remove('dead', 'ok', 'show');
+      c.qrState.textContent = '已取消';
+      c.mask.textContent = '';
+    }
+
+    function stopTimer(c) {
+      if (c.timer) clearTimeout(c.timer);
+      c.timer = 0;
+    }
+
+    function schedule(c, ms) {
+      stopTimer(c);
+      c.timer = setTimeout(() => poll(c), Math.max(300, Math.min(ms || 2000, 8000)));
+    }
+
+    async function poll(c) {
+      const fn = api().accPoll;
+      if (!fn) return;
+      const res = await fn(c.def.id);
+      if (!res || !res.ok) {
+        fail(c, res && res.error);
+        return;
+      }
+      handle(c, res.data);
+    }
+
+    /* ---------------- 渲染 ---------------- */
+
+    function handle(c, snap) {
+      c.snapshot = snap;
+      const phase = snap.phase;
+      const qr = snap.qr;
+
+      const src = qr && (qr.image || qr.src);
+      if (src && src !== c.shownSrc) {
+        c.shownSrc = src;
+        c.img.replaceChildren(makeImg(src));
+        c.wrap.classList.add('show');
+      }
+
+      c.box.classList.toggle('dead', phase === 'expired' || phase === 'failed');
+      c.box.classList.toggle('ok', phase === 'confirmed');
+      c.mask.textContent =
+        phase === 'expired' ? '已失效' :
+        phase === 'failed' ? '获取失败' :
+        phase === 'confirmed' ? '已登录' : '';
+
+      const text = snap.message || PHASE_TEXT[phase] || '';
+      c.qrState.textContent = text;
+      c.qrState.classList.toggle('bad', phase === 'failed' || phase === 'expired');
+
+      if (phase === 'confirmed') {
+        stopTimer(c);
+        api().accStatus(c.def.id).then(r => {
+          if (r && r.ok) paintState(c, r.data);
+        });
+        refreshAccounts(c);
+        return;
+      }
+      if (phase === 'expired' || phase === 'failed') {
+        stopTimer(c);
+        c.btnRetry.disabled = false;
+        return;
+      }
+      schedule(c, snap.retryAfterMs || 2000);
+    }
+
+    function makeImg(src) {
+      const el = document.createElement('img');
+      el.alt = '登录二维码';
+      el.src = src;
+      el.addEventListener('load', () => el.classList.add('in'), { once: true });
+      return el;
+    }
+
+    function fail(c, error) {
+      stopTimer(c);
+      c.box.classList.add('dead');
+      c.mask.textContent = '获取失败';
+      c.qrState.textContent = (error && error.message) || '获取二维码失败，请稍后再试。';
+      c.qrState.classList.add('bad');
+    }
+
+    function paintState(c, status) {
+      const acc = (status && status.account) || null;
+      c.state.textContent = acc ? acc.name : '未登录';
+      c.state.classList.toggle('off', !acc);
+      c.upV.textContent = status && status.upstreamReady ? '已配置' : '未配置';
+      c.upV.classList.toggle('dim', !(status && status.upstreamReady));
+    }
+
+    async function refreshAccounts(c) {
+      const [st, list] = await Promise.all([
+        api().accStatus ? api().accStatus(c.def.id) : null,
+        api().accList ? api().accList(c.def.id) : null
+      ]);
+      if (st && st.ok) paintState(c, st.data);
+      const accounts = (list && list.ok && list.data) || [];
+      c.accounts = accounts;
+      paintList(c, accounts);
+    }
+
+    function paintList(c, accounts) {
+      c.list.replaceChildren();
+      if (!accounts.length) {
+        c.list.appendChild(h('div', 'acc-empty', '这个平台还没有登录过账号。'));
+        return;
+      }
+      for (const acc of accounts) {
+        const row = h('div', 'acc-row' + (acc.current ? ' on' : ''));
+        const av = h('div', 'acc-avatar');
+        if (acc.avatarUrl) {
+          const im = document.createElement('img');
+          im.src = acc.avatarUrl;
+          im.alt = '';
+          av.appendChild(im);
         }
-      });
-    } finally {
-      polling = false;
-    }
-  }
-
-  /* ---------------- 账号列表 ---------------- */
-
-  async function refreshList() {
-    const [st, ls] = await Promise.all([window.api.accStatus(provider), window.api.accList(provider)]);
-    if (st && st.ok) {
-      const acc = st.data.account;
-      el.state.textContent = acc ? acc.name : '未登录';
-      el.up.textContent = st.data.upstreamReady ? '已配置' : '未配置';
-      el.up.classList.toggle('dim', !st.data.upstreamReady);
-    }
-    el.list.innerHTML = '';
-    if (!ls || !ls.ok) {
-      el.list.textContent = (ls && ls.error && ls.error.message) || '';
-      return;
-    }
-    const currentId = st && st.ok && st.data.account ? st.data.account.id : '';
-    if (!ls.data.length) {
-      const empty = document.createElement('div');
-      empty.className = 'acc-empty';
-      empty.textContent = '这个平台还没有登录过账号。';
-      el.list.append(empty);
-      return;
-    }
-    for (const acc of ls.data) {
-      const row = document.createElement('div');
-      row.className = 'acc-row' + (acc.id === currentId ? ' on' : '');
-      const av = document.createElement('div');
-      av.className = 'acc-avatar';
-      if (acc.avatarUrl) av.style.backgroundImage = 'url("' + acc.avatarUrl + '")';
-      const meta = document.createElement('div');
-      meta.className = 'acc-meta';
-      const nm = document.createElement('div');
-      nm.className = 'acc-name';
-      nm.textContent = acc.name;
-      const sub = document.createElement('div');
-      sub.className = 'acc-sub';
-      sub.textContent = 'uid ' + acc.userId;
-      meta.append(nm, sub);
-      const acts = document.createElement('div');
-      acts.className = 'acc-rowacts';
-      if (acc.id !== currentId) {
-        const sw = document.createElement('button');
-        sw.className = 'ghost mini';
-        sw.textContent = '切换';
-        sw.onclick = async () => {
-          const r = await window.api.accSwitch(acc.id);
-          if (!r || !r.ok) {
-            el.help.textContent = hintOf(r && r.error);
-            return;
-          }
-          await refreshList();
-        };
-        acts.append(sw);
+        const meta = h('div', 'acc-meta');
+        meta.append(h('div', 'acc-name', acc.name || acc.userId || '未知账号'), h('div', 'acc-sub', acc.current ? '当前账号' : (acc.userId || '')));
+        const acts = h('div', 'acc-rowacts');
+        if (!acc.current) {
+          const sw = h('button', 'ghost mini', '切换');
+          sw.addEventListener('click', () => switchTo(c, acc));
+          acts.appendChild(sw);
+        }
+        const out = h('button', 'ghost mini', '退出');
+        out.addEventListener('click', () => logout(c, acc));
+        acts.appendChild(out);
+        row.append(av, meta, acts);
+        c.list.appendChild(row);
       }
-      const out = document.createElement('button');
-      out.className = 'ghost mini';
-      out.textContent = '退出';
-      out.onclick = async () => {
-        await window.api.accLogout(acc.id);
-        await refreshList();
-      };
-      acts.append(out);
-      row.append(av, meta, acts);
-      el.list.append(row);
     }
+
+    async function switchTo(c, acc) {
+      const fn = api().accSwitch;
+      if (!fn) return;
+      const res = await fn(acc.id);
+      if (!res || !res.ok) {
+        toast((res && res.error && res.error.message) || '切换失败，请重试。');
+        return;
+      }
+      toast('已切换到 ' + (res.data.name || acc.name || '该账号') + '，正在刷新数据…');
+      await refreshAccounts(c);
+    }
+
+    async function logout(c, acc) {
+      const fn = api().accLogout;
+      if (!fn) return;
+      await fn(acc.id).catch(() => null);
+      await refreshAccounts(c);
+    }
+
+    function toast(msg) {
+      if (typeof window.__accToast === 'function') window.__accToast(msg);
+      else if (typeof window.toast === 'function') window.toast(msg);
+    }
+
+    /* ---------------- 对外 ---------------- */
+
+    async function refreshAll() {
+      await Promise.all(cards.map(c => refreshAccounts(c)));
+    }
+
+    let lastRevision = {};
+
+    function onEvent(ev) {
+      if (!ev || !ev.provider) return;
+      const c = cards.find(x => x.def.id === ev.provider);
+      if (!c) return;
+
+      // 数据版本变了 → 该平台的收藏/歌单缓存作废，让上层重新拉取
+      if (ev.revision && lastRevision[ev.provider] !== ev.revision) {
+        lastRevision[ev.provider] = ev.revision;
+        if (typeof window.__accOnAccountChange === 'function') {
+          try { window.__accOnAccountChange(ev.provider, ev.revision); } catch (_) {}
+        }
+      }
+      if (ev.type === 'switch' || ev.type === 'login' || ev.type === 'logout') refreshAccounts(c);
+      if (ev.library) {
+        if (ev.library.message) toast(ev.library.message);
+        if (typeof window.__accOnLibraryRefresh === 'function') {
+          try { window.__accOnLibraryRefresh(ev.provider, ev.library); } catch (_) {}
+        }
+      }
+    }
+
+    if (api().onAccEvent) api().onAccEvent(onEvent);
+
+    return { refreshAll, cards };
   }
 
-  /* ---------------- 事件 ---------------- */
+  let panel = null;
 
-  el.seg.addEventListener('click', e => {
-    const b = e.target.closest('b[data-p]');
-    if (!b || b.dataset.p === provider) return;
-    provider = b.dataset.p;
-    paintTabs();
-    stopTimer();
-    showQr(false);
-    el.shot.dataset.src = '';
-    el.shot.innerHTML = '';
-    el.qrState.textContent = PHASE.idle;
-    el.help.dataset.base = HELP[provider] || '';
-    el.help.textContent = el.help.dataset.base;
-    void refreshList();
-  });
-
-  el.qrBtn.addEventListener('click', () => { void begin(); });
-  el.retryBtn.addEventListener('click', () => { void begin(); });
-  el.cancelBtn.addEventListener('click', async () => {
-    stopTimer();
-    await window.api.accCancel(provider);
-    showQr(false);
-    el.qrState.textContent = '已取消';
-  });
-
-  if (window.api.onAccEvent) {
-    window.api.onAccEvent(e => {
-      if (!e || e.provider !== provider) return;
-      if (e.type === 'login' || e.type === 'switch' || e.type === 'logout') void refreshList();
-    });
-  }
-
-  el.help.dataset.base = HELP[provider] || el.help.textContent;
-  el.help.textContent = el.help.dataset.base;
-  paintTabs();
-  showQr(false);
-  void refreshList();
-  PROVIDERS.forEach(p => { if (!LABEL[p]) console.warn('unknown provider', p); });
+  window.AccountPanel = {
+    mount(root) {
+      if (panel) {
+        panel.refreshAll();
+        return panel;
+      }
+      if (!root) return null;
+      panel = createPanel(root);
+      panel.refreshAll();
+      return panel;
+    }
+  };
 })();

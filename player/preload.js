@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('api', {
   accSwitch: (id) => ipcRenderer.invoke('acc:switch', { id }),
   accLogout: (id, provider) => ipcRenderer.invoke('acc:logout', id ? { id } : { provider }),
   accAudio: (req) => ipcRenderer.invoke('acc:audio', req),
+  accInvalidate: (provider) => ipcRenderer.invoke('acc:invalidate', provider ? { provider } : {}),
   onAccEvent: (cb) => ipcRenderer.on('acc:event', (_e, p) => cb(p)),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (s) => ipcRenderer.invoke('settings:set', s),

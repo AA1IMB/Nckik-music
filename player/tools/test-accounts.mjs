@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(here, '..', 'accounts', 'dist', 'src');
-const { createAccountsModule } = require(path.join(dist, 'index.js'));
+const { createAccountsModule, registerAccountsIpc } = require(path.join(dist, 'index.js'));
 const { AccountManager } = require(path.join(dist, 'accountManager.js'));
 const { LoginSession } = require(path.join(dist, 'loginSession.js'));
 const { CredentialStore } = require(path.join(dist, 'credentialStore.js'));
@@ -620,7 +620,60 @@ const sleep2 = ms => new Promise(r => setTimeout(r, ms));
   }
 }
 
+/* ---------------- 账号切换后刷新收藏/歌单 ---------------- */
+
+async function testSwitchRefresh() {
+  const events = [];
+  const handlers = new Map();
+  const fakeIpc = {
+    handle(ch, fn) { handlers.set(ch, fn); },
+    removeHandler(ch) { handlers.delete(ch); }
+  };
+  const account = { id: 'qqapp:1707959004', provider: 'qqapp', userId: '1707959004', name: '月亮在不在', addedAt: 1, lastUsedAt: 1 };
+  let listener = null;
+  const fakeManager = {
+    list: () => [account],
+    current: () => account,
+    find: () => account,
+    credentialOf: () => ({ cookie: 'a=b', extra: {}, updatedAt: 1 }),
+    switchTo: async () => account,
+    logout: () => {},
+    invalidateStreams: () => {},
+    audioFor: async () => ({ url: '', quality: 'standard', fetchedAt: 1 }),
+    on(cb) { listener = cb; return () => { listener = null; }; }
+  };
+  const fakeModule = { manager: fakeManager, store: {}, providers: {}, revision: { value: 0 }, dispose: async () => {} };
+
+  const off = registerAccountsIpc({
+    ipcMain: fakeIpc,
+    module: fakeModule,
+    sendEvent: (ch, payload) => events.push({ ch, payload }),
+    refreshLibrary: async (provider) => ({ refreshed: false, items: 0, message: provider + '：已切换并清空缓存' })
+  });
+
+  // 先同步拿到 status，确认初始版本号是 0
+  const status0 = await handlers.get('acc:status')(null, { provider: 'qqapp' });
+  eq(status0.data.dataRevision, 0, '初始 dataRevision 为 0');
+
+  listener({ type: 'switch', provider: 'qqapp', account });
+  eq(fakeModule.revision.value, 1, '切换后 revision 加一');
+  eq(events.length >= 1, true, '切换立刻推一版事件');
+  eq(events[0].payload.revision, 1, '事件带 revision');
+  eq(!!events[0].payload.library, false, '第一版事件还没带 library');
+
+  await new Promise(r => setTimeout(r, 30));
+  const second = events.find(e => e.payload.library);
+  eq(!!second, true, '刷新完成后补推第二版事件');
+  eq(second.payload.library.message.includes('已切换'), true, '第二版带刷新结果');
+
+  const status1 = await handlers.get('acc:status')(null, { provider: 'qqapp' });
+  eq(status1.data.dataRevision, 1, 'status 里的 dataRevision 跟事件同源');
+  off();
+}
+
 /* ---------------- 汇总 ---------------- */
+
+await testSwitchRefresh();
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail) {

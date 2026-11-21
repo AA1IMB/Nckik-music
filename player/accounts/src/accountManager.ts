@@ -1,4 +1,4 @@
-import type { Account, AudioRequest, AudioResult, Credential, LoginSnapshot, Logger, ProviderId, QualityId } from './types';
+import type { Account, AudioRequest, AudioResult, Credential, LibraryRefresh, LoginSnapshot, Logger, ProviderId, QualityId } from './types';
 import { PROVIDER_LABEL } from './types';
 import type { CredentialStore } from './credentialStore';
 import { LoginSession, type LoginSessionOptions } from './loginSession';
@@ -18,10 +18,10 @@ import type { Provider } from './providers/base';
  */
 
 export type AccountEvent =
-  | { type: 'login'; provider: ProviderId; account: Account }
-  | { type: 'switch'; provider: ProviderId; account: Account }
-  | { type: 'logout'; provider: ProviderId; accountId?: string }
-  | { type: 'invalidated'; provider: ProviderId };
+  | { type: 'login'; provider: ProviderId; account: Account; revision?: number; library?: LibraryRefresh }
+  | { type: 'switch'; provider: ProviderId; account: Account; revision?: number; library?: LibraryRefresh }
+  | { type: 'logout'; provider: ProviderId; accountId?: string; revision?: number; library?: LibraryRefresh }
+  | { type: 'invalidated'; provider: ProviderId; revision?: number };
 
 export interface AccountManagerDeps {
   store: CredentialStore;

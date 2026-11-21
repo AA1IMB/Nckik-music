@@ -74,12 +74,19 @@ export interface AccountStatusPayload {
   hasCredential: boolean;
   /** 该平台是否配置了合规上游（未配置时取流会报 E_NOT_IMPLEMENTED） */
   upstreamReady: boolean;
+  /** 账号数据版本：登录/切换/退出各加一，渲染层据此作废该平台的收藏与歌单缓存 */
+  dataRevision: number;
 }
 
 export interface AccEvent {
   type: 'login' | 'switch' | 'logout' | 'invalidated';
   provider: ProviderId;
   accountId?: string;
+  account?: import('./types').Account | null;
+  /** 账号数据版本（与 status.dataRevision 同源）；渲染层变了就清该平台的收藏/歌单缓存 */
+  revision?: number;
+  /** 切换后刷新收藏/歌单的结果（先发无 library 的一版，刷新完再发一版） */
+  library?: import('./types').LibraryRefresh;
 }
 
 export type Snapshot = LoginSnapshot;

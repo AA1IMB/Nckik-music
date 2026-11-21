@@ -59,6 +59,16 @@ export interface AccountErrorPayload {
   retryAfterMs?: number;
 }
 
+/** 切换账号后刷新收藏/歌单的结果 */
+export interface LibraryRefresh {
+  /** 这次是否真的去刷了（该平台还没接歌单接口时为 false） */
+  refreshed: boolean;
+  /** 刷新后的条目数 */
+  items?: number;
+  /** 给用户看的一句话 */
+  message?: string;
+}
+
 /** 对外快照：渲染层只认这一个结构，不再自己拼文案 */
 export interface LoginSnapshot {
   provider: ProviderId;

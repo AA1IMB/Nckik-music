@@ -920,3 +920,22 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .acc-name { font-size: 12.5px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acc-sub { font-size: 10.5px; color: var(--fg3); margin-top: 1px; }
 .acc-rowacts { display: flex; gap: 6px; flex: 0 0 auto; }
+
+/* ---------------- 播放账号（QQ 音乐 / 酷狗音乐 分卡） ----------------
+ * 两张卡各自独立：自己的码、自己的轮询、自己的账号列表，切平台不会打断另一张。
+ * 卡片之间只用一条极淡的分隔线，避免设置页出现太多层级。 */
+.acccard { padding: 14px 0 4px; border-top: .5px solid var(--line); }
+.acctitle { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.acctitle-name { font-size: 14px; font-weight: 650; color: var(--fg); letter-spacing: .2px; }
+.acctitle-tag { font-size: 11px; color: var(--fg3); }
+.acccard:first-child { padding-top: 2px; border-top: 0; }
+.acccard .line { padding-left: 0; padding-right: 0; }
+.acccard .authrow { margin-top: 2px; }
+.acccard .authrow .ghost { flex: 1 1 0; }
+.acccard .authrow .ghost.mini { flex: 0 0 auto; }
+.accstate { font-weight: 600; }
+.accstate.off { font-weight: 400; color: var(--fg3); }
+.acc-empty { padding: 2px 0 6px; font-size: 12.5px; color: var(--fg3); }
+.acccard .qrwrap { padding: 12px 0 4px; }
+.acccard .qracts { display: flex; gap: 8px; }
+.acccard .qracts .ghost { flex: 1 1 0; }

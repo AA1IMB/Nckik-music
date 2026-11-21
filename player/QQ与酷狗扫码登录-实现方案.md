@@ -359,3 +359,36 @@ const out = await this.host.evalInPage(KgUser.QRCodeLogin(...));  // ← 页面�
 - 新增运行时依赖 `ws@8`（仅主进程用）。
 - 仍然**不做**任何签名/逆向：二维码由平台签发，登录由用户在手机 App 上确认；取流与另两条通道一样要求配置合规上游（`NCKK_QQAPP_UPSTREAM`），未配置时面板显示「未配置」，只做登录与账号管理。
 - 已知边界：手机端「扫码后确认」无法自动化，必须真人操作一次；二维码 15 分钟有效，过期后点「重新获取」。
+
+## 十九、设置页两卡分离 + 切号后刷新数据（v0.9.1）
+
+### 19.1 为什么拆成两张卡
+
+原来是一张「QQ 音乐 / 酷狗音乐」卡 + 分段控件，三处别扭：
+
+1. 分段一换，上一张卡的二维码、轮询、错误提示全被覆盖 —— 两个平台的登录本来互不相干；
+2. 「QQ 音乐」下面还挂着网页版（扫码走 `y.qq.com` + 微信/QQ 网页登录），与「QQ 音乐 App 扫码」重复，用户不知道该点哪个；
+3. 账号列表、取流状态揉在一张卡里，看不出哪一行属于哪个平台。
+
+现在：`#accCards` 里由 `renderer/accpanel.js` 动态生成两张独立卡片（`data-p="qqapp"` / `data-p="kugou"`），各自持有 `timer / snapshot / shownSrc / accounts`，互不打断。**网页版 `qq` 不再出现在界面上**，代码保留仅为兼容旧账号数据（`accounts.bin` 里已有的 `qq:*` 仍可读）。
+
+### 19.2 切号后刷新收藏/歌单
+
+新增「账号数据版本」概念，避免「切了账号还看着上一个人的歌单」：
+
+| 层 | 改动 |
+| --- | --- |
+| `accounts/src/accountManager.ts` | `AccountEvent` 增加可选的 `revision` / `library` 字段 |
+| `accounts/src/index.ts` | 模块内维护 `revision: { value }`；`login/switch/logout` 各加一；`registerIpcOptions.refreshLibrary` 注入刷新回调。事件**先推一版**（带 `revision`，界面立刻切到新账号），刷新完**再推一版**（带 `library`） |
+| `accounts/src/ipcContract.ts` | `AccountStatusPayload.dataRevision`、`AccEvent.revision/library` |
+| `main.js` | `refreshLibrary`：清 `thumbCache` / `dirCoverCache`、`invalidateStreams(provider)`，返回 `{refreshed:false, message:'…已切换到该账号并清空封面/取流缓存；歌单与收藏接口待接上游'}` |
+| `renderer/app.js` | `window.__accOnAccountChange(provider, revision)`：清 `thumbUrl`、`accInvalidate(provider)`、记 `S.accRev[provider]`、B 站收藏夹 `bilFavsReset()` |
+| `renderer/accpanel.js` | 监听 `acc:event`，`revision` 变化才触发失效逻辑；`library.message` 用 toast 呈现 |
+
+边界说清楚：QQ 音乐与酷狗都还没接「收藏/歌单」接口（要走合规上游），所以这一版刷新动作=**清缓存 + 换账号上下文**，并在界面上如实写明，不假装刷新成功。
+
+### 19.3 验证
+
+- `npx tsc -p player/tsconfig.accounts.json` → 0 error；
+- `node player/tools/test-accounts.mjs` → **76/76**（新增 8 条：初始 revision=0、切号后 +1、第一版事件无 `library`、第二版事件带 `library.message`、`status.dataRevision` 与事件同源、反注册后不再推）；
+- 真机（`.tmp/diag-acc4.js`）：`[shape] {"cards":["qqapp","kugou"],"seg":false}`、点 QQ 音乐卡出码 `{"len":606,"w":150,"state":"请用手机 QQ 音乐 App 扫一扫"}`，截图 `player/demo/shot-acc-cards.png`。

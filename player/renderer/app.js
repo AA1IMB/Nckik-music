@@ -272,6 +272,20 @@ function hsl2rgb(h, s, l) {
   return [hue2(p, q, h + 1 / 3) * 255, hue2(p, q, h) * 255, hue2(p, q, h - 1 / 3) * 255];
 }
 
+/* 账号切换/登录/退出：主进程推来的 revision 一变就作废该平台的相关缓存。
+ * 这里只做「失效」，真正重新拉取由各平台自己的 ensureXxx() 在需要时触发，
+ * 避免切号瞬间同时打十几个请求。 */
+window.__accToast = (m) => toast(m);
+window.__accOnAccountChange = (provider, revision) => {
+  try {
+    thumbUrl.clear();
+    if (window.api && window.api.accInvalidate) window.api.accInvalidate(provider);
+    S.accRev = S.accRev || {};
+    S.accRev[provider] = revision;
+    if (provider === 'bil' || provider === 'bilibili') bilFavsReset();
+  } catch (e) { /* 缓存清理失败不影响主流程 */ }
+};
+
 function toast(msg, ms = 2200) {
   const el = $('#toast');
   el.classList.remove('act');
@@ -3677,6 +3691,8 @@ function openDrawer(el) {
      * 所以打开面板就再取一次状态，否则会一直显示上一次的「未登录」。 */
     updateBilNote();
     if (S.srcMode === 'bil') bilEnsureFavs();
+    /* 播放账号（QQ 音乐 App / 酷狗）：面板是懒挂载的，第一次打开设置才建卡片 */
+    if (window.AccountPanel) window.AccountPanel.mount($('#accCards'));
   }
 }
 

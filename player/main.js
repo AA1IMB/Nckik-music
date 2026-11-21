@@ -1317,7 +1317,20 @@ function setupAccounts() {
     acc.registerAccountsIpc({
       ipcMain,
       module: accAccounts,
-      sendEvent: (ch, p) => { if (win && !win.isDestroyed()) win.webContents.send(ch, p); }
+      sendEvent: (ch, p) => { if (win && !win.isDestroyed()) win.webContents.send(ch, p); },
+      /* 账号切换/登录/退出后刷新该平台的数据。
+       * QQ 音乐与酷狗的歌单/收藏接口还没接（要合规上游），所以这一版做的是「清干净」：
+       * 作废封面缓存与取流缓存，并把实际情况如实回报，避免界面假装刷新成功。 */
+      refreshLibrary: async (provider) => {
+        thumbCache.clear();
+        dirCoverCache.clear();
+        try { accAccounts.manager.invalidateStreams(provider); } catch (e) { /* 忽略 */ }
+        const name = provider === 'kugou' ? '酷狗音乐' : 'QQ 音乐';
+        return {
+          refreshed: false,
+          message: `${name}：已切换到该账号并清空封面/取流缓存；歌单与收藏接口待接上游`
+        };
+      }
     });
     console.log('[acc] accounts ready');
   } catch (e) {
