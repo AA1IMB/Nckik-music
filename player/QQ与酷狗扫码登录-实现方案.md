@@ -663,3 +663,44 @@ QQ 音乐分段的歌单页现在分成三块（与网易云对齐）：`每日�
 - IPC：`trackLyric('qq:003In5MQ2SIjJ6')`（aespa《Drama》）→ `{"text":3141,"tr":2170}`；`qqMeta` 直接调 → `lyric 117 / trans 117`，首行 `{"t":0.33,"text":"QQ音乐享有本翻译作品的著作权"}`。
 - 曲库曲目行：`rows=116 / imgs=113`（3 首专辑图 404 已回落首字磁贴），截图 `player/demo/shot-qq-cover-tr.png`。
 - 回归：`probe-playlist 53/53`（原有 53 项无回退）。
+
+## 三十一、曲库二级界面的「返回上一级」统一（2026-11-21）
+
+### 31.1 入口清单（改前状态）
+
+| 二级界面 | 代码位置 | 改前的返回方式 |
+| --- | --- | --- |
+| 网易云歌单详情（`renderColl`） | `player/renderer/app.js:3326` | `<button class="ne-back">` + 内联 svg（唯一基准样式） |
+| QQ 音乐 / 酷狗 曲目页（`renderUp` 的 tracks 分支） | `player/renderer/app.js:1791` | 列表首行伪装成 `<div class="item">← 返回歌单</div>`，与「返回按键」视觉完全不同 |
+| 哔哩哔哩收藏夹详情（`renderBil` 的 `fav` 分支） | `player/renderer/app.js:2943/2953/2964/2971` | 没有返回按键，只有空/失败态里的裸文本链接 `返回收藏夹` |
+| 播放列表面板的「选择歌单 / 插入歌曲」 | `renderPl` 的 `.pl-back` | 不属于曲库模块，未改动 |
+
+### 31.2 样式规格（唯一来源：`.backbtn`，原 `.ne-back`）
+- 布局：`display:inline-flex; align-items:center; gap:4px; align-self:flex-start`
+- 字：`font-size:11.5px`、`font:inherit`、`color:var(--fg2)`、hover `var(--fg)`、`transition:color .16s`
+- 盒模型：`padding:2px 0`、`margin:2px 0 10px -2px`、`border:0`、`background:none`、`cursor:pointer`
+- 图标：`svg 14×14`、`stroke:currentColor`、`stroke-width:1.6`、`linecap/linejoin:round`，路径 `M9.6 3.4L5 8l4.6 4.6`
+- 实测（1100×700 窗口、QQ 曲目页）：`font 11.5px`、`padding 2px 0`、`margin 2px 0 10px -2px`、`gap 4px`、`svg 14×14`、整体 `64×20`、左上角 `(681,191)`
+
+### 31.3 统一组件
+```js
+/* 尺寸/颜色/间距只由 .backbtn 决定，各页面只传文案与动作名 */
+function backBtn(label, act) {
+  return '<button class="backbtn" data-act="' + act + '">'
+    + '<svg viewBox="0 0 16 16"><path d="M9.6 3.4L5 8l4.6 4.6"/></svg>'
+    + esc(label) + '</button>';
+}
+```
+- CSS 选择器改为 `.backbtn, .ne-back`（旧类名保留为别名，避免历史样式失效），**页面上不再出现任何返回按键的尺寸/间距硬编码**。
+
+### 31.4 回退行为
+- QQ/酷狗：`data-act="upback"` → `st.view='list'` + `renderUp(provider)` → 回到该平台的歌单列表（即曲库该段首页）。
+- 哔哩哔哩：`data-act="bilfavback"` → `S.bil.view='idle'` + `renderBil()` → 回到收藏夹列表；加载中/空/失败三种状态都有这个按键，不再出现「卡在二级页出不去」。
+- 网易云：`data-act="back"` → `S.ne.coll=null; S.ne.view='home'; renderNet()`（原逻辑不变）。
+- 三处都无历史栈依赖：目标页就是曲库首页，天然满足「无历史时回退到曲库首页」。
+
+### 31.5 验证
+- 运行时（`.tmp/diag-back.js`，1100×700）：QQ 曲目页 `.backbtn` 存在且规格与网易云一致（见 31.2 实测值），点击后 `rows=2 / back=false` —— 回到歌单列表且按键消失。
+- 静态：`grep "返回歌单\|返回收藏夹"` 命中 6 处，全部是 `backBtn(...)` 调用；`ne-back` 只剩注释与 CSS 别名，无内联硬编码。
+- 回归：`probe-playlist 53/53`（含「返回列表」相关断言，无回退）。
+- 截图：`player/demo/shot-back.png`（QQ 曲目页顶部「‹ 返回歌单」）。

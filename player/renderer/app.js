@@ -1664,6 +1664,15 @@ function upOpenDaily(provider) {
   renderUp(provider);
 }
 
+/* 曲库二级界面统一的「返回上一级」按键。
+ * 尺寸/颜色/间距只由 .backbtn 决定（= 原网易云 .ne-back 规格），各页面只传文案与动作名，
+ * 不允许逐页写 padding / font-size —— 想改外观就改这一条 CSS。 */
+function backBtn(label, act) {
+  return '<button class="backbtn" data-act="' + act + '">'
+    + '<svg viewBox="0 0 16 16"><path d="M9.6 3.4L5 8l4.6 4.6"/></svg>'
+    + esc(label) + '</button>';
+}
+
 function renderUp(provider) {
   const st = S.up[provider] || {};
   const list = $('#libList');
@@ -1779,9 +1788,8 @@ function renderUp(provider) {
     </div>`);
   });
   $('#libCount').textContent = st.trackErr ? st.trackErr : (rows.length ? rows.length + ' 首 · ' + (st.name || '') : '0 首');
-  list.innerHTML = (st.trackErr ? emptyRow(st.trackErr) : (rows.join('') || emptyRow('这个歌单是空的')))
-    /* 曲目封面的兜底同歌单行：先换 500x500，再退首字 */
-    ;
+  list.innerHTML = backBtn('返回歌单', 'upback')
+    + (st.trackErr ? emptyRow(st.trackErr) : (rows.join('') || emptyRow('这个歌单是空的')));
   list.querySelectorAll('.th.art img').forEach(im => {
     im.onerror = () => {
       const th = im.parentNode;
@@ -1791,9 +1799,8 @@ function renderUp(provider) {
       th.innerHTML = `<span>${esc(th.dataset.ch || '?')}</span>`;
     };
   });
-    + '<div class="item" data-upback="1"><div class="txt"><div class="ttl">← 返回歌单</div></div></div>';
   list.onclick = e => {
-    if (e.target.closest('[data-upback]')) { st.view = 'list'; renderUp(provider); return; }
+    if (e.target.closest('[data-act="upback"]')) { st.view = 'list'; renderUp(provider); return; }
     const badImg = e.target.closest('.th.art img');
     if (badImg) { /* 图床偶发 404：退回首字磁贴，别留碎图标 */ }
     const row = e.target.closest('[data-up]');
@@ -2933,32 +2940,36 @@ function renderBil() {
     if (home) home.classList.remove('show');
     const fav = st.fav;
     if (fav.busy && !fav.items.length) {
-      list.innerHTML = emptyRow('正在读取「' + esc(fav.title || '收藏夹') + '」…');
+      list.innerHTML = backBtn('返回收藏夹', 'bilfavback')
+        + emptyRow('正在读取「' + esc(fav.title || '收藏夹') + '」…');
       count.textContent = '哔哩哔哩 · 收藏夹';
-      list.onclick = null;
+      list.onclick = e => {
+        if (e.target.closest('[data-act="bilfavback"]')) { S.bil.view = 'idle'; renderBil(); }
+      };
       return;
     }
     if (fav.err && !fav.items.length) {
       list.innerHTML = emptyRow('收藏夹内容加载失败：' + esc(fav.err)
-        + '<br><span class="lnk" data-bil-favback="1">返回收藏夹</span>'
+        + backBtn('返回收藏夹', 'bilfavback')
         + ' · <span class="lnk" data-bil-favretry2="1">重试</span>');
       count.textContent = '哔哩哔哩 · 失败';
       list.onclick = e => {
-        if (e.target.closest('[data-bil-favback]')) { S.bil.view = 'idle'; renderBil(); return; }
+        if (e.target.closest('[data-act="bilfavback"]')) { S.bil.view = 'idle'; renderBil(); return; }
         if (e.target.closest('[data-bil-favretry2]')) bilFavPage(1);
       };
       return;
     }
     if (!fav.items.length) {
       list.innerHTML = emptyRow('这个收藏夹是空的。'
-        + '<br><span class="lnk" data-bil-favback="1">返回收藏夹</span>');
+        + backBtn('返回收藏夹', 'bilfavback'));
       count.textContent = '哔哩哔哩 · 0 首';
       list.onclick = e => {
-        if (e.target.closest('[data-bil-favback]')) { S.bil.view = 'idle'; renderBil(); }
+        if (e.target.closest('[data-act="bilfavback"]')) { S.bil.view = 'idle'; renderBil(); }
       };
       return;
     }
-    list.innerHTML = fav.items.map(t => itemHTML(t, null)).join('')
+    list.innerHTML = backBtn('返回收藏夹', 'bilfavback')
+      + fav.items.map(t => itemHTML(t, null)).join('')
       + (fav.hasMore
         ? `<div class="empty-row"><span class="lnk" data-bil-more="1">${fav.busy ? '正在加载…' : '加载更多'}</span></div>`
         : '');
@@ -2966,6 +2977,7 @@ function renderBil() {
     count.textContent = `${fav.title || '收藏夹'} · 已加载 ${fav.items.length} 首`
       + (fav.hasMore ? ' · 还有更多' : '');
     list.onclick = e => {
+      if (e.target.closest('[data-act="bilfavback"]')) { S.bil.view = 'idle'; renderBil(); return; }
       const more = e.target.closest('[data-bil-more]');
       if (more) { bilLoadMore(); return; }
       const el = e.target.closest('.item');
@@ -3311,8 +3323,7 @@ function renderColl() {
   const list = $('#libList');
   const cnt = $('#libCount');
 
-  box.innerHTML = '<button class="ne-back" data-act="back">'
-    + '<svg viewBox="0 0 16 16"><path d="M9.6 3.4L5 8l4.6 4.6"/></svg>返回歌单</button>'
+  box.innerHTML = backBtn('返回歌单', 'back')
     + '<div class="ne-head"><div class="ne-title"><b>' + esc(c.name) + '</b><small>' + esc(c.sub || '') + '</small></div>'
     + (c.kind === 'fm' ? '<button class="ne-mini" data-act="fm">换一批</button>' : '')
     + '</div>';

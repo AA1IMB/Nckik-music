@@ -724,13 +724,13 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .empty-row .ne-act { padding: 10px 0 0; }
 
 /* 歌单详情：返回 + 标题，随后接回普通曲目列表 */
-.ne-back {
+.backbtn, .ne-back {
   display: inline-flex; align-items: center; gap: 4px; align-self: flex-start;
   border: 0; background: none; color: var(--fg2); font: inherit; font-size: 11.5px;
   cursor: pointer; padding: 2px 0; margin: 2px 0 10px -2px; transition: color .16s;
 }
-.ne-back svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.ne-back:hover { color: var(--fg); }
+.backbtn svg, .ne-back svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.backbtn:hover, .ne-back:hover { color: var(--fg); }
 .ne-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .ne-title { display: flex; flex-direction: column; gap: 5px; padding: 0 2px; min-width: 0; }
 .ne-title b { font-size: 15px; font-weight: 500; line-height: 1.35; }
