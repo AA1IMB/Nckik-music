@@ -1727,12 +1727,16 @@ function plNormalize(list) {
     const id = String(x.id == null ? '' : x.id);
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    out.push({
+    const it = {
       id,
       title: String(x.title || '未知曲目').slice(0, 120),
       artist: String(x.artist || '').slice(0, 80),
       duration: Number(x.duration) || 0
-    });
+    };
+    /* 落盘的播放列表要能复原上游封面：albumMid 是 QQ 拼封面图的关键字段 */
+    if (x.albumMid) it.albumMid = String(x.albumMid).slice(0, 40);
+    if (x.album) it.album = String(x.album).slice(0, 120);
+    out.push(it);
   }
   return out;
 }
