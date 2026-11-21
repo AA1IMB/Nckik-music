@@ -125,6 +125,7 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
   const ua = opts.userAgent ?? '';
   let win: any = null;
   let partition = '';
+  const children: any[] = [];
   let watchers: Array<() => void> = [];
 
   const collectFrames = (main: any): any[] => {
@@ -162,10 +163,30 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
         }
       });
       if (ua) win.webContents.setUserAgent(ua);
-      // 回调页就地打开：cookie 必须落在我们正在读的那个会话上
-      win.webContents.setWindowOpenHandler(({ url: target }: { url: string }) => {
-        if (/^https?:/i.test(target)) win.loadURL(target).catch(() => {});
-        return { action: 'deny' };
+      // 每次开始登录都用干净的分区：否则平台会拿上一次留下的「快捷登录」账号
+      // 直接出授权页/旧二维码，扫码后还会报「参数错误，网页未正确配置 QQ 登录」。
+      try {
+        await win.webContents.session.clearStorageData({ storages: ['cookies'] });
+      } catch { /* 清不掉就继续，至少不阻断登录 */ }
+      // window.open 的回调页必须真的开出来：kugou 的 regok、QQ 的授权跳转都靠 opener
+      // 交接（就地 loadURL 会把登录页本身顶掉，登录态就永远不会写进 cookie）。
+      win.webContents.setWindowOpenHandler(() => ({
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 960,
+          height: 720,
+          show: false,
+          autoHideMenuBar: true,
+          webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false }
+        }
+      }));
+      win.webContents.on('did-create-window', (child: any) => {
+        try { child.setMenuBarVisibility?.(false); child.hide?.(); } catch { /* 忽略 */ }
+        children.push(child);
+        child.on?.('closed', () => {
+          const i = children.indexOf(child);
+          if (i >= 0) children.splice(i, 1);
+        });
       });
       await win.loadURL(url);
       await sleep(opts.settleMs ?? 600);
@@ -293,6 +314,9 @@ export function createElectronHost(opts: ElectronHostOptions = {}): LoginWindowH
         } catch {}
       }
       watchers = [];
+      for (const child of children.splice(0)) {
+        try { child.destroy?.(); } catch {}
+      }
       if (win) {
         try {
           win.destroy();

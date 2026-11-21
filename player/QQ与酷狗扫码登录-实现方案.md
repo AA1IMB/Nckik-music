@@ -223,3 +223,29 @@ if (this.cfg.requiredCookieNames.every(n => !!cookies[n])) { ... confirmed ... }
 顺带把 QQ 的 uid 识别面放宽：`uin / p_uin / luin / euin / wxuin` 任一存在即算拿到账号标识（不同登录入口写的字段不同），并把这几个名字加进 cookie 白名单。
 
 回归：`tools/test-accounts.mjs` 从 40 条加到 **49 条**，新增用例覆盖「必填名单为空 + 无 cookie → waiting」「只有 qm_keyst 没有 uin → waiting」「token+userid 齐 → confirmed」「uqin 的 o 前缀被剥掉」「启动时清 uid unknown」。真机复测：QQ/酷狗都停在「请用手机扫码」，`accStatus` 均为 `account:null`。
+
+## 十四、扫码确认后登录态没落到分区（2026-11-21）
+
+真机现象（用户）：QQ 扫码后手机提示「参数错误，网页未正确配置 QQ 登录」；酷狗扫码并确认后，播放器仍是未登录。
+
+分区取证（`%APPDATA%\NckiksMusic\Partitions\acc-*` 的 `Network\Cookies`，用 sqlite 读）：
+
+| 分区 | cookie 数 | 关键缺失 |
+| --- | --- | --- |
+| `acc-kugou` | 19（`dfid/KugooID/UserName/mid/t/kg_*`） | **无 `token`、无 `userid`** |
+| `acc-qq` | 7（`qlogin_uid/_tme_*`） | **无 `qm_keyst`、无 `uin`** |
+
+也就是说「手机点了确认」之后，登录态压根没写进我们读的那个分区。查页面行为后定位到两个原因：
+
+1. **旧分区里的快捷登录账号在捣乱**：`acc-qq` 里残留 `qlogin_uid`，于是 graph.qq.com 直接给出「快捷登录 AA1imb / 一键登录」界面；此时点「扫码登录」出的是旧会话的码，手机扫完走到 `redirect_uri` 校验就报「参数错误，网页未正确配置 QQ 登录」。
+2. **`window.open` 被我们拦掉**：原实现是 `setWindowOpenHandler` → `deny` + 把 URL 就地 `loadURL`。酷狗的 `regok` / QQ 的授权跳转都靠 `window.open` 的 opener 交接来把登录态回写到 cookie；就地导航把登录页本身顶掉，流程中断 → 分区里永远没有 `token`。
+
+修复（`player/accounts/src/electronHost.ts`）：
+
+| 改动 | 说明 |
+| --- | --- |
+| 打开前 `session.clearStorageData({ storages: ['cookies'] })` | 每次登录都用干净分区，不再命中旧的快捷登录账号/旧二维码 |
+| `setWindowOpenHandler` → `action: 'allow'`（`overrideBrowserWindowOptions` 里 `show:false`） | 让回调页真的开出来，opener 交接能完成；子窗口共享同一 partition，cookie 落在我们读的会话里 |
+| `did-create-window` 收集子窗口并在 `close()` 里一并 `destroy` | 不留后台窗口 |
+
+验证：`tsc` 0 error；`tools/test-accounts.mjs` 49/49；真机面板复测 QQ `{"len":124598,"w":568,"h":568,"state":"请用手机 QQ 扫一扫","auth":"未登录"}`、酷狗 `{"len":1394,"w":423,"h":423,"auth":"未登录"}`，两个 `accStatus` 都是 `account:null`（不再误判）。
