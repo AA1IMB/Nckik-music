@@ -110,13 +110,34 @@ async function kgPlayInfo(hash, qualityKey) {
   return { url: String(pick), bitrate: Number(j.bitRate || 0), ext: String(j.extName || 'mp3') };
 }
 
-async function kgResolve(hash, prefer, cred) {
+/* 合规上游：把自己的网关（或自建的酷狗 API 服务，例如 KuGouMusicApi）挂进来。
+ * 这一路只调上游的 HTTP 接口，不在本地做任何风控/指纹模拟。 */
+async function kgUpstreamResolve(upstreamBase, hash, qualityKey) {
+  const base = String(upstreamBase).replace(/\/$/, '');
+  const url = base + '/song/url?' + new URLSearchParams({ hash: String(hash).toLowerCase(), quality: qualityKey }).toString();
+  const r = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!r.ok) throw fail('E_UPSTREAM_HTTP', `上游取流返回 ${r.status}`);
+  const j = await r.json();
+  const body = (j && j.data) || j || {};
+  const list = Array.isArray(body.url) ? body.url : body.url ? [body.url] : [];
+  const first = list[0];
+  const picked = typeof first === 'string' ? first : (first && first.url);
+  if (typeof picked === 'string' && /^https?:\/\//.test(picked)) return picked;
+  return null;
+}
+
+async function kgResolve(hash, prefer, cred, upstreamBase) {
   const h = String(hash || '').toUpperCase();
   if (!/^[0-9A-F]{32}$/.test(h)) throw fail('E_BAD_TRACK', '酷狗曲目 id 不正确');
   const order = prefer === 'standard' ? [...KG_QUALITY].reverse() : KG_QUALITY;
   let lastErr = null;
   for (const q of order) {
-    /* 先问客户端签名通道：付费曲只有这条能给直链；免费曲也走它，失败再回落 playInfo */
+    /* 配了合规上游就用上游（VIP 曲由上游的合法身份决定） */
+    if (upstreamBase) {
+      const upUrl = await kgUpstreamResolve(upstreamBase, h, q.key).catch(() => null);
+      if (upUrl) return { url: upUrl, quality: q.label, headers: { 'User-Agent': KG_UA } };
+    }
+    /* 再问客户端签名通道：付费曲只有这条能给直链；免费曲也走它，失败再回落 playInfo */
     if (cred) {
       const signedUrl = await kgPrivilegeUrl(cred, h, q.key);
       if (signedUrl) {

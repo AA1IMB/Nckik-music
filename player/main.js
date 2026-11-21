@@ -354,7 +354,7 @@ async function upResolve(provider, id) {
   if (!cred) throw Object.assign(new Error('还没有登录该音源'), { code: 'E_AUTH_REQUIRED' });
   const extra = cred.extra || {};
   const info = provider === 'kugou'
-    ? await streams.kgResolve(id, 'high', cred)
+    ? await streams.kgResolve(id, 'high', cred, process.env.NCKK_KUGOU_UPSTREAM || '')
     : await streams.qqResolve(id, { uin: extra.uin, musickey: extra.musickey }, 'high');
   /* QQ 的 purl 只在部分 CDN 主机上有效：dl 常常 404，isure/ws 才是真正给播放器的。
    * 这里一次解析出候选主机列表，代理层按顺序试。 */
