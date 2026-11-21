@@ -3557,7 +3557,7 @@ async function playAt(qi, opts) {
       /* 上游曲目没有本地文件，别去问 trackDetail（它会回「元数据读取失败」，
        * 界面就顶着一行红字）。封面与码率一起从上游拿。 */
       try {
-        const m = await window.api.accMeta(k.path);
+        const m = await window.api.accMeta(k.path, k.albumMid);
         if (m && m.ok) {
           art = m.cover || null;
           if (m.codec) k.codec = m.codec;
@@ -3581,7 +3581,7 @@ async function playAt(qi, opts) {
      * 歌词不在这里处理 —— track:lyric 已经按同样前缀路由。 */
     if (!art && /^(kg|qq):/.test(String(k.path || ''))) {
       try {
-        const meta = await window.api.accMeta(k.path);
+        const meta = await window.api.accMeta(k.path, k.albumMid);
         if (meta && meta.ok && meta.cover) art = meta.cover;
       } catch { /* 封面拿不到就用兜底 */ }
     }

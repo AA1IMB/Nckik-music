@@ -54,7 +54,7 @@ contextBridge.exposeInMainWorld('api', {
   accLogout: (id, provider) => ipcRenderer.invoke('acc:logout', id ? { id } : { provider }),
   accAudio: (req) => ipcRenderer.invoke('acc:audio', req),
   accInvalidate: (provider) => ipcRenderer.invoke('acc:invalidate', provider ? { provider } : {}),
-  accMeta: (key) => ipcRenderer.invoke('acc:meta', key),
+  accMeta: (key, albumMid) => ipcRenderer.invoke('acc:meta', key, albumMid || ''),
   accPlaylists: (provider) => ipcRenderer.invoke('acc:playlists', { provider }),
   accTracks: (provider, id, dirId) => ipcRenderer.invoke('acc:tracks', { provider, id, dirId }),
   idnGet: () => ipcRenderer.invoke('idn:get'),

@@ -93,63 +93,44 @@ async function kgMeta(hash, durationSec) {
 }
 
 /* ---------------- QQ 音乐 ---------------- */
-async function qqMeta(mid, cred) {
+async function qqMeta(mid, cred, albumMid) {
   const m = String(mid || '').trim();
   if (!/^[0-9A-Za-z]{8,24}$/.test(m)) return { cover: '', lyric: [] };
-  const key = 'qq:' + m;
+  const key = 'qq:' + m + (albumMid ? '|' + albumMid : '');
   const hit = get(key);
   if (hit) return hit;
 
-  const comm = {
-    ct: 11, cv: 14090008, v: 14090008, chid: '10003505', tmeAppID: 'qqmusic',
-    tmeLoginType: 2, qq: String(cred && cred.uin || ''), authst: String(cred && cred.musickey || '')
-  };
+  /* 封面：QQ 官方图床按「专辑 mid」拼，歌曲 mid 拼不出来。
+   * album mid 由歌单曲目列表带下来（CgiGetTrackInfo 只吃数字 id，这里用不上）。 */
+  let cover = albumMid
+    ? 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + String(albumMid) + '.jpg'
+    : '';
 
-  let cover = '';
+  /* 歌词走「旧版歌词接口」，和 folia 用的是同一条：
+   *   /lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=…&format=json&outCharset=utf-8
+   * 返回的 lyric 是 **base64 的 UTF-8 文本**，不是 URL 编码；
+   * musicu 的 PlayLyricInfo 在这里静默回空，别再用它。 */
   let lyric = [];
-  let code = 0;
   try {
-    /* 封面：走 CgiGetTrackInfo 拿 album.mid，再拼官方图床地址。
-     * 这一步失败不影响歌词。 */
-    const tb = {
-      comm,
-      req_0: {
-        module: 'music.trackInfo.UniformRuleCtrl', method: 'CgiGetTrackInfo',
-        param: { types: [3], ids: [m] }
+    const u = 'https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=' + encodeURIComponent(m)
+      + '&format=json&outCharset=utf-8&nobase64=0&g_tk=5381&pcachetime=' + Date.now();
+    const r = await fetch(u, {
+      headers: {
+        'User-Agent': QQ_UA,
+        Referer: 'https://y.qq.com/portal/player.html',
+        Accept: '*/*'
       }
-    };
-    const tr = await fetch(MUSICU, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': QQ_UA, Referer: 'https://y.qq.com/' },
-      body: JSON.stringify(tb)
     });
-    const tj = await tr.json();
-    const track = ((tj.req_0 && tj.req_0.data && tj.req_0.data.tracks) || [])[0] || {};
-    const albumMid = track.album && track.album.mid;
-    if (albumMid) cover = 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + albumMid + '.jpg';
-  } catch { /* 封面拿不到就算了 */ }
+    let text = await r.text();
+    /* 有些出口会回 JSONP（MusicJsonCallback({...})），先剥壳 */
+    const m2 = /^[^(]*\((.*)\)\s*;?\s*$/s.exec(text);
+    if (m2) text = m2[1];
+    const j = JSON.parse(text);
+    const raw = String(j.lyric || '');
+    if (raw) lyric = parseLrc(Buffer.from(raw, 'base64').toString('utf8'));
+  } catch { /* 歌词拿不到就留空，界面会明确写「没有提供歌词」 */ }
 
-  try {
-    const body = {
-      comm,
-      req_0: {
-        module: 'music.musichallSong.PlayLyricInfo', method: 'GetPlayLyricInfo',
-        param: { songMID: m, songID: 0, format: 'lrc', type: 1, ct: 11, cv: 14090008 }
-      }
-    };
-    const r = await fetch(MUSICU, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': QQ_UA, Referer: 'https://y.qq.com/' },
-      body: JSON.stringify(body)
-    });
-    const j = await r.json();
-    code = (j.req_0 && j.req_0.code) || 0;
-    const data = (j.req_0 && j.req_0.data) || {};
-    const raw = String(data.lyric || '');
-    if (raw) lyric = parseLrc(decodeURIComponentSafe(raw));
-  } catch { /* 歌词拿不到就算了 */ }
-
-  put(key, { cover, lyric, code });
+  put(key, { cover, lyric });
   return { cover, lyric };
 }
 

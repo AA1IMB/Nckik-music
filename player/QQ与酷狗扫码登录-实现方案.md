@@ -462,3 +462,43 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 2. CDN 主机首选 `sjy6.stream.qqmusic.qq.com`（其次 isure / dl / ws）。`purl` 是相对路径，拼错主机同样 404。
 
 实测：`[up] qqapp 206 audio/mpeg … sjy6…` → `dur 265.8s`、`currentTime 1.95` 推进正常；酷狗同时 `206 / 221.5s`。
+
+## 二十三、QQ 音乐封面与歌词（v0.9.5）
+
+### 23.1 现象
+
+上游曲目能播、歌单能列，但 QQ 音乐的专辑封面与歌词都拿不到（酷狗歌词正常、封面空白）。
+
+### 23.2 根因
+
+| 问题 | 根因 |
+| --- | --- |
+| 酷狗封面空白 | `playInfo.album_img` 是 `http://imge.kugou.com/...`，渲染层 CSP 只放行 `https:`/`data:`，图片被静默拦掉 |
+| QQ 歌词为空 | 之前用的 `music.musichallSong.PlayLyricInfo / GetPlayLyricInfo` 对本机凭证**静默回空**（`code:0` 但无数据），被当成「没有歌词」 |
+| QQ 封面为空 | `music.trackInfo.UniformRuleCtrl / CgiGetTrackInfo` 只吃**数字 id**，歌曲 mid 换不出封面；封面必须按**专辑 mid** 拼图床地址 |
+
+### 23.3 改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `player/upstream-meta.js` | `qqMeta(mid, cred, albumMid)`：歌词改走旧版 `c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=…&format=json&outCharset=utf-8&nobase64=0&g_tk=5381`，带 `User-Agent: QQMusic 14090008(android 12)` + `Referer: https://y.qq.com/portal/player.html`，返回的 `lyric` 是 **base64 的 UTF-8**，解码后再 `parseLrc`；出口回 JSONP 时先剥 `MusicJsonCallback(...)` 壳。封面按 `https://y.gtimg.cn/music/photo_new/T002R300x300M000<albumMid>.jpg` 拼，再由 `coverDataUrl()` 转 data URL（绕开 CSP） |
+| `player/upstream-library.js` | QQ 曲目映射补 `albumMid: String((s.album && s.album.mid) \|\| '')` |
+| `player/main.js` | `upstreamMetaOf(key, albumMid)`；`acc:meta` 接收第二个参数 |
+| `player/preload.js` | `accMeta: (key, albumMid)` |
+| `player/renderer/app.js` | 取封面/标签时传 `k.albumMid` |
+
+### 23.4 验证（用户真实账号「月亮在不在」）
+
+```
+[albumMid] 003nbc0602Tgfx
+[meta] {"ok":true,"cover":"data:image/jpeg;base64,/9j","len":32771,"lyric":52}
+[lyric] {"chars":946,"source":"QQ 音乐","note":""}
+```
+
+回归：`probe-home` 50/50、`probe-playlist` 53/53、`probe-playmode` 48/48。
+
+### 23.5 教训
+
+- 上游接口「`code:0` 但字段为空」时，先怀疑**接口选错**（musicu 的歌词接口对本项目凭证无效），再怀疑参数缺失。
+- 封面地址必须用**专辑** mid，不是歌曲 mid；歌单曲目列表里 `album.mid` 要一起带下来，否则渲染层没法补。
+- diag 里 `executeJavaScript` 传块体箭头函数（`(() => { obj })()`）会返回 `undefined`，必须 `return` 或写成表达式体 `(() => (obj))()`。

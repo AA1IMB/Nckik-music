@@ -1463,7 +1463,7 @@ function credOf(provider) {
 }
 
 /* 上游曲目的封面/歌词统一入口；fail-safe：任何异常都回空，不影响播放。 */
-async function upstreamMetaOf(key) {
+async function upstreamMetaOf(key, albumMid) {
   const s = String(key || '');
   if (s.startsWith('kg:')) {
     const m = await upmeta.kgMeta(s.slice(3));
@@ -1475,15 +1475,15 @@ async function upstreamMetaOf(key) {
   if (s.startsWith('qq:')) {
     const cred = credOf('qqapp') || {};
     const extra = cred.extra || {};
-    const m = await upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey });
+    const m = await upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey }, albumMid || '');
     if (m && m.cover) m.cover = await upmeta.coverDataUrl(m.cover, 'https://y.qq.com/');
     return m;
   }
   return { cover: '', lyric: [] };
 }
 
-ipcMain.handle('acc:meta', async (_e, key) => {
-  try { return { ok: true, ...(await upstreamMetaOf(key)) }; }
+ipcMain.handle('acc:meta', async (_e, key, albumMid) => {
+  try { return { ok: true, ...(await upstreamMetaOf(key, albumMid)) }; }
   catch (e) { return { ok: false, error: { code: 'E_META', message: String((e && e.message) || e) } }; }
 });
 

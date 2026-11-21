@@ -75,7 +75,8 @@ async function qqPlaylistTracks(cred, id, dirId) {
       id: 'qq:' + String(s.mid || s.songmid || s.id || ''),
       title: String(s.name || s.title || s.songname || '未知曲目'),
       artist: singers || String(s.singername || ''),
-      duration: Number(s.interval || s.duration || 0)
+      duration: Number(s.interval || s.duration || 0),
+      albumMid: String((s.album && s.album.mid) || '')
     };
   }).filter(t => t.id !== 'qq:');
 }
