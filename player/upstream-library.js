@@ -8,6 +8,69 @@
  */
 
 const UA = 'QQMusic 14090008(android 12)';
+const crypto = require('crypto');
+/* 酷狗 Android 端签名（只用于「查自己的会员权益/取自己的直链」，不写任何东西）：
+ *   signature = md5(salt + 按 key 排序的 k=v 串 + salt)
+ *   key       = md5(hash + salt2 + appid + mid + userid)
+ * 两个盐值来自客户端协议常量，非本项目自定义。 */
+const KG_SIGN_SALT = 'OIlwieks28dk2k092lksi2UIkp';
+const KG_KEY_SALT = '57ae12eb6890223e355ccfcb74edf70d';
+const KG_APPID = '1005';
+/* 登录页用的是 appid 1014；会员权益按 appid 归属，必要时可用 1014 再问一次 */
+
+function md5(str) { return crypto.createHash('md5').update(String(str)).digest('hex'); }
+
+function kgSign(params) {
+  const str = Object.keys(params).map((k) => k + '=' + params[k]).sort().join('');
+  return md5(KG_SIGN_SALT + str + KG_SIGN_SALT);
+}
+
+function kgCookieField(cookie, name) {
+  const m = new RegExp('(?:^|; )' + name + '=([^;]*)').exec(String(cookie || ''));
+  return m ? m[1] : '';
+}
+
+/* 向 trackercdn 问一次「这首我能不能播、能播到哪一档」：
+ * 返回 { ok, url, privStatus, code, raw }；只读，不发写请求。 */
+async function kgPrivilege(cred, hash, albumAudioId, quality, appidIn) {
+  const h = String(hash || '').toLowerCase();
+  const cookie = String((cred && cred.cookie) || '');
+  const mid = kgCookieField(cookie, 'mid') || kgCookieField(cookie, 'kg_mid');
+  const dfid = kgCookieField(cookie, 'dfid') || kgCookieField(cookie, 'kg_dfid');
+  const userid = String((cred && cred.userid) || kgCookieField(cookie, 'userid') || '');
+  const token = kgCookieField(cookie, 'token');
+  if (!userid || !token) throw fail('E_AUTH_REQUIRED', '酷狗音乐还没有登录');
+  const appid = String(appidIn || KG_APPID);
+  const params = {
+    album_id: '0', area_code: '1', hash: h, ssa_flag: 'is_fromtrack',
+    version: '11430', page_id: '151369488', quality: String(quality || '128'),
+    album_audio_id: String(albumAudioId || '0'), behavior: 'play', pid: '2', cmd: '26',
+    pidversion: '3001', IsFreePart: '0', ppage_id: '463467626,350369493,788954147',
+    cdnBackup: '1', module: '', clientver: '11430', dfid, mid, uuid: '-', appid,
+    clienttime: String(Math.floor(Date.now() / 1000)), userid, token
+  };
+  params.key = md5(h + KG_KEY_SALT + appid + mid + userid);
+  params.signature = kgSign(params);
+  const r = await fetch('https://trackercdn.kugou.com/v5/url?' + new URLSearchParams(params).toString(), {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36', 'x-router': 'trackercdn.kugou.com', dfid, mid, clienttime: params.clienttime }
+  });
+  let j = null;
+  try { j = await r.json(); } catch { /* 下面按失败处理 */ }
+  /* 响应里的 url / backupUrl 是「字符串数组」（个别版本是对象数组），两种都接 */
+  const pick = (arr) => {
+    if (!Array.isArray(arr) || !arr.length) return '';
+    const x = arr[0];
+    return String((x && typeof x === 'object' ? (x.url || x.backupUrl || '') : x) || '');
+  };
+  const first = pick(j && j.url) || pick(j && j.backupUrl);
+  return {
+    ok: !!first,
+    url: first,
+    privStatus: Number((j && j.priv_status) || 0),
+    code: Number((j && j.error_code) || 0),
+    raw: j
+  };
+}
 const MUSICU = 'https://u.y.qq.com/cgi-bin/musicu.fcg';
 
 function qqComm(uid, musickey) {
@@ -224,34 +287,39 @@ async function kgPlaylistTracks(cred, id) {
 /* 账号是不是 VIP：不做「猜 cookie」这种事，直接拿一首需要权限的歌去取链，
  * 能取到直链就说明这个账号有权限（换号/过期都会自然失效，且只花一次请求）。 */
 let __kgVipCache = { at: 0, val: null };
+/* 判断「当前登录的账号在服务端有没有会员权益」：
+ * 旧实现拿免费取流去试，失败就说「免费账号」——那是错的（免费链路永远不认会员权益）。
+ * 现在直接向 trackercdn 问权限：priv_status>0 或拿到直链 = 有权益。 */
 async function kgVip(cred) {
   const now = Date.now();
   if (__kgVipCache.val && now - __kgVipCache.at < 10 * 60 * 1000) return __kgVipCache.val;
-  const cookie = cred.cookie || '';
-  const uid = cred.userid || cred.KugooID || '';
-  if (!cookie || !uid) return { vip: false, reason: 'E_AUTH_REQUIRED', message: '酷狗音乐还没有登录' };
+  const cookie = (cred && cred.cookie) || '';
+  const uid = (cred && (cred.userid || cred.KugooID)) || kgCookieField(cookie, 'userid');
+  if (!cookie || !uid) return { vip: null, reason: 'E_AUTH_REQUIRED', message: '酷狗音乐还没有登录' };
   let probe = null;
   try {
     const pls = await kgPlaylists(cred);
-    const withSongs = pls.find(p => p.count > 0);
+    const withSongs = pls.find((p) => p.count > 0);
     if (withSongs) {
       const page = await kgPlaylistPage(cookie, withSongs.id, 1);
-      probe = page.songs.find(s => Number(s.privilege || 0) > 8) || null;
+      probe = page.songs.find((s) => Number(s.privilege || 0) > 8) || null;
     }
-  } catch { /* 拿不到样本就退化成「未知」 */ }
+  } catch { /* 没有样本就退化成未知 */ }
   if (!probe) {
-    const val = { vip: false, reason: 'E_NO_SAMPLE', message: '没有找到需要权限的样本来判断' };
+    const val = { vip: null, reason: 'E_NO_SAMPLE', message: '没有找到需要权限的样本来判断' };
     __kgVipCache = { at: now, val };
     return val;
   }
-  const hash = String(probe.hash || '').toUpperCase();
+  const hash = String(probe.hash || '');
   try {
-    await kgResolveLazy()(hash);
-    const val = { vip: true, reason: '', hash: hash.slice(0, 8), privilege: Number(probe.privilege || 0) };
+    const pr = await kgPrivilege(cred, hash, probe.albumAudioId || probe.album_audio_id, '128');
+    const val = pr.ok || pr.privStatus > 0
+      ? { vip: true, reason: '', hash: hash.slice(0, 8), privilege: Number(probe.privilege || 0) }
+      : { vip: false, reason: 'E_NO_VIP_PRIVILEGE', code: pr.code, privStatus: pr.privStatus, hash: hash.slice(0, 8) };
     __kgVipCache = { at: now, val };
     return val;
   } catch (e) {
-    const val = { vip: false, reason: String((e && e.code) || 'E_UPSTREAM'), hash: hash.slice(0, 8), privilege: Number(probe.privilege || 0), message: String((e && e.message) || '') };
+    const val = { vip: null, reason: String((e && e.code) || 'E_UPSTREAM'), message: String((e && e.message) || '') };
     __kgVipCache = { at: now, val };
     return val;
   }
@@ -262,4 +330,4 @@ function kgResolveLazy() {
 }
 
 module.exports = {
-  kgVip, albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks };
+  kgVip, kgPrivilege, albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks };

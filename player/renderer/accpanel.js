@@ -231,7 +231,14 @@
       if (acc && c.def.id === 'kugou' && api().accVip) {
         api().accVip().then(v => {
           if (!v || !v.ok) return;
-          c.state.textContent = acc.name + (v.vip ? ' · VIP' : ' · 免费账号');
+          /* vip 三态：true 明确有权益 / false 服务端明确不给（附 code）/ null 判断不了。
+           * 以前把「免费取流失败」当成「免费账号」，等于替用户下了错误结论。 */
+          if (v.vip === true) c.state.textContent = acc.name + ' · 会员';
+          else if (v.vip === false) {
+            c.state.textContent = acc.name + ' · 会员曲未授权';
+            c.state.title = '服务端返回 ' + (v.code || v.reason || 'E_NO_VIP_PRIVILEGE')
+              + (v.privStatus === 0 ? '（priv_status 0）' : '') + '：当前会话没有会员播放权益';
+          }
         }).catch(() => {});
       }
       c.upV.textContent = status && status.upstreamReady ? '已配置' : '未配置';
