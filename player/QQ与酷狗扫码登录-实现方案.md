@@ -453,3 +453,12 @@ QQ 的 comm 用登录换来的 `uin` + `musickey`（`tmeLoginType: 2`），与 q
 - 实测：酷狗免费曲（`FC21EFCE59906B54DF2E47EDE9CC757A`）`duration 221.5s`、`readyState 4`、播放 2.44s 正常推进；VIP 曲目给 `E_NO_COPYRIGHT` 并被面板提示。
 - QQ 音乐：`GetVkey` 已接通但当前账号下仍拿不到 `purl`（返回 `err 4 / no supported sources`），需继续核对 comm 的 `qq/authst` 与 `guid`，暂按「取流不可用」处理，列表与歌单不受影响。
 - 顺手修掉一个真 bug：`main.js` 里 `app.whenReady().then(() => { if (!gotLock) return; ... })` —— Chromium 单实例锁拿不到（权限/杀软占用）时会**整段跳过启动**，表现为「双击没反应」；改为只有 `pidState === 'held'` 才退出。
+
+### 22.1 QQ 取流打通（v0.9.5）
+
+两个关键点（对照 folia `services/auth/playback.js` 才定位到）：
+
+1. `filename` 必须是**两段识别值**：`M800 + songmid + media_mid + .mp3`（media_mid 缺省用 songmid 补）。只送一段时 `UrlGetVkey` 照样回 `purl`，但 CDN 一律 403/404 —— 这正是之前「有 purl、播不出」的原因。
+2. CDN 主机首选 `sjy6.stream.qqmusic.qq.com`（其次 isure / dl / ws）。`purl` 是相对路径，拼错主机同样 404。
+
+实测：`[up] qqapp 206 audio/mpeg … sjy6…` → `dur 265.8s`、`currentTime 1.95` 推进正常；酷狗同时 `206 / 221.5s`。

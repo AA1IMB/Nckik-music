@@ -135,9 +135,12 @@ async function qqResolve(mid, cred, prefer) {
   for (const f of files) {
     for (const t of tunes) {
       try {
-        const purl = await qqVkey(cred, m, f.prefix + m + f.ext, t);
+        /* filename 必须是「prefix + songmid + media_mid + ext」两段识别值：
+         * 只送一段时 vkey server 照样给 purl，但 CDN 会 403/404（folia 的注释也这么写）。 */
+        const purl = await qqVkey(cred, m, f.prefix + m + m + f.ext, t);
         if (!purl) { lastErr = fail('E_NO_STREAM', 'QQ 音乐没有给出可播地址'); continue; }
-        const url = purl.startsWith('http') ? purl : 'https://dl.stream.qqmusic.qq.com/' + purl;
+        const path = purl.startsWith('http') ? purl.replace(/^https?:\/\/[^/]+\//, '') : purl;
+        const url = 'https://sjy6.stream.qqmusic.qq.com/' + path;
         console.log('[qqvkey] ok', JSON.stringify(t), f.prefix, purl.slice(0, 40));
         /* CDN 对未带登录 cookie 的请求会 403/302 到空内容，带上 uin + keyst 最稳 */
         const cookie = `uin=${cred.uin}; qm_keyst=${cred.musickey}; qqmusic_key=${cred.musickey}`;

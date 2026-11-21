@@ -360,9 +360,10 @@ async function upResolve(provider, id) {
   if (provider === 'qqapp' && info.url) {
     const path = info.url.replace(/^https?:\/\/[^/]+\//, '');
     info.urls = [
+      'https://sjy6.stream.qqmusic.qq.com/' + path,
       'https://isure.stream.qqmusic.qq.com/' + path,
-      'https://ws.stream.qqmusic.qq.com/' + path,
-      'https://dl.stream.qqmusic.qq.com/' + path
+      'https://dl.stream.qqmusic.qq.com/' + path,
+      'https://ws.stream.qqmusic.qq.com/' + path
     ];
   }
   upCache.set(key, { at: now, info });
