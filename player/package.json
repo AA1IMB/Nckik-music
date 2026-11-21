@@ -1,6 +1,6 @@
 {
   "name": "nckiks-music",
-  "version": "0.4.0",
+  "version": "0.9.3",
   "private": true,
   "description": "Nckik′s music · 单界面桌面播放器（Windows x64）",
   "author": "Nckik",
@@ -8,9 +8,9 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "icon": "node make-icon.js",
-    "pack": "node make-icon.js && electron-builder --dir --win --x64",
-    "dist": "node make-icon.js && electron-builder --win --x64"
+    "icon": "python tools/make-ico.py",
+    "pack": "python tools/make-ico.py && electron-builder --dir --win --x64",
+    "dist": "python tools/make-ico.py && electron-builder --win --x64"
   },
   "dependencies": {
     "music-metadata": "^11.2.1",
@@ -36,16 +36,24 @@
       "main.js",
       "preload.js",
       "netease.js",
+      "bilibili.js",
+      "bilibili-qr.js",
+      "upstream-library.js",
+      "upstream-meta.js",
+      "stream-resolve.js",
+      "accounts/dist/**/*",
       "renderer/**/*",
+      "build/icon.png",
       "assets/**/*",
+      "!accounts/src/**/*",
+      "!accounts/renderer/**/*",
       "!demo/**",
       "!screenshots/**",
+      "!tools/**",
       "!dist/**",
-      "!build/**",
-      "!*.md",
-      "!make-demo.js",
-      "!make-icon.js",
-      "!**/*.map"
+      "!build/icon.ico",
+      "!**/*.map",
+      "!**/*.ts"
     ],
     "asar": true,
     "publish": null,
@@ -69,9 +77,15 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
-      "icon": "build/icon.png",
+      "icon": "build/icon.ico",
       "artifactName": "NckiksMusic-Setup-${version}.${ext}"
     },
     "nsis": {
@@ -89,6 +103,9 @@
       ],
       "language": "2052",
       "artifactName": "NckiksMusic-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "NckiksMusic-Portable-${version}.${ext}"
     }
   }
 }

@@ -4976,6 +4976,10 @@ function idnInit() {
   loadDevices();
   idnInit();
   registerGlobalKeys();
+  /* 设置页的版本号取自打包元数据（package.json 的 version），不再手写常量 */
+  if (window.api && window.api.appVersion) {
+    window.api.appVersion().then(v => { const el = document.getElementById('verNum'); if (el) el.textContent = 'v' + v; }).catch(() => {});
+  }
   const op = new URLSearchParams(location.search).get('open');
   if (op === 'lib') openDrawer($('#dLib'));
   else if (op === 'set') openDrawer($('#dSet'));

@@ -111,7 +111,10 @@ app.on('browser-window-created', (_e, w) => {
     ok('包内 <title> 已更名', html.includes("Nckik′s music"));
     const exe = fs.readdirSync(distExe).find(f => f.endsWith('.exe') && f !== 'Uninstall Nckik′s music.exe');
     ok('主程序名为新产品名', exe && exe.includes("Nckik′s music"), exe);
-    ok('安装包存在', fs.existsSync(path.join(root, 'dist', 'NckiksMusic-Setup-0.4.0.exe')));
+    /* 安装包文件名带版本号：不写死，按 package.json 的 version 找 */
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const setupName = 'NckiksMusic-Setup-' + pkg.version + '.exe';
+    ok('安装包存在', fs.existsSync(path.join(root, 'dist', setupName)), setupName);
   } else {
     log('  （跳过：尚未打包）');
   }

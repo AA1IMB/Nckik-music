@@ -804,6 +804,8 @@ function createWindow() {
     width: 1100, height: 700, minWidth: 860, minHeight: 560,
     frame: false, backgroundColor: '#0b0b0e', show: false,
     title: APP_NAME,
+    /* 窗口/任务栏图标：打包后 exe 自带图标，但开发态与部分系统仍读这里 */
+    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1173,6 +1175,8 @@ ipcMain.handle('track:cover', async (_e, file) => {
  *   - 密钥库不可用不算登录失败：本次会话照常可用，只是没法长期保存，需要明确告诉用户。
  */
 const neErr = e => ({ code: (e && e.code) || 'NE_ERROR', message: String((e && e.message) || e) });
+
+ipcMain.handle('app:version', () => app.getVersion());
 
 ipcMain.handle('ne:status', async () => {
   if (!ne.hasCookie()) return { hasCookie: false, loggedIn: false, uid: 0 };

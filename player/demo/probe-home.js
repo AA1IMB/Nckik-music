@@ -137,7 +137,7 @@ app.on('browser-window-created', (_e, w) => {
       items: document.querySelectorAll('#libList .item').length,
       count: document.querySelector('#libCount').textContent,
       first: first ? first.textContent : '',
-      back: !!document.querySelector('#neHome .ne-back'),
+      back: !!document.querySelector('#neHome .backbtn, #neHome .ne-back'),
       fmBtn: !!document.querySelector('#neHome [data-act="fm"]'),
       title: document.querySelector('#neHome .ne-title b') ? document.querySelector('#neHome .ne-title b').textContent : ''
     };
@@ -193,7 +193,7 @@ app.on('browser-window-created', (_e, w) => {
   ok('点过的曲目已进曲库', inLib === true);
 
   log('\n=== 3. 返回 → 每日推荐 ===');
-  await click('#neHome .ne-back');
+  await click('#neHome .backbtn');
   await sleep(200);
   ok('返回首页', (await homeState()).view === 'home');
   await click('#neHome [data-act="daily"]');
@@ -204,7 +204,7 @@ app.on('browser-window-created', (_e, w) => {
   ok('首曲正确', /晴天/.test(c.first), c.first);
 
   log('\n=== 4. 私人FM：换一批 ===');
-  await click('#neHome .ne-back');
+  await click('#neHome .backbtn');
   await sleep(200);
   await click('#neHome [data-act="fm"]');
   await waitFor(async () => (await collState()).status === 'ready');
@@ -223,7 +223,7 @@ app.on('browser-window-created', (_e, w) => {
   await shot('19-net-fm.png');
 
   log('\n=== 5. 搜索与清空 ===');
-  await click('#neHome .ne-back');
+  await click('#neHome .backbtn');
   await sleep(200);
   await js(`(() => { const q = document.querySelector('#q'); q.value = '晴'; q.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await waitFor(async () => (await homeState()).view === 'search' && (await js(`document.querySelectorAll('#libList .item').length`)) > 0, 6000);

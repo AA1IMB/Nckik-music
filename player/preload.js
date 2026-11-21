@@ -2,6 +2,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  appVersion: () => ipcRenderer.invoke('app:version'),
   isElectron: true,
   pickFiles: () => ipcRenderer.invoke('dialog:files'),
   pickFolder: () => ipcRenderer.invoke('dialog:folder'),
