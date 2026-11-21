@@ -41,6 +41,17 @@ function fail(code, message) {
   return e;
 }
 
+/* 曲目 id → 专辑 mid 的缓存：老播放列表里没有 albumMid 时据此反查 */
+const ALBUM_CACHE = new Map();
+function rememberAlbum(items) {
+  for (const it of items || []) {
+    if (it && it.albumMid) ALBUM_CACHE.set(String(it.id), String(it.albumMid));
+  }
+}
+function albumMidOf(id) {
+  return ALBUM_CACHE.get(String(id)) || '';
+}
+
 /* 歌单列表：自建清单（GetPlaylistByUin）。收藏的歌单需要 encryptUin，本版本不接。 */
 async function qqPlaylists(cred) {
   const uid = cred.uin || cred.musicid || '';
@@ -62,6 +73,12 @@ async function qqPlaylists(cred) {
 }
 
 async function qqPlaylistTracks(cred, id, dirId) {
+  const __items = await qqPlaylistTracksInner(cred, id, dirId);
+  rememberAlbum(__items);
+  return __items;
+}
+
+async function qqPlaylistTracksInner(cred, id, dirId) {
   const uid = cred.uin || cred.musicid || '';
   const musickey = cred.musickey || '';
   if (!uid || !musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
@@ -147,4 +164,4 @@ async function kgPlaylistTracks(cred, id) {
   return target ? out.slice(0, target) : out;
 }
 
-module.exports = { qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks };
+module.exports = { albumMidOf, qqPlaylists, qqPlaylistTracks, kgPlaylists, kgPlaylistTracks };

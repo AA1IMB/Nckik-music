@@ -1608,9 +1608,10 @@ function renderUp(provider) {
     $('#libCount').textContent = items.length ? items.length + ' 个歌单' : '0 个歌单';
     list.innerHTML = items.length
       ? items.map(p => `<div class="item" data-pl="${esc(String(p.id))}" data-name="${esc(p.name || '')}">
-          <div class="txt"><div class="ttl">${esc(p.name || '未命名歌单')}</div>
-          <div class="sub">${esc((p.count || 0) + ' 首')}${p.cover ? '' : ''}</div></div>
-          <div class="dur">›</div></div>`).join('')
+          <div class="th"><span>${esc((p.name || '歌').slice(0, 1))}</span></div>
+          <div class="ii"><div class="n">${esc(p.name || '未命名歌单')}</div>
+          <div class="d">${esc((p.count || 0) + ' 首')}</div></div>
+          <div class="r">›</div></div>`).join('')
       : emptyRow(label + '账号下还没有歌单');
     list.onclick = e => {
       const row = e.target.closest('[data-pl]');
@@ -1625,11 +1626,14 @@ function renderUp(provider) {
       const hay = [t.title, t.artist].filter(Boolean).join(' ').toLowerCase();
       if (!hay.includes(q)) return;
     }
+    /* 与网易云那段保持一致：首字磁贴 + 标题/副标题 + 右侧时长 */
+    const sub = [t.artist, t.album].filter(Boolean).join(' · ');
     rows.push(`<div class="item" data-up="${i}">
-      <div class="num"><span class="idx">${i + 1}</span></div>
-      <div class="txt"><div class="ttl">${esc(t.title || '')}</div>
-      <div class="sub">${esc(t.artist || '')}</div></div>
-      <div class="dur">${esc(fmt(Number(t.duration) || 0))}</div></div>`);
+      <div class="th"><span>${esc((t.title || '?').slice(0, 1))}</span></div>
+      <div class="ii"><div class="n">${esc(t.title || '未知曲目')}</div>
+      <div class="d">${esc(sub || '未知歌手')}</div></div>
+      <div class="r">${esc(fmt(Number(t.duration) || 0))}</div>
+    </div>`);
   });
   $('#libCount').textContent = st.trackErr ? st.trackErr : (rows.length ? rows.length + ' 首 · ' + (st.name || '') : '0 首');
   list.innerHTML = (st.trackErr ? emptyRow(st.trackErr) : (rows.join('') || emptyRow('这个歌单是空的')))
@@ -3550,7 +3554,7 @@ async function playAt(qi, opts) {
       /* 上游曲目没有本地文件，别去问 trackDetail（它会回「元数据读取失败」，
        * 界面就顶着一行红字）。封面与码率一起从上游拿。 */
       try {
-        const m = await window.api.accMeta(k.path, k.albumMid);
+        const m = await window.api.accMeta(k.path, albumMidOf(k, 'qq'));
         if (m && m.ok) {
           art = m.cover || null;
           if (m.codec) k.codec = m.codec;
@@ -3574,7 +3578,7 @@ async function playAt(qi, opts) {
      * 歌词不在这里处理 —— track:lyric 已经按同样前缀路由。 */
     if (!art && /^(kg|qq):/.test(String(k.path || ''))) {
       try {
-        const meta = await window.api.accMeta(k.path, k.albumMid);
+        const meta = await window.api.accMeta(k.path, albumMidOf(k, 'qq'));
         if (meta && meta.ok && meta.cover) art = meta.cover;
       } catch { /* 封面拿不到就用兜底 */ }
     }

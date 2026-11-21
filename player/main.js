@@ -1475,7 +1475,8 @@ async function upstreamMetaOf(key, albumMid) {
   if (s.startsWith('qq:')) {
     const cred = credOf('qqapp') || {};
     const extra = cred.extra || {};
-    const m = await upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey }, albumMid || '');
+    const am = albumMid || upmeta.albumMidOf(s);
+    const m = await upmeta.qqMeta(s.slice(3), { uin: extra.uin, musickey: extra.musickey }, am);
     if (m && m.cover) m.cover = await upmeta.coverDataUrl(m.cover, 'https://y.qq.com/');
     return m;
   }
