@@ -22,3 +22,6 @@ desktop.ini
 # 发布产物（源码包/安装包）不入库
 *.zip
 *.exe
+
+# release/ 里的安装包要入库（覆盖上面的 *.exe 忽略）
+!release/*.exe
