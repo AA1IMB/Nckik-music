@@ -38,6 +38,11 @@ app.on('browser-window-created', (_e, w) => {
 });
 require(path.join(root, 'main.js'));
 
+/* 截图目录可能不存在（新解压的工程没有 screenshots/）：写之前先建好 */
+function ensureShots() {
+  try { fs.mkdirSync(path.join(root, 'screenshots'), { recursive: true }); } catch {}
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const js = code => win.webContents.executeJavaScript(code, true);
 async function waitFor(fn, ms = 8000) {
@@ -48,7 +53,7 @@ async function waitFor(fn, ms = 8000) {
 async function shot(name) {
   for (let i = 0; i < 6; i++) {
     const png = (await win.webContents.capturePage()).toPNG();
-    if (png.length > 1000) { fs.writeFileSync(path.join(root, 'screenshots', name), png); return; }
+    if (png.length > 1000) { ensureShots(); fs.writeFileSync(path.join(root, 'screenshots', name), png); return; }
     await sleep(350);
   }
 }

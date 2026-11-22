@@ -28,6 +28,11 @@ const log = (...a) => {
   fs.appendFileSync(logPath, line + '\n');
   try { console.log(line); } catch {}
 };
+/* 截图目录可能不存在（新解压的工程没有 screenshots/）：写之前先建好 */
+function ensureShots() {
+  try { fs.mkdirSync(path.join(root, 'screenshots'), { recursive: true }); } catch {}
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function waitFor(fn, ms = 8000, step = 120) {
   const t0 = Date.now();
@@ -96,7 +101,7 @@ app.on('browser-window-created', (_e, w) => {
   await sleep(250);
   for (let i = 0; i < 6; i++) {
     const png = (await win.webContents.capturePage()).toPNG();
-    if (png.length > 3000) { fs.writeFileSync(path.join(root, 'screenshots', '32-about-renamed.png'), png); break; }
+    if (png.length > 3000) { ensureShots(); fs.writeFileSync(path.join(root, 'screenshots', '32-about-renamed.png'), png); break; }
     await sleep(280);
   }
 

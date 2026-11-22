@@ -29,6 +29,11 @@ const log = (...a) => {
   fs.appendFileSync(logPath, line + '\n');
   try { console.log(line); } catch {}
 };
+/* 截图目录可能不存在（新解压的工程没有 screenshots/）：写之前先建好 */
+function ensureShots() {
+  try { fs.mkdirSync(path.join(root, 'screenshots'), { recursive: true }); } catch {}
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function waitFor(fn, ms = 15000, step = 120) {
   const t0 = Date.now();
@@ -78,7 +83,7 @@ const wavSize = (secs, rate = 8000) => 44 + secs * rate * 2;
     await sleep(260);
     for (let i = 0; i < 6; i++) {
       const png = (await win.webContents.capturePage()).toPNG();
-      if (png.length > 3000) { fs.writeFileSync(path.join(root, 'screenshots', name), png); return true; }
+      if (png.length > 3000) { ensureShots(); fs.writeFileSync(path.join(root, 'screenshots', name), png); return true; }
       await sleep(280);
     }
     return false;

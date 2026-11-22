@@ -36,6 +36,11 @@ const ne = require(path.join(root, 'netease.js'));
 const jsqrMod = require('jsqr');
 const jsQR = typeof jsqrMod === 'function' ? jsqrMod : jsqrMod.default;
 
+/* 截图目录可能不存在（新解压的工程没有 screenshots/）：写之前先建好 */
+function ensureShots() {
+  try { fs.mkdirSync(path.join(root, 'screenshots'), { recursive: true }); } catch {}
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function waitFor(fn, ms = 10000, step = 150) {
   const t0 = Date.now();
@@ -56,7 +61,7 @@ async function shot(name) {
   for (let i = 0; i < 6; i++) {
     const img = await win.webContents.capturePage();
     const png = img.toPNG();
-    if (png.length > 1000) { fs.writeFileSync(path.join(root, 'screenshots', name), png); return; }
+    if (png.length > 1000) { ensureShots(); fs.writeFileSync(path.join(root, 'screenshots', name), png); return; }
     await sleep(350);        // 首帧还没合成，抓出来是空图
   }
 }

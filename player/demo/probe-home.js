@@ -29,6 +29,11 @@ const log = (...a) => {
   try { console.log(line); } catch {}
 };
 
+/* 截图目录可能不存在（新解压的工程没有 screenshots/）：写之前先建好 */
+function ensureShots() {
+  try { fs.mkdirSync(path.join(root, 'screenshots'), { recursive: true }); } catch {}
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function waitFor(fn, ms = 12000, step = 120) {
   const t0 = Date.now();
@@ -91,7 +96,7 @@ app.on('browser-window-created', (_e, w) => {
     for (let i = 0; i < 6; i++) {
       const img = await win.webContents.capturePage();
       const png = img.toPNG();
-      if (png.length > 3000) { fs.writeFileSync(path.join(root, 'screenshots', name), png); return; }
+      if (png.length > 3000) { ensureShots(); fs.writeFileSync(path.join(root, 'screenshots', name), png); return; }
       await sleep(300);
     }
   }
