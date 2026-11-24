@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' file:">
+<title>桌面歌词 · Nckik′s music</title>
+<style>
+@font-face {
+  font-family: "PingFang";
+  src: url("../assets/fonts/PingFangSC-Medium.woff2") format("woff2"),
+       url("../assets/fonts/PingFangSC-Medium.ttf") format("truetype");
+  font-weight: 100 900;
+  font-display: swap;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+html, body {
+  width: 100%; height: 100%; overflow: hidden;
+  background: transparent;
+  font-family: "PingFang", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+}
+.wrap {
+  width: 100%; height: 100%;
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  padding: 10px 18px 8px;
+  border-radius: 14px;
+  background: rgba(12, 12, 16, 0);
+  transition: background .2s ease, border-color .2s ease;
+  border: 1px solid transparent;
+  -webkit-app-region: drag;
+}
+body:not(.locked) .wrap:hover {
+  background: rgba(14, 14, 20, .68);
+  border-color: rgba(255, 255, 255, .14);
+}
+.bar {
+  position: fixed; top: 6px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 4px;
+  padding: 2px 6px; border-radius: 999px;
+  background: rgba(18, 18, 24, .82); border: .5px solid rgba(255, 255, 255, .14);
+  opacity: 0; pointer-events: none; transition: opacity .18s ease;
+  -webkit-app-region: no-drag;
+}
+body:not(.locked) .wrap:hover .bar { opacity: 1; pointer-events: auto; }
+.bar button {
+  border: 0; background: none; color: rgba(245, 245, 247, .82);
+  font: inherit; font-size: 11px; padding: 3px 7px; border-radius: 999px;
+  cursor: pointer; transition: background .15s, color .15s;
+}
+.bar button:hover { background: rgba(255, 255, 255, .14); color: #fff; }
+.line {
+  --p: 0%;
+  --ac: #8ab4ff;
+  max-width: 100%;
+  font-size: clamp(19px, 3.8vw, 28px);
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background-image: linear-gradient(90deg, var(--ac) 0 var(--p), #ffffff var(--p) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 1px 4px rgba(0, 0, 0, .82)) drop-shadow(0 0 1px rgba(0, 0, 0, .95));
+}
+.tr {
+  margin-top: 4px;
+  max-width: 100%;
+  font-size: 13px;
+  line-height: 1.35;
+  color: rgba(245, 245, 247, .88);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .88);
+}
+.tr:empty { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+  <div class="bar" id="bar">
+    <button id="bPrev" title="上一首">⏮</button>
+    <button id="bPlay" title="播放/暂停">⏯</button>
+    <button id="bNext" title="下一首">⏭</button>
+    <button id="bLock" title="锁定鼠标穿透（可在托盘或设置中解锁）">锁定</button>
+    <button id="bClose" title="关闭桌面歌词">✕</button>
+  </div>
+  <div class="line" id="line">Nckik′s music</div>
+  <div class="tr" id="tr"></div>
+</div>
+<script>
+'use strict';
+const lineEl = document.getElementById('line');
+const trEl = document.getElementById('tr');
+const bPlay = document.getElementById('bPlay');
+
+function setLocked(on) {
+  document.body.classList.toggle('locked', !!on);
+}
+
+if (window.api) {
+  document.getElementById('bPrev').onclick = () => window.api.dlyrCmd('prev');
+  document.getElementById('bPlay').onclick = () => window.api.dlyrCmd('toggle');
+  document.getElementById('bNext').onclick = () => window.api.dlyrCmd('next');
+  document.getElementById('bLock').onclick = () => window.api.dlyrLock(true);
+  document.getElementById('bClose').onclick = () => window.api.dlyrClose();
+
+  if (window.api.onDlyrData) {
+    window.api.onDlyrData((d) => {
+      if (!d || typeof d !== 'object') return;
+      const txt = String(d.text || d.title || 'Nckik′s music');
+      if (lineEl.textContent !== txt) lineEl.textContent = txt;
+      const tr = String(d.tr || '');
+      if (trEl.textContent !== tr) trEl.textContent = tr;
+      const p = Math.max(0, Math.min(100, Number(d.progress) || 0));
+      lineEl.style.setProperty('--p', p.toFixed(1) + '%');
+      if (d.accent) lineEl.style.setProperty('--ac', String(d.accent));
+      if (bPlay) bPlay.textContent = d.playing ? '⏸' : '▶';
+      if (typeof d.locked === 'boolean') setLocked(d.locked);
+    });
+  }
+  if (window.api.onDlyrLock) {
+    window.api.onDlyrLock((on) => setLocked(on));
+  }
+}
+</script>
+</body>
+</html>

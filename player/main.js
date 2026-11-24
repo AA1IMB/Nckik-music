@@ -1,8 +1,9 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, protocol, globalShortcut, shell, net, safeStorage, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, globalShortcut, shell, net, safeStorage, nativeImage, nativeTheme, session, Tray, Menu, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const { execFile } = require('node:child_process');
 const { Readable } = require('node:stream');
 const ne = require('./netease');
 const bil = require('./bilibili');
@@ -10,6 +11,11 @@ const { createQrLogin } = require('./bilibili-qr');
 const upstream = require('./upstream-library');
 const streams = require('./stream-resolve');
 const upmeta = require('./upstream-meta');
+const { createUpdater } = require('./updater');
+const { readJSON, writeJSON, writeJSONAsync, calcDirStats, cleanDirContents } = require('./storage');
+const { createThumbar } = require('./thumbar');
+const { createAppTray } = require('./tray');
+const { createDesktopLyric } = require('./desktop-lyric');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -41,6 +47,48 @@ if (app.getPath('userData') === nameDefaultDir) {
 const userDir = app.getPath('userData');
 const settingsPath = path.join(userDir, 'settings.json');
 const libraryPath = path.join(userDir, 'library.json');
+const playPosPath = path.join(userDir, 'playpos.json');
+const cacheConfigPath = path.join(userDir, 'cache-config.json');
+const defaultCacheDir = path.join(userDir, 'Cache');
+
+/* ---------------- 自定义软件缓存目录 ----------------
+ * 启动前同步读取 cache-config.json：Chromium 磁盘缓存目录必须在 app.whenReady()
+ * 之前通过 app.setPath('cache') 与 --disk-cache-dir 生效；更新包下载目录则通过
+ * getConfiguredCacheDir() 动态解析，切换位置后即刻生效无需重启。 */
+let configuredCacheDir = (() => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(cacheConfigPath, 'utf8'));
+    const dir = raw && typeof raw.cacheDir === 'string' ? raw.cacheDir.trim() : '';
+    if (dir) return path.resolve(dir);
+  } catch {}
+  return '';
+})();
+const getConfiguredCacheDir = () => configuredCacheDir || defaultCacheDir;
+const startupCacheDir = (() => {
+  const want = getConfiguredCacheDir();
+  try {
+    fs.mkdirSync(path.join(want, 'http'), { recursive: true });
+    return want;
+  } catch {
+    try { fs.mkdirSync(path.join(defaultCacheDir, 'http'), { recursive: true }); } catch {}
+    return defaultCacheDir;
+  }
+})();
+try {
+  app.setPath('cache', startupCacheDir);
+  app.commandLine.appendSwitch('disk-cache-dir', path.join(startupCacheDir, 'http'));
+} catch {}
+
+/* 应用版本号：打包态读 exe 元数据，开发态/探针脚本直跑时读 package.json，
+ * 避免脚本启动时 app.getVersion() 回落成 Electron 运行时版本号（如 33.4.11）。 */
+const APP_VERSION = (() => {
+  if (app.isPackaged) return String(app.getVersion() || '0.0.0');
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+    if (pkg && pkg.version) return String(pkg.version);
+  } catch {}
+  return String(app.getVersion() || '0.0.0');
+})();
 
 /* media 是本地文件；neaudio 是网易云音频，bilaudio 是哔哩哔哩音频（都由主进程代理，
  * 带 Range 透传）。远程地址会过期，且 http/https 混杂，交给自建协议统一处理：
@@ -608,32 +656,48 @@ function writeBilCookie(cookie) {
   return true;
 }
 
-/* ---------------- 持久化 ---------------- */
-/* 解析失败时把坏文件改名留档，避免"曲库凭空消失"；写入走 临时文件 + rename，断电不会写出半截 JSON */
-const readJSON = (p, fb) => {
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
-  catch (e) {
-    if (e && e.code !== 'ENOENT') {
-      const bak = `${p}.bad-${Date.now()}`;
-      try { fs.renameSync(p, bak); console.error('readJSON failed, kept copy at', bak, e.message); } catch {}
-    }
-    return fb;
-  }
-};
-const writeJSON = (p, v) => {
+/* ---------------- 持久化（实现见 storage.js） ---------------- */
+function readPlayPosFile() {
   try {
-    const tmp = `${p}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(v, null, 2));
-    fs.renameSync(tmp, p);
-  } catch (e) { console.error('writeJSON', p, e); }
-};
+    const raw = JSON.parse(fs.readFileSync(playPosPath, 'utf8'));
+    if (raw && typeof raw === 'object' && typeof raw.id === 'string' && raw.id) return raw;
+  } catch {}
+  return null;
+}
 
 const DEFAULT_SETTINGS = {
   theme: 'auto', volume: 0.78, shuffle: false, repeat: 'off', sinkId: '', muted: false,
   lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true,
   quality: 'exhigh',           // 网易云音质档位：standard / higher / exhigh / lossless
-  lyricTrans: true             // 歌词翻译默认显示；没有译文的歌不受影响
+  lyricTrans: true,            // 歌词翻译默认显示；没有译文的歌不受影响
+  lyricOffsets: {},            // 每首歌独立歌词时间偏移（秒），按 track.path 键存
+  closeAction: 'exit',         // 点击关闭按钮行为：exit 直接退出 / tray 最小化到系统托盘
+  taskbarProgress: true,       // 任务栏图标播放进度条
+  lowMotion: false,            // 省电 / 低动效模式（关闭非激活歌词模糊与大半径玻璃滤镜）
+  dlyrLocked: false,           // 桌面悬浮歌词鼠标穿透锁定
+  dlyrBounds: null             // 桌面悬浮歌词上次位置与尺寸
 };
+
+let isQuitting = false;
+let isMini = false;
+let preMini = null;
+let cachedCloseAction = 'exit';
+let elevatedPromise = null;
+function checkElevated() {
+  if (elevatedPromise) return elevatedPromise;
+  if (process.platform !== 'win32') {
+    elevatedPromise = Promise.resolve({ elevated: false });
+    return elevatedPromise;
+  }
+  elevatedPromise = new Promise(resolve => {
+    try {
+      execFile('net', ['session'], { windowsHide: true, timeout: 1200 }, err => {
+        resolve({ elevated: !err });
+      });
+    } catch { resolve({ elevated: false }); }
+  });
+  return elevatedPromise;
+}
 
 /* ---------------- 元数据 ---------------- */
 let mmPromise = null;
@@ -798,6 +862,100 @@ async function mapLimit(items, limit, fn) {
 const scanState = { busy: false, abort: false };
 const send = (ch, payload) => { if (win && !win.isDestroyed()) win.webContents.send(ch, payload); };
 
+/* ---------------- 任务栏缩略图 / 系统托盘 / 桌面悬浮歌词（模块化拆分） ---------------- */
+const thumbar = createThumbar({
+  appName: APP_NAME,
+  baseDir: __dirname,
+  userDir,
+  nativeImage,
+  nativeTheme,
+  getWin: () => win,
+  send,
+  logCrash
+});
+
+function showMainWindow() {
+  if (!win || win.isDestroyed()) { createWindow(); return; }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+const desktopLyric = createDesktopLyric({
+  BrowserWindow,
+  screen,
+  baseDir: __dirname,
+  onStateChange: (st) => {
+    appTray.updateState({ dlyr: !!st.open });
+    send('dlyr:state', st);
+  },
+  logCrash
+});
+
+const appTray = createAppTray({
+  appName: APP_NAME,
+  baseDir: __dirname,
+  Tray,
+  Menu,
+  nativeImage,
+  getWin: () => win,
+  send,
+  onShowMain: showMainWindow,
+  onToggleMini: () => setMiniMode(!isMini),
+  onToggleDlyr: () => {
+    const st = readJSON(settingsPath, {}) || {};
+    desktopLyric.toggle({ locked: !!st.dlyrLocked, bounds: st.dlyrBounds || null });
+  },
+  onQuit: () => {
+    isQuitting = true;
+    desktopLyric.close();
+    appTray.destroy();
+    app.quit();
+  },
+  logCrash
+});
+
+/* ---------------- 紧凑迷你模式（380×116 精简置顶浮窗） ---------------- */
+function setMiniMode(on) {
+  if (!win || win.isDestroyed()) return false;
+  const want = !!on;
+  if (want === isMini) return isMini;
+  if (want) {
+    if (win.isFullScreen()) setFullscreen(false);
+    preMini = { maximized: win.isMaximized(), bounds: win.getNormalBounds() };
+    if (win.isMaximized()) win.unmaximize();
+    isMini = true;
+    win.setMinimumSize(340, 102);
+    win.setMaximumSize(560, 160);
+    const wa = screen.getPrimaryDisplay().workArea;
+    const w = 384, h = 116;
+    const x = Math.round(wa.x + wa.width - w - 24);
+    const y = Math.round(wa.y + wa.height - h - 24);
+    win.setBounds({ x, y, width: w, height: h }, false);
+    try { win.setAlwaysOnTop(true, 'floating'); } catch {}
+    appTray.updateState({ mini: true });
+    send('win:state', { mini: true, maximized: false, fullscreen: false });
+    return true;
+  }
+  isMini = false;
+  try { win.setAlwaysOnTop(false); } catch {}
+  win.setMaximumSize(0, 0);
+  win.setMinimumSize(860, 560);
+  const s = preMini;
+  preMini = null;
+  if (s && s.bounds) {
+    const bw = Math.max(860, s.bounds.width || 1100);
+    const bh = Math.max(560, s.bounds.height || 700);
+    win.setBounds({ x: s.bounds.x, y: s.bounds.y, width: bw, height: bh }, false);
+    if (s.maximized) win.maximize();
+  } else {
+    win.setSize(1100, 700);
+  }
+  appTray.updateState({ mini: false });
+  send('win:state', { mini: false, maximized: win.isMaximized() });
+  return false;
+}
+
 /* ---------------- 窗口 ---------------- */
 function createWindow() {
   win = new BrowserWindow({
@@ -813,7 +971,16 @@ function createWindow() {
       sandbox: true
     }
   });
-  win.on('closed', () => { win = null; });
+  win.on('close', (e) => {
+    if (!isQuitting && cachedCloseAction === 'tray' && appTray.isReady()) {
+      e.preventDefault();
+      win.hide();
+      return;
+    }
+    desktopLyric.close();
+  });
+  win.on('closed', () => { thumbar.onWindowClosed(); isMini = false; preMini = null; win = null; });
+  thumbar.hookMessages(win);
   // 渲染进程崩溃时留证并给一次自动恢复，总比留个白窗口强
   win.webContents.on('render-process-gone', (_e, details) => {
     logCrash('render-process-gone', JSON.stringify(details));
@@ -827,7 +994,15 @@ function createWindow() {
     ? { query: { t: process.env.SHOT_T || '', open: process.env.SHOT_OPEN || '' } }
     : undefined;
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'), q);
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => {
+    win.show();
+    if (!thumbar.apply('ready-to-show')) thumbar.scheduleRetry();
+  });
+  win.on('show', () => { if (!thumbar.apply('show')) thumbar.scheduleRetry(); });
+  win.on('focus', () => { if (!thumbar.state.applied) thumbar.apply('focus'); });
+  win.on('blur', () => { if (!thumbar.state.applied) thumbar.apply('blur'); });
+  win.on('minimize', () => thumbar.apply('minimize'));
+  win.on('restore', () => thumbar.apply('restore'));
   win.on('maximize', () => send('win:state', { maximized: true }));
   win.on('unmaximize', () => send('win:state', { maximized: false }));
   win.on('enter-full-screen', () => send('win:state', { fullscreen: true, maximized: false }));
@@ -1029,31 +1204,54 @@ ipcMain.handle('track:lyric', async (_e, file) => {
   } catch { return { text: '', source: '' }; }
 });
 
-ipcMain.handle('settings:get', () => ({ ...DEFAULT_SETTINGS, ...readJSON(settingsPath, {}) }));
-ipcMain.handle('settings:set', (_e, s) => {
-  writeJSON(settingsPath, { ...DEFAULT_SETTINGS, ...s });
+ipcMain.handle('settings:get', () => {
+  const st = { ...DEFAULT_SETTINGS, ...readJSON(settingsPath, {}) };
+  const sep = readPlayPosFile();
+  if (sep) {
+    const curAt = (st.playPos && Number(st.playPos.at)) || 0;
+    const sepAt = Number(sep.at) || 0;
+    if (!st.playPos || sepAt >= curAt) st.playPos = sep;
+  }
+  return st;
+});
+ipcMain.handle('settings:set', async (_e, s) => {
+  await writeJSONAsync(settingsPath, { ...DEFAULT_SETTINGS, ...s }, true);
   // 音质档位不只是界面开关：neaudio 协议在解析地址时用的是主进程这一份，
   // 只改渲染层的设置会让「本地曲目上选的档位」在下次播网易云时对不上。
   if (s && s.quality) ne.setQuality(s.quality);
+  if (s && (s.closeAction === 'tray' || s.closeAction === 'exit')) cachedCloseAction = s.closeAction;
   return true;
 });
 
+ipcMain.on('playpos:set', (_e, pos) => {
+  const clean = (pos && typeof pos === 'object' && typeof pos.id === 'string' && pos.id)
+    ? { id: pos.id, t: Number(pos.t) || 0, at: Number(pos.at) || Date.now() }
+    : null;
+  writeJSONAsync(playPosPath, clean, false);
+});
+
 ipcMain.handle('library:get', () => readJSON(libraryPath, []));
-ipcMain.handle('library:set', (_e, list) => {
+ipcMain.handle('library:set', async (_e, list) => {
   if (!Array.isArray(list)) return false;
-  writeJSON(libraryPath, list.map(({ cover, ...rest }) => rest));
+  await writeJSONAsync(libraryPath, list.map(({ cover, ...rest }) => rest), false);
   return true;
 });
 
 /* 关窗前的最后一笔：renderer 用 send 发来，主进程保证落盘（200ms 防抖窗口内的改动不会丢） */
 ipcMain.on('settings:set-sync', (_e, s) => {
   if (s && typeof s === 'object') {
-    writeJSON(settingsPath, { ...DEFAULT_SETTINGS, ...s });
+    writeJSON(settingsPath, { ...DEFAULT_SETTINGS, ...s }, true);
+    if (s.playPos && typeof s.playPos === 'object' && s.playPos.id) {
+      writeJSON(playPosPath, { id: s.playPos.id, t: Number(s.playPos.t) || 0, at: Number(s.playPos.at) || Date.now() }, false);
+    } else if (s.playPos === null) {
+      writeJSON(playPosPath, null, false);
+    }
     if (s.quality) ne.setQuality(s.quality);
+    if (s.closeAction === 'tray' || s.closeAction === 'exit') cachedCloseAction = s.closeAction;
   }
 });
 ipcMain.on('library:set-sync', (_e, list) => {
-  if (Array.isArray(list)) writeJSON(libraryPath, list.map(({ cover, ...rest }) => rest));
+  if (Array.isArray(list)) writeJSON(libraryPath, list.map(({ cover, ...rest }) => rest), false);
 });
 
 ipcMain.handle('media:url', (_e, file) => {
@@ -1176,7 +1374,7 @@ ipcMain.handle('track:cover', async (_e, file) => {
  */
 const neErr = e => ({ code: (e && e.code) || 'NE_ERROR', message: String((e && e.message) || e) });
 
-ipcMain.handle('app:version', () => app.getVersion());
+ipcMain.handle('app:version', () => APP_VERSION);
 
 ipcMain.handle('ne:status', async () => {
   if (!ne.hasCookie()) return { hasCookie: false, loggedIn: false, uid: 0 };
@@ -1678,13 +1876,137 @@ ipcMain.handle('idn:set', async (_e, arg) => {
 ipcMain.handle('win:min', () => { if (win && !win.isDestroyed()) win.minimize(); });
 ipcMain.handle('win:max', () => {
   if (!win || win.isDestroyed()) return false;
-  if (win.isFullScreen()) return false;          // 全屏下最大化没有意义，忽略
+  if (win.isFullScreen() || isMini) return false;          // 全屏或迷你模式下最大化没有意义，忽略
   if (win.isMaximized()) win.unmaximize(); else win.maximize();
   return win.isMaximized();
 });
 ipcMain.handle('win:close', () => { if (win && !win.isDestroyed()) win.close(); });
 ipcMain.handle('win:fullscreen', (_e, on) => setFullscreen(!!on));
 ipcMain.handle('win:fullscreen:get', () => !!win && !win.isDestroyed() && win.isFullScreen());
+ipcMain.handle('win:mini', (_e, on) => setMiniMode(!!on));
+ipcMain.handle('win:mini:get', () => isMini);
+ipcMain.on('win:progress', (_e, p) => {
+  if (!p || typeof p !== 'object') { thumbar.setProgress(-1, 'none'); return; }
+  thumbar.setProgress(p.progress, p.mode || 'normal');
+});
+ipcMain.handle('sys:elevation', () => checkElevated());
+ipcMain.handle('tray:info', () => ({ ready: appTray.isReady(), closeAction: cachedCloseAction }));
+
+/* ---------------- 桌面悬浮歌词 IPC ---------------- */
+ipcMain.handle('dlyr:open', (_e, opts) => desktopLyric.open(opts || {}));
+ipcMain.handle('dlyr:close', () => desktopLyric.close());
+ipcMain.handle('dlyr:toggle', (_e, opts) => desktopLyric.toggle(opts || {}));
+ipcMain.handle('dlyr:lock', (_e, on) => desktopLyric.applyLock(!!on));
+ipcMain.handle('dlyr:get', () => desktopLyric.getState());
+ipcMain.on('dlyr:push', (_e, payload) => { desktopLyric.push(payload); });
+ipcMain.on('dlyr:cmd', (_e, cmd) => {
+  if (cmd === 'prev' || cmd === 'toggle' || cmd === 'next') send('player:cmd', cmd);
+});
+
+ipcMain.on('player:state', (_e, st) => {
+  thumbar.updatePlayState(st);
+  appTray.updateState({
+    playing: !!(st && st.playing),
+    title: (st && typeof st.title === 'string') ? st.title.trim() : '',
+    artist: (st && typeof st.artist === 'string') ? st.artist.trim() : ''
+  });
+});
+
+/* ---------------- 检查更新与播放器内更新（GitHub Releases） ---------------- */
+const updater = createUpdater({
+  app,
+  net,
+  shell,
+  userDir,
+  getUpdatesDir: () => path.join(getConfiguredCacheDir(), 'updates'),
+  sendProgress: (p) => send('upd:progress', p),
+  logError: (where, err) => logCrash(where, err)
+});
+ipcMain.handle('upd:check', () => updater.check());
+ipcMain.handle('upd:download', (_e, arg) => updater.download(arg || {}));
+ipcMain.handle('upd:cancel', () => updater.cancel());
+ipcMain.handle('upd:install', (_e, arg) => updater.install(arg || {}));
+ipcMain.handle('upd:open', (_e, url) => updater.openRelease(url));
+ipcMain.handle('upd:reveal', (_e, filePath) => updater.reveal(filePath));
+
+/* ---------------- 软件缓存目录管理（自定义位置 / 体积统计 / 清理） ---------------- */
+async function buildCacheInfo() {
+  const dir = getConfiguredCacheDir();
+  const isCustom = !!configuredCacheDir && path.resolve(configuredCacheDir) !== path.resolve(defaultCacheDir);
+  const pendingRestart = path.resolve(dir) !== path.resolve(startupCacheDir);
+  const stCur = await calcDirStats(dir);
+  const stActive = pendingRestart ? await calcDirStats(startupCacheDir) : { bytes: 0, files: 0 };
+  return {
+    ok: true,
+    dir,
+    activeDir: startupCacheDir,
+    defaultDir: defaultCacheDir,
+    isCustom,
+    pendingRestart,
+    bytes: stCur.bytes + stActive.bytes,
+    files: stCur.files + stActive.files
+  };
+}
+
+async function applyCacheDir(rawDir) {
+  const input = String(rawDir || '').trim();
+  if (!input) {
+    return { ok: false, error: { code: 'CACHE_BAD_DIR', message: '请选择有效的文件夹路径' } };
+  }
+  const resolved = path.resolve(input);
+  try {
+    await fsp.mkdir(resolved, { recursive: true });
+    const probe = path.join(resolved, `.nckik-write-${process.pid}-${Date.now()}.tmp`);
+    await fsp.writeFile(probe, 'ok');
+    await fsp.unlink(probe);
+    await fsp.mkdir(path.join(resolved, 'http'), { recursive: true });
+    await fsp.mkdir(path.join(resolved, 'updates'), { recursive: true });
+  } catch (e) {
+    return { ok: false, error: { code: 'CACHE_NOT_WRITABLE', message: '该目录不可写入：' + ((e && e.message) || e) } };
+  }
+  const sameDefault = resolved.toLowerCase() === path.resolve(defaultCacheDir).toLowerCase();
+  configuredCacheDir = sameDefault ? '' : resolved;
+  await writeJSONAsync(cacheConfigPath, { cacheDir: configuredCacheDir }, true);
+  return buildCacheInfo();
+}
+
+ipcMain.handle('cache:info', () => buildCacheInfo());
+ipcMain.handle('cache:set', (_e, dir) => applyCacheDir(dir));
+ipcMain.handle('cache:pick', async () => {
+  if (!win || win.isDestroyed()) return { ok: false, error: { code: 'CACHE_NO_WIN', message: '窗口不可用' } };
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择缓存保存位置',
+    defaultPath: getConfiguredCacheDir(),
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: true, canceled: true };
+  return applyCacheDir(r.filePaths[0]);
+});
+ipcMain.handle('cache:reset', async () => {
+  configuredCacheDir = '';
+  await writeJSONAsync(cacheConfigPath, { cacheDir: '' }, true);
+  return buildCacheInfo();
+});
+ipcMain.handle('cache:open', async () => {
+  const dir = getConfiguredCacheDir();
+  try { await fsp.mkdir(dir, { recursive: true }); } catch {}
+  const err = await shell.openPath(dir);
+  return err ? { ok: false, error: { code: 'CACHE_OPEN_FAILED', message: err } } : { ok: true, dir };
+});
+ipcMain.handle('cache:clear', async () => {
+  const before = await buildCacheInfo();
+  try { await session.defaultSession.clearCache(); } catch {}
+  try { thumbCache.clear(); } catch {}
+  try { dirCoverCache.clear(); } catch {}
+  try { upCache.clear(); } catch {}
+  const dirs = new Set([path.resolve(getConfiguredCacheDir()), path.resolve(startupCacheDir)]);
+  for (const d of dirs) {
+    await cleanDirContents(path.join(d, 'updates'));
+    await cleanDirContents(path.join(d, 'http'));
+  }
+  const after = await buildCacheInfo();
+  return { ...after, clearedBytes: Math.max(0, before.bytes - after.bytes) };
+});
 
 let keyTable = [];
 ipcMain.handle('keys:register', (_e, list) => {
@@ -1796,11 +2118,24 @@ app.whenReady().then(() => {
     keys: parseBilCookieKeys(savedBil),
     sessdata: bil.sessdataShape()
   });
-  ne.setQuality((readJSON(settingsPath, {}) || {}).quality);   // 上次选的音质同样在首屏就生效
+  const initSt = readJSON(settingsPath, {}) || {};
+  ne.setQuality(initSt.quality);   // 上次选的音质同样在首屏就生效
+  cachedCloseAction = initSt.closeAction === 'tray' ? 'tray' : 'exit';
   setupAccounts();
+  thumbar.detectDark();
+  nativeTheme.on('updated', () => {
+    thumbar.detectDark();
+    thumbar.apply();
+  });
+  appTray.init();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 }).catch(e => logCrash('whenReady', e));
 
+app.on('before-quit', () => {
+  isQuitting = true;
+  desktopLyric.close();
+  appTray.destroy();
+});
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

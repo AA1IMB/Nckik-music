@@ -111,7 +111,7 @@ app.on('browser-window-created', (_e, w) => {
     const asar = path.join(distExe, 'resources', 'app.asar');
     const asarPkg = require('@electron/asar');
     const files = asarPkg.listPackage(asar);
-    ok('字体已随包分发', files.some(f => f.includes('PingFangSC-Medium.ttf')));
+    ok('字体已随包分发', files.some(f => f.includes('PingFangSC-Medium.woff2') || f.includes('PingFangSC-Medium.ttf')));
     const html = asarPkg.extractFile(asar, 'renderer/index.html').toString();
     ok('包内 <title> 已更名', html.includes("Nckik′s music"));
     const exe = fs.readdirSync(distExe).find(f => f.endsWith('.exe') && !f.startsWith('Uninstall'));

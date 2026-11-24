@@ -259,21 +259,35 @@ const chSnap = `(() => {
     const kf = a ? a.effect.getKeyframes().map(k => String(k.opacity)) : [];
     const easing = a ? getComputedStyle(t).animationTimingFunction : '';
     const ops = [];
+    const scales = [];
     const chBefore = S.curCh;
-    for (let k = 0; k < 13; k++) { ops.push(+(+getComputedStyle(t).opacity).toFixed(3)); await new Promise(r => setTimeout(r, 250)); }
+    const readScale = () => {
+      const m = new RegExp('matrix\\\\(([\\\\d.eE+-]+)').exec(getComputedStyle(t).transform || '');
+      return m ? +(+m[1]).toFixed(3) : 1;
+    };
+    for (let k = 0; k < 13; k++) {
+      ops.push(+(+getComputedStyle(t).opacity).toFixed(3));
+      scales.push(readScale());
+      await new Promise(r => setTimeout(r, 250));
+    }
     return {
-      ops, kf, easing,
+      ops, scales, kf, easing,
       min: Math.min(...ops), max: Math.max(...ops),
+      minS: Math.min(...scales), maxS: Math.max(...scales),
       chStable: S.curCh === chBefore,
       pAfter: +(parseFloat(g.style.getPropertyValue('--p')) || 0)
     };
   })()`);
   log('  呼吸采样：' + JSON.stringify(breathe.ops));
+  log('  缩放采样：' + JSON.stringify(breathe.scales));
   log('  关键帧：' + JSON.stringify(breathe.kf) + '  缓动：' + breathe.easing);
   ok('呼吸下限约 0.35', breathe.min <= 0.45, `min=${breathe.min}`);
   ok('呼吸上限约 1（单程 2s 处最亮）', breathe.max >= 0.9, `max=${breathe.max}`);
   ok('opacity 始终在 0.3~1.05 之间（不过冲、不消失）',
     breathe.ops.every(o => o >= 0.3 && o <= 1.05), JSON.stringify(breathe.ops));
+  ok('内层「…」随呼吸柔和缩放（0.88 ↔ 1.14）',
+    breathe.minS <= 0.93 && breathe.maxS >= 1.09 && breathe.scales.every(s => s >= 0.85 && s <= 1.18),
+    `minS=${breathe.minS} maxS=${breathe.maxS}`);
   ok('呼吸不碰填充进度（curCh 不变）', breathe.chStable === true);
 
   /* 匀速：把播放头放在填充窗口的 20% / 50% / 80%，比例应该正好是 20 / 50 / 80。

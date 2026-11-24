@@ -1,10 +1,9 @@
 @font-face {
   font-family: "PingFang";
-  src: url("../assets/fonts/PingFangSC-Medium.ttf") format("truetype");
+  src: url("../assets/fonts/PingFangSC-Medium.woff2") format("woff2");
   font-weight: 100 900;
-  /* swap 而不是 block：字体文件 11MB，万一缺失/损坏，block 会让整个界面
-   * 有最多 3 秒「有布局没文字」。swap 先显示系统字体、加载完再换，
-   * 任何情况下文字都看得见；本地字体通常在首帧前就到，肉眼看不到跳变。 */
+  /* swap 而不是 block：万一字体缺失/损坏，先显示系统字体、加载完再换；
+   * 改为 woff2 后体积大幅缩减，首帧加载与安装包体积同步优化。 */
   font-display: swap;
 }
 
@@ -278,7 +277,12 @@ body.fs-swap .stage {
   white-space: pre-wrap;
   filter: blur(1.2px);
   opacity: .58;
+  cursor: pointer;
   transition: filter .5s var(--ease), opacity .5s var(--ease), font-size .4s var(--ease);
+}
+.ln:hover:not(.on) {
+  filter: blur(.4px);
+  opacity: .84;
 }
 /* 原文（含「…」）的盒子：宽度贴合文字本身，所以 .gap 的 left:100% 永远落在句末 */
 .ln .ln-tx {
@@ -329,19 +333,20 @@ body.fs-swap .stage {
 body.no-tr .ln .tr { display: none; }
 
 /* 空档里的「…」现在算「这一句的延长」：它有真实进度，跟着填充条匀速被填满，
- * 再渐隐收在下一句开口的位置。节奏全在 JS 里按时间轴算 ——
- * 也就没有放大缩小的脉冲，也不加 transition（逐帧写更跟手，seek 后立刻对）。
+ * 再渐隐收在下一句开口的位置。
  *
- * 分两层是为了把「呼吸」和「进度」彻底解耦：
- *   外层 .gap   —— JS 每帧写 opacity（入场 / 渐隐），并在它上面写 --p；
- *   内层 .gap-t —— 只有 CSS 关键帧在改 opacity，JS 完全不碰。
- * 两层 opacity 相乘，呼吸叠在渐隐之上，谁也不会把谁覆盖掉。 */
+ * 分两层是为了把「呼吸缩放」和「进度渐隐」彻底解耦：
+ *   外层 .gap   —— JS 每帧写 opacity（入场 / 渐隐），并在它上面写 --p，不做缩放；
+ *   内层 .gap-t —— 只有 CSS 关键帧在改 opacity 与柔和的放大缩小（transform: scale），JS 完全不碰。
+ * 两层叠加，慢速呼吸缩放自然地叠在进度渐隐之上，互不干扰。 */
 .ln .gap {
   --p: 0%;
-  /* 呼吸参数：单程 = cycle / 2；调这里就够，不用动 JS */
-  --gap-breathe-cycle: 4s;   /* 完整周期；单程 2s，整周期 4s */
+  /* 呼吸缩放参数：单程 = cycle / 2；4s 整周期（2s 缓放大 + 2s 缓缩小），自然放松 */
+  --gap-breathe-cycle: 4s;
   --gap-breathe-min: .35;    /* 呼吸最暗处 */
   --gap-breathe-max: 1;      /* 呼吸最亮处 */
+  --gap-scale-min: .88;      /* 舒缓缩小下限 */
+  --gap-scale-max: 1.14;     /* 舒缓放大上限 */
   position: absolute;
   left: 100%;
   top: 0;
@@ -353,6 +358,7 @@ body.no-tr .ln .tr { display: none; }
   --lc1: var(--acInk, #fff);
   --lc2: var(--fg);
   display: inline-block;
+  transform-origin: left 62%;
   background-image: linear-gradient(90deg, var(--lc1) 0 var(--p), var(--lc2) var(--p) 100%);
   -webkit-background-clip: text;
   background-clip: text;
@@ -361,15 +367,22 @@ body.no-tr .ln .tr { display: none; }
 /* 只有空档真的在演的时候才挂 .ongap：一首歌上百行歌词，不能让每行的「…」
  * 都常驻一条永不结束的动画（哪怕不可见，也要占合成器的时间）。 */
 .ln .gap.ongap .gap-t {
+  will-change: transform, opacity;
   animation: gapBreathe var(--gap-breathe-cycle) cubic-bezier(.37, 0, .63, 1) infinite;
 }
-/* 0.35 ↔ 1 的正弦式呼吸：单程 2s、整周期 4s，慢了不闪、快了不闷 */
+/* 0.35 ↔ 1 亮度与 0.88 ↔ 1.14 缩放同步的正弦式慢呼吸：单程 2s、整周期 4s，自然放松 */
 @keyframes gapBreathe {
-  0%, 100% { opacity: var(--gap-breathe-min); }
-  50%      { opacity: var(--gap-breathe-max); }
+  0%, 100% {
+    opacity: var(--gap-breathe-min);
+    transform: scale(var(--gap-scale-min));
+  }
+  50% {
+    opacity: var(--gap-breathe-max);
+    transform: scale(var(--gap-scale-max));
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ln .gap.ongap .gap-t { animation: none; opacity: var(--gap-breathe-max); }
+  .ln .gap.ongap .gap-t { animation: none; opacity: var(--gap-breathe-max); transform: none; }
 }
 
 .lyr-empty {
@@ -413,6 +426,14 @@ body.no-tr .ln .tr { display: none; }
   opacity: 0; pointer-events: none; transition: opacity .15s;
 }
 .scrub:hover .bub, .scrub.scrubbing .bub { opacity: 1; }
+/* 进度条两端常驻起止时间：绝对定位在进度条下方空隙内，不改变 .scrub 高度也不推走按钮行 */
+.stime {
+  position: absolute; left: 0; right: 0; top: 15px;
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 10.5px; line-height: 1; letter-spacing: .2px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg3); opacity: .78; pointer-events: none; user-select: none;
+}
 
 .row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
 .side { display: flex; align-items: center; gap: 4px; }
@@ -751,6 +772,7 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .dr-sub { font-size: 11px; color: var(--fg3); margin: 4px 0 10px; letter-spacing: .3px; }
 
 .list { display: flex; flex-direction: column; gap: 2px; }
+.lib-pad { width: 100%; flex: none; pointer-events: none; }
 .item {
   display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 11px;
   cursor: pointer; transition: background .15s;
@@ -1018,3 +1040,214 @@ input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
 .acc-coming { padding: 14px 2px 6px; display: flex; flex-direction: column; gap: 6px; }
 .acc-coming-t { font-size: 13px; color: var(--fg2); letter-spacing: .6px; }
 .acc-coming small { font-size: 11px; color: var(--fg3); line-height: 1.7; }
+
+/* ---------------- 软件更新（设置页 · 关于） ---------------- */
+#btnSet { position: relative; }
+#btnSet.has-upd::after {
+  content: ''; position: absolute; top: 5px; right: 5px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ac); box-shadow: 0 0 0 2px var(--base);
+}
+#updState.ok { color: #46c489; }
+#updState.new { color: var(--ac); font-weight: 600; }
+#updState.err { color: #ef7d6b; }
+.upd-notes {
+  max-height: 112px; overflow-y: auto; scrollbar-width: thin;
+  padding: 8px 10px; border-radius: 9px;
+  background: var(--base); border: .5px solid var(--line);
+  font-size: 11.5px; line-height: 1.55; color: var(--fg2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.upd-prog { display: flex; flex-direction: column; gap: 5px; }
+.upd-prog[hidden], .upd-notes[hidden], .ghost[hidden] { display: none; }
+.upd-bar {
+  height: 5px; border-radius: 3px; overflow: hidden;
+  background: var(--track);
+}
+.upd-bar i {
+  display: block; height: 100%; width: 0%;
+  background: var(--ac); border-radius: 3px;
+  transition: width .12s linear;
+}
+.upd-ptxt {
+  font-size: 11px; color: var(--fg3); text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.ghost.upd-pri {
+  background: color-mix(in srgb, var(--ac) 18%, var(--card));
+  border-color: color-mix(in srgb, var(--ac) 42%, var(--panelBd));
+  color: var(--fg);
+}
+.ghost.upd-pri:hover {
+  background: color-mix(in srgb, var(--ac) 28%, var(--card));
+}
+
+/* ---------------- 歌词时间微调浮层 ---------------- */
+.lyr-tools {
+  position: absolute; right: 2px; bottom: 10px; z-index: 6;
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 3px; border-radius: 10px;
+  background: var(--panel); backdrop-filter: blur(22px) saturate(160%);
+  border: .5px solid var(--panelBd);
+  opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity .22s var(--ease), transform .22s var(--ease);
+}
+.lyrcol:hover .lyr-tools.show,
+.lyr-tools.show:focus-within {
+  opacity: 1; pointer-events: auto; transform: translateY(0);
+}
+.lyr-tools.show.shifted {
+  opacity: .72; pointer-events: auto; transform: translateY(0);
+}
+.lyr-tools.show.shifted:hover { opacity: 1; }
+.lyr-tools button {
+  border: 0; background: none; color: var(--fg2);
+  font: inherit; font-size: 11px; line-height: 1;
+  font-variant-numeric: tabular-nums;
+  padding: 5px 7px; border-radius: 7px; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.lyr-tools button:hover { background: var(--cardHover); color: var(--fg); }
+.lyr-tools .lyr-off { min-width: 40px; text-align: center; color: var(--fg3); }
+.lyr-tools.shifted .lyr-off { color: var(--acInk, var(--ac)); font-weight: 500; }
+
+/* ---------------- 设置抽屉顶部锚点导航与缓存目录 ---------------- */
+.set-nav {
+  position: sticky; top: 0; z-index: 8;
+  display: flex; gap: 4px; padding: 4px; margin: 0 -4px 6px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--base));
+  backdrop-filter: blur(22px) saturate(160%);
+  border: .5px solid var(--line);
+}
+.set-nav button {
+  flex: 1 1 0; border: 0; background: none; color: var(--fg3);
+  font: inherit; font-size: 11.5px; padding: 6px 0; border-radius: 7px;
+  cursor: pointer; transition: background .16s, color .16s;
+}
+.set-nav button:hover { color: var(--fg); background: var(--card); }
+.set-nav button.on { color: var(--fg); background: var(--cardHover); }
+#dSet .lbl { scroll-margin-top: 48px; }
+.cache-path {
+  padding: 8px 10px; border-radius: 9px;
+  background: var(--base); border: .5px solid var(--line);
+  font: 11px/1.5 ui-monospace, Consolas, monospace;
+  color: var(--fg2); word-break: break-all;
+}
+.cache-acts .ghost.mini { width: 52px; }
+
+/* ---------------- P2: 焦点可访问性、省电低动效、睡眠定时、迷你模式 ---------------- */
+button:focus-visible,
+.sw:focus-visible,
+.seg b:focus-visible,
+input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ac, #8ab4ff) 78%, var(--fg));
+  outline-offset: 2px;
+}
+
+/* 省电 / 低动效模式：去掉非当前句模糊和大半径玻璃滤镜，减轻集显与高分屏 GPU 合成负担 */
+body.low-motion .ln { filter: none; transition: opacity .2s ease; }
+body.low-motion .ln:not(.on) { opacity: .44; }
+body.low-motion .ln:hover:not(.on) { filter: none; opacity: .76; }
+body.low-motion .drawer,
+body.low-motion .pop,
+body.low-motion .set-nav,
+body.low-motion .lyr-tools,
+body.low-motion .idn-pop {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.seg.compact { flex: none; width: 118px; padding: 2px; border-radius: 9px; }
+.seg.compact b { font-size: 11.5px; padding: 5px 0; border-radius: 7px; }
+.line .v.err { color: #ef7d6b; }
+.line[hidden] { display: none; }
+
+.sleep-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.sleep-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.sleep-chip {
+  border: .5px solid var(--line); border-radius: 8px; background: var(--base);
+  color: var(--fg2); font: inherit; font-size: 11.5px; padding: 5px 10px;
+  cursor: pointer; transition: background .15s, color .15s, border-color .15s;
+}
+.sleep-chip:hover { background: var(--cardHover); color: var(--fg); }
+.sleep-chip.on {
+  background: color-mix(in srgb, var(--ac, #8ab4ff) 18%, var(--cardHover));
+  border-color: color-mix(in srgb, var(--ac, #8ab4ff) 44%, var(--panelBd));
+  color: var(--fg);
+}
+
+/* 紧凑迷你模式（384×116 精简置顶浮窗） */
+.mini-shell {
+  display: none;
+  position: fixed; inset: 0; z-index: 80;
+  align-items: center; gap: 12px;
+  padding: 12px 12px 15px;
+  background: radial-gradient(circle at 12% 50%, color-mix(in srgb, var(--ac, #5b5b66) 28%, var(--base)), var(--base) 68%);
+  color: var(--fg);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+body.mini .app,
+body.mini .drawer,
+body.mini .pop,
+body.mini .scrim,
+body.mini .idn-pop,
+body.mini .fs-exit { display: none !important; }
+body.mini .mini-shell { display: flex; }
+
+.mini-cov {
+  position: relative; width: 76px; height: 76px; border-radius: 12px; flex: none;
+  overflow: hidden; background: var(--card); border: .5px solid var(--panelBd);
+  display: grid; place-items: center; color: var(--fg3); font-size: 22px;
+  -webkit-app-region: no-drag; cursor: pointer;
+}
+.mini-cov img {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: none;
+}
+.mini-cov.art img { display: block; }
+.mini-cov.art span { display: none; }
+
+.mini-info {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; justify-content: center; gap: 3px;
+}
+.mini-t {
+  font-size: 13.5px; font-weight: 500; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mini-s {
+  font-size: 11px; color: var(--fg2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mini-ctrls {
+  display: flex; align-items: center; gap: 6px; margin-top: 5px;
+  -webkit-app-region: no-drag;
+}
+.mbtn {
+  width: 30px; height: 30px; border: 0; border-radius: 10px;
+  background: none; color: var(--ctl); display: grid; place-items: center;
+  cursor: pointer; transition: background .15s, color .15s, transform .15s;
+}
+.mbtn:hover { background: var(--cardHover); color: var(--fg); }
+.mbtn:active { transform: scale(.92); }
+.mbtn svg { width: 16px; height: 16px; }
+.mbtn.big { width: 34px; height: 34px; border-radius: 17px; background: var(--card); }
+.mbtn.big:hover { background: var(--cardHover); }
+.mbtn.sm { width: 26px; height: 26px; border-radius: 8px; }
+.mbtn.sm svg { width: 13px; height: 13px; }
+.mbtn.cls:hover { background: rgba(232, 62, 62, .85); color: #fff; }
+
+.mini-acts {
+  align-self: flex-start; display: flex; flex-direction: column; gap: 4px;
+  -webkit-app-region: no-drag;
+}
+.mini-prog {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 3px;
+  background: var(--track); pointer-events: none;
+}
+.mini-prog i {
+  display: block; height: 100%; width: 100%;
+  background: var(--acInk, var(--ac, #8ab4ff));
+  transform-origin: 0 50%; transform: scaleX(0);
+}
