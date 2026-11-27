@@ -157,10 +157,19 @@ async function kgResolve(hash, prefer, cred, upstreamBase, upstreamCookie) {
 
 /* ---------- QQ 音乐 ---------- */
 
-const QQ_FILES = [
-  { prefix: 'M800', ext: '.mp3', quality: '320k' },
-  { prefix: 'M500', ext: '.mp3', quality: '128k' }
-];
+const QQ_TIERS = {
+  lossless: { prefix: 'F000', ext: '.flac', quality: 'FLAC', codec: 'FLAC', bitrate: 900000, lossless: true, level: 'lossless', maxTunes: 2 },
+  exhigh:   { prefix: 'M800', ext: '.mp3',  quality: '320k', codec: 'MP3',  bitrate: 320000, lossless: false, level: 'exhigh' },
+  standard: { prefix: 'M500', ext: '.mp3',  quality: '128k', codec: 'MP3',  bitrate: 128000, lossless: false, level: 'standard' }
+};
+
+function qqFilesForQuality(prefer) {
+  const q = String(prefer || 'exhigh').toLowerCase();
+  if (q === 'lossless') return [QQ_TIERS.lossless, QQ_TIERS.exhigh, QQ_TIERS.standard];
+  if (q === 'standard') return [QQ_TIERS.standard];
+  // higher / exhigh / high：优先 320k MP3，无权限自动回退 128k MP3
+  return [QQ_TIERS.exhigh, QQ_TIERS.standard];
+}
 
 function qqComm(cred) {
   return {
@@ -203,18 +212,23 @@ async function qqVkey(cred, mid, file, tune) {
   const code = (j.req_0 && j.req_0.code) || j.code || 0;
   if (code !== 0) {
     const msg = (j.req_0 && j.req_0.message) || j.message || '';
-    throw fail(code === 1000 || code === 104400 ? 'E_AUTH_REQUIRED' : 'E_UPSTREAM_CODE',
-      `QQ 音乐取流返回 ${code}${msg ? '：' + msg : ''}`);
+    if (code === 1000 || code === 104400) {
+      throw fail('E_AUTH_REQUIRED', `QQ 音乐登录已过期（${code}），请前往「设置 → 播放账号」重新扫码登录`);
+    }
+    throw fail('E_UPSTREAM_CODE', `QQ 音乐取流返回 ${code}${msg ? '：' + msg : ''}`);
   }
   const info = (j.req_0 && j.req_0.data && j.req_0.data.midurlinfo && j.req_0.data.midurlinfo[0]) || {};
   return String(info.purl || '');
 }
 
-async function qqResolve(mid, cred, prefer) {
+async function qqResolve(mid, cred, prefer = 'exhigh') {
   const m = String(mid || '').trim();
   if (!/^[0-9A-Za-z]{10,20}$/.test(m)) throw fail('E_BAD_TRACK', 'QQ 曲目 id 不正确');
   if (!cred || !cred.musickey) throw fail('E_AUTH_REQUIRED', 'QQ 音乐还没有登录');
-  const files = prefer === 'standard' ? [...QQ_FILES].reverse() : QQ_FILES;
+  const reqQ = ['standard', 'higher', 'exhigh', 'lossless'].includes(String(prefer || '').toLowerCase())
+    ? String(prefer).toLowerCase()
+    : 'exhigh';
+  const files = qqFilesForQuality(reqQ);
   /* GetVkey 对 comm 的细节很敏感：不同账号/版本下 uin 该放 comm.qq 还是 param.uin、
    * guid 是否需要与登录一致、platform 给 20 还是 yqq，都可能决定 purl 是否为空。
    * 这里按「最像官方客户端」到「最宽松」的顺序试，命中即返回。 */
@@ -228,7 +242,8 @@ async function qqResolve(mid, cred, prefer) {
   ];
   let lastErr = null;
   for (const f of files) {
-    for (const t of tunes) {
+    const tryList = f.maxTunes ? tunes.slice(0, f.maxTunes) : tunes;
+    for (const t of tryList) {
       try {
         /* filename 必须是「prefix + songmid + media_mid + ext」两段识别值：
          * 只送一段时 vkey server 照样给 purl，但 CDN 会 403/404（folia 的注释也这么写）。 */
@@ -239,7 +254,20 @@ async function qqResolve(mid, cred, prefer) {
         console.log('[qqvkey] ok', JSON.stringify(t), f.prefix, purl.slice(0, 40));
         /* CDN 对未带登录 cookie 的请求会 403/302 到空内容，带上 uin + keyst 最稳 */
         const cookie = `uin=${cred.uin}; qm_keyst=${cred.musickey}; qqmusic_key=${cred.musickey}`;
-        return { url, quality: f.quality, headers: { Referer: 'https://y.qq.com/', 'User-Agent': QQ_UA, Cookie: cookie } };
+        const downgraded = (reqQ === 'lossless' && !f.lossless)
+          || ((reqQ === 'exhigh' || reqQ === 'higher') && f.level === 'standard');
+        return {
+          url,
+          quality: f.quality,
+          codec: f.codec,
+          bitrate: f.bitrate,
+          lossless: f.lossless,
+          level: f.level,
+          requested: reqQ,
+          downgraded,
+          ext: f.ext,
+          headers: { Referer: 'https://y.qq.com/', 'User-Agent': QQ_UA, Cookie: cookie }
+        };
       } catch (e) {
         lastErr = e;
         console.log('[qqvkey] fail', JSON.stringify(t), f.prefix, e.code, String(e.message).slice(0, 60));

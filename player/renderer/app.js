@@ -6,6 +6,53 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const audio = new Audio();
 audio.preload = 'auto';
 
+/* 统一播放后端读写（HTML5 <audio> 与 WASAPI 独占子进程共用） */
+const isLocalFile = k => !!k && !isNet(k) && !isBil(k) && !/^(kg|qq):/.test(String(k.path || ''));
+const isExclEligible = k => !!k && (isLocalFile(k) || isNet(k) || isBil(k) || /^(kg|qq):/.test(String(k.path || '')));
+const shouldUseExclusive = k => !!(S.settings && S.settings.usbExclusive && isExclEligible(k) && window.api && window.api.exclLoad);
+const pbTime = () => (S.excl && S.excl.active ? (Number(S.excl.pos) || 0) : (audio.currentTime || 0));
+const pbDuration = () => (S.excl && S.excl.active
+  ? (Number(S.excl.dur) || 0)
+  : (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0));
+const pbPaused = () => (S.excl && S.excl.active ? !S.excl.playing : audio.paused);
+
+function pbSeek(sec) {
+  const dur = pbDuration();
+  const target = dur > 0 ? clamp(Number(sec) || 0, 0, dur) : Math.max(0, Number(sec) || 0);
+  if (S.excl && S.excl.active) {
+    S.excl.pos = target;
+    syncClock();
+    renderFrameOnce();
+    if (window.api && window.api.exclSeek) {
+      window.api.exclSeek(target).then(r => {
+        if (r && r.ok && Number.isFinite(Number(r.pos))) {
+          S.excl.pos = Number(r.pos);
+          syncClock();
+          renderFrameOnce();
+        }
+      }).catch(() => {});
+    }
+    return;
+  }
+  try { audio.currentTime = target; } catch {}
+}
+
+function deactivateExclusive(stopNative = true) {
+  if (!S.excl) return;
+  const was = S.excl.active;
+  S.excl.active = false;
+  S.excl.playing = false;
+  S.excl.pos = 0;
+  S.excl.dur = 0;
+  S.excl.info = null;
+  S.excl.queuedKey = '';
+  S.excl.queuedIndex = -1;
+  S.excl.queuedCompatible = false;
+  if (stopNative && was && window.api && window.api.exclStop) {
+    window.api.exclStop().catch(() => {});
+  }
+}
+
 const S = {
   tracks: [],                       // 曲库（素材库）：导入/搜索得到的曲目，不决定播放顺序
   libIndex: new Map(),              // path -> track，队列解析用 O(1) 定位
@@ -35,6 +82,7 @@ const S = {
   hist: [],
   libDirty: false,
   prefetchedFor: '',
+  excl: { active: false, playing: false, pos: 0, dur: 0, info: null, devices: [], deviceName: '', queuedKey: '', queuedIndex: -1, queuedCompatible: false },
   srcMode: 'local',                 // 曲库抽屉的音轨：local / net / bil
   ne: {
     items: [], busy: false, err: '', loggedIn: false, nick: '', seq: 0,
@@ -1039,10 +1087,10 @@ function renderLyrics() {
       d.appendChild(tr);
     }
     d.addEventListener('click', () => {
-      if (!audio.src && !curTrack()) return;
+      if (!audio.src && !(S.excl && S.excl.active) && !curTrack()) return;
       const target = Math.max(0, l.t - curLyricOffset());
-      const dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : target;
-      try { audio.currentTime = clamp(target, 0, Math.max(dur, target)); } catch {}
+      const dur = pbDuration() || target;
+      pbSeek(clamp(target, 0, Math.max(dur, target)));
       syncClock();
       renderFrameOnce();
     });
@@ -1052,7 +1100,7 @@ function renderLyrics() {
   box.appendChild(frag);
 }
 
-function currentLineIndex(t = audio.currentTime) {
+function currentLineIndex(t = pbTime()) {
   const arr = S.lyrics;
   let lo = 0, hi = arr.length - 1, idx = -1;
   while (lo <= hi) {                 // 二分，长歌词也不至于每帧线性扫
@@ -1205,7 +1253,7 @@ function hideGap() {
 
 /* t 由播放时钟传入，不再取 audio.currentTime —— 后者只有 ~4Hz，逐帧插值才顺滑 */
 function updateLyric(t) {
-  if (t == null) t = audio.currentTime;
+  if (t == null) t = pbTime();
   if (!S.lyrics.length || !S.lnNodes.length) return;
   const lt = t + curLyricOffset();
   const i = currentLineIndex(lt);
@@ -1369,24 +1417,46 @@ const QUALITY_LIST = [
 const QUALITY_NAME = QUALITY_LIST.reduce((m, q) => (m[q.k] = q.name, m), {});
 const curQuality = () => (QUALITY_NAME[S.settings && S.settings.quality] ? S.settings.quality : 'exhigh');
 
+/* 统一多音源音质注册表（与主进程 QUALITY_PROVIDERS 对齐，后续新音源只需注册一次） */
+const QUALITY_SOURCES = [
+  { id: 'netease', label: '网易云', match: k => isNet(k) },
+  { id: 'qqapp',   label: 'QQ 音乐', match: k => !!k && /^qq:/.test(String(k.path || '')) },
+  { id: 'kugou',   label: '酷狗',    match: k => !!k && /^kg:/.test(String(k.path || '')) }
+];
+function registerQualitySource(def) {
+  if (!def || !def.id || typeof def.match !== 'function') return;
+  const idx = QUALITY_SOURCES.findIndex(s => s.id === def.id);
+  if (idx >= 0) QUALITY_SOURCES[idx] = def;
+  else QUALITY_SOURCES.push(def);
+}
+window.registerQualitySource = registerQualitySource;
+const qualitySourceOf = k => (k ? QUALITY_SOURCES.find(s => s.match(k)) || null : null);
+const trackSourceLabel = k => {
+  const qs = qualitySourceOf(k);
+  if (qs) return qs.label;
+  if (isBil(k)) return '哔哩哔哩';
+  return '本地文件';
+};
+
 function renderFmtPopover() {
   renderQualityList();
   const k = curTrack();
   const note = $('#fmtNote');
   if (!k) {
     $('#fmtList').innerHTML = '';
-    if (note) note.textContent = '选一个档位，之后播放的网易云曲目按它解析；本地文件不受影响。';
+    if (note) note.textContent = '选一个档位，之后播放的在线曲目（网易云 / QQ 音乐等）按它解析；本地文件不受影响。';
     return;
   }
 
-  const rows = [['来源', isNet(k) ? '网易云' : '本地文件']];
-  if (isNet(k)) {
+  const qs = qualitySourceOf(k);
+  const rows = [['来源', trackSourceLabel(k)]];
+  if (qs) {
     rows.push(['请求音质', QUALITY_NAME[curQuality()]]);
     rows.push(['实际码率', k.bitrate ? `${Math.round(k.bitrate / 1000)} kbps` : '—']);
     rows.push(['编码', k.codec || '—']);
     rows.push(['是否无损', k.lossless ? '是' : '否']);
   } else {
-    // 网易云接口不回采样率/位深，与其显示两行「—」，不如本地文件才列这两项
+    // 只有本地文件展示原始采样率/位深元数据
     rows.push(['编码', k.codec || '—']);
     rows.push(['采样率', k.sampleRate ? `${k.sampleRate} Hz` : '—']);
     rows.push(['位深', k.bitDepth ? `${k.bitDepth} bit` : '—']);
@@ -1395,6 +1465,24 @@ function renderFmtPopover() {
   }
   rows.push(['时长', k.duration ? fmt(k.duration) : '未知']);
   rows.push(['歌词', S.lyricSrc || '无']);
+  if (S.excl && S.excl.active && S.excl.info) {
+    const xi = S.excl.info;
+    rows.push(['输出链路', `WASAPI 独占（${xi.driverMode === 'timer' ? '定时' : '事件驱动'}）`]);
+    const hwText = `${xi.hwRate} Hz · ${xi.hwBits} bit`
+      + (xi.hwContainerBits && xi.hwContainerBits !== xi.hwBits ? `（${xi.hwContainerBits}bit 容器）` : '');
+    rows.push(['硬件输出', hwText]);
+    const bpText = xi.bitPerfect
+      ? (xi.hwVolumeAvailable ? '是（100% 旁路 · 支持系统/DAC 硬件调音）' : '是（100% 旁路）')
+      : (xi.volumeMode === 'software' || S.settings.muted || S.settings.volume < 0.999
+          ? '否（软件音量衰减中，调至 100% 可直通）'
+          : (xi.srcLossy ? '否（有损音源）' : '否（设备格式适配）'));
+    rows.push(['位完美直通', bpText]);
+    if (S.settings && S.settings.gapless) {
+      rows.push(['无缝衔接', S.excl.queuedCompatible ? '已就绪（下一首已预载）' : '已开启（等待同采样率预载）']);
+    }
+  } else if (S.settings && S.settings.usbExclusive && isExclEligible(k)) {
+    rows.push(['输出链路', '系统混音（已自动回退）']);
+  }
   if (k.error) rows.push(['元数据', '解析失败']);
   if (k.unavailable) rows.push(['状态', k.unavailable]);
 
@@ -1403,10 +1491,12 @@ function renderFmtPopover() {
     .join('');
 
   if (note) {
-    note.textContent = !isNet(k)
-      ? '本地文件按文件本身播放，音质档位只作用于网易云曲目。'
+    note.textContent = !qs
+      ? (isBil(k)
+          ? '哔哩哔哩曲目按视频原音轨播放，音质档位仅作用于支持分档的在线音源。'
+          : '本地文件按文件本身播放，音质档位作用于网易云 / QQ 音乐等在线曲目。')
       : k.downgraded
-        ? `账号没有「${QUALITY_NAME[curQuality()]}」权限，已按实际可用的 ${Math.round((k.bitrate || 0) / 1000)} kbps 播放。`
+        ? `账号没有「${QUALITY_NAME[curQuality()]}」权限，已按实际可用的 ${k.lossless && k.codec === 'FLAC' ? 'FLAC 无损' : `${Math.round((k.bitrate || 0) / 1000)} kbps`} 播放。`
         : '显示的是接口实际返回的码率与格式，不是宣传参数。';
   }
 }
@@ -1433,8 +1523,9 @@ async function setQuality(q) {
   renderFmtPopover();
 
   const k = curTrack();
-  if (!k || !isNet(k)) {
-    toast(`音质：${QUALITY_NAME[next]}` + (k ? ' · 本地文件按原文件播放' : ''));
+  const qs = qualitySourceOf(k);
+  if (!k || !qs) {
+    toast(`音质：${QUALITY_NAME[next]}` + (k ? (isBil(k) ? ' · 哔哩哔哩按原音轨播放' : ' · 本地文件按原文件播放') : ''));
     return;
   }
   await applyQuality(k);
@@ -1443,13 +1534,18 @@ async function setQuality(q) {
 async function applyQuality(k) {
   const seq = ++qualSeq;                 // 连点两档时只认最后一次
   const stillCurrent = () => seq === qualSeq && curTrack() === k;
-  const at = audio.currentTime || 0;
-  const wasPlaying = !audio.paused && !audio.ended;
+  const at = pbTime();
+  const wasPlaying = !pbPaused() && (S.excl.active ? true : !audio.ended);
   const target = curQuality();
 
   let info;
-  try { info = await window.api.neUrl(netIdOf(k), target); }
-  catch (e) { info = { ok: false, error: { message: String((e && e.message) || e) } }; }
+  try {
+    info = (window.api && window.api.resolveQuality)
+      ? await window.api.resolveQuality(k.path, target)
+      : await window.api.neUrl(netIdOf(k), target);
+  } catch (e) {
+    info = { ok: false, error: { message: String((e && e.message) || e) } };
+  }
   if (!stillCurrent()) return;           // 期间切了歌/又换了档，这次结果作废
 
   if (!info || !info.ok) {
@@ -1457,6 +1553,7 @@ async function applyQuality(k) {
     toast('切换音质失败：' + ((info && info.error && info.error.message) || '未知原因'));
     return;
   }
+  if (info.supported === false) return;
 
   k.codec = info.codec || k.codec;
   k.bitrate = info.bitrate || k.bitrate;
@@ -1466,6 +1563,20 @@ async function applyQuality(k) {
   S.libDirty = true;
   paintMeta();
   renderFmtPopover();
+
+  const actualLabel = (info.lossless && String(info.codec || '').toUpperCase() === 'FLAC')
+    ? '无损 FLAC'
+    : `${Math.round((info.bitrate || 0) / 1000)} kbps`;
+
+  if (shouldUseExclusive(k)) {
+    await playAt(S.i, { autoplay: wasPlaying, seekTo: at });
+    if (!stillCurrent()) return;
+    paintMeta();
+    toast(info.downgraded
+      ? `已切到${QUALITY_NAME[target]} · 账号只能取到 ${actualLabel}`
+      : `音质：${QUALITY_NAME[target]} · ${actualLabel}`);
+    return;
+  }
 
   const url = await window.api.mediaUrl(k.path);
   if (!stillCurrent()) return;
@@ -1485,8 +1596,8 @@ async function applyQuality(k) {
   paintMeta();
 
   toast(info.downgraded
-    ? `已切到${QUALITY_NAME[target]} · 账号只能取到 ${Math.round((info.bitrate || 0) / 1000)} kbps`
-    : `音质：${QUALITY_NAME[target]} · ${Math.round((info.bitrate || 0) / 1000)} kbps`);
+    ? `已切到${QUALITY_NAME[target]} · 账号只能取到 ${actualLabel}`
+    : `音质：${QUALITY_NAME[target]} · ${actualLabel}`);
 }
 
 const esc = s => String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -3782,6 +3893,28 @@ async function playAt(qi, opts) {
     }
     if (info.cid) patchBilCid(qi, k, info.cid);
     k.unavailable = '';
+  } else if (qualitySourceOf(k) && window.api && window.api.resolveQuality) {
+    /* QQ 音乐 / 酷狗及后续新接入在线音源：播前按当前统一音质档位预解析，
+     * 提前回填真实编码（如 QQ 无损 FLAC）与码率，同时把登录过期（1000）等人话原因直接提示出来。 */
+    try { info = await window.api.resolveQuality(k.path, curQuality()); }
+    catch (e) { info = { ok: false, error: { code: 'E_QUALITY', message: String((e && e.message) || e) } }; }
+    if (seq !== loadSeq) return;
+    if (!info || !info.ok) {
+      const code = (info && info.error && info.error.code) || '';
+      const msg = (info && info.error && info.error.message) || '暂时无法播放';
+      k.unavailable = code === 'E_AUTH_REQUIRED' ? '需重新登录' : msg;
+      if (S.settings.playMode === 'shuffle') markShufFail(k.path);
+      toast(`无法播放：${k.title}（${msg}）`, 3600);
+      if (code !== 'E_AUTH_REQUIRED' && S.q.length > 1 && errStreak < 3) {
+        errStreak++;
+        const ni = stepIndex(1, qi);
+        if (ni >= 0) playAt(ni);
+      } else if (S.i === qi) {
+        paintMeta();
+      }
+      return;
+    }
+    k.unavailable = '';
   }
 
   S.i = qi;
@@ -3801,7 +3934,7 @@ async function playAt(qi, opts) {
   paintMeta();
   markCurrent();
 
-  if (net || bilT) {
+  if ((net || bilT || qualitySourceOf(k)) && info && info.ok) {
     if (info.codec) k.codec = info.codec;
     if (info.bitrate) k.bitrate = info.bitrate;
     if (typeof info.lossless === 'boolean') k.lossless = info.lossless;
@@ -3811,53 +3944,124 @@ async function playAt(qi, opts) {
     paintMeta();
   }
 
-  const url = await window.api.mediaUrl(k.path);
-  if (seq !== loadSeq) return;
-
-  audio.src = url;
-  audio.load();
-  prevPct = -1;
-  prevSec = -1;
-  prevDurSec = -1;
-  renderFrameOnce();
-  audio.volume = S.settings.volume;
-  audio.muted = !!S.settings.muted;
-  if (!autoplay) {
-    /* 恢复上次进度：只把播放头摆好，不出声。seek 必须等元数据到位，
-     * 否则 currentTime 会被浏览器丢掉（duration 还是 NaN）。 */
-    S.playing = false;
-    syncPlayIcon();
-    const seekTo = opts && Number(opts.seekTo);
-    if (Number.isFinite(seekTo) && seekTo > 0) {
-      const apply = () => {
-        try { audio.currentTime = Math.min(seekTo, Math.max(0, (audio.duration || 0) - 0.5)); } catch {}
-        syncClock();
-        updateLyric();
-      };
-      if (audio.readyState >= 1) apply();
-      else audio.addEventListener('loadedmetadata', apply, { once: true });
-    }
-  } else try {
-    await playGuarded();
-    if (seq !== loadSeq) return;
-  } catch (e) {
-    if (seq !== loadSeq || e.name === 'AbortError') return;   // 被自己人打断，不是错误
-    if (e.name === 'TimeoutError') {
-      /* 卡住了：先停下这次加载（下面的 src 变更也会中止它），再按「跳过并提示」处理。
-       * 不这么做的话就一直停在「正在加载封面…」，用户只能重启软件。 */
-      audio.pause();
-      toast(`加载超时，已跳过：${k.title || '该曲目'}`);
-      if (S.q.length > 1 && errStreak < 3) {
-        errStreak++;
-        const ni = stepIndex(1, qi);
-        if (ni >= 0) return playAt(ni);
+  let usedExcl = false;
+  if (!(opts && opts.forceShared) && shouldUseExclusive(k)) {
+    try { audio.pause(); audio.removeAttribute('src'); } catch {}
+    const seekToVal = opts && Number.isFinite(Number(opts.seekTo)) && Number(opts.seekTo) > 0 ? Number(opts.seekTo) : 0;
+    let exclPath = k.path;
+    let er = null;
+    if (!isLocalFile(k)) {
+      if (window.api && window.api.exclStreamUrl) {
+        try {
+          const sr = await window.api.exclStreamUrl(k.path, k.codec || '');
+          if (sr && sr.ok && sr.url) exclPath = sr.url;
+          else er = { ok: false, code: (sr && sr.code) || 'PROXY_ERR', message: (sr && sr.message) || '在线独占流地址获取失败' };
+        } catch (e) {
+          er = { ok: false, code: 'PROXY_ERR', message: String((e && e.message) || e) };
+        }
+      } else {
+        er = { ok: false, code: 'NO_PROXY', message: '未启用在线独占回环代理' };
       }
-      setCoverEmpty('暂无封面', '加载超时 · 换个音质或稍后重试');
-      paintMeta();
-      return;
     }
-    toast('无法播放：' + (k.title || '该曲目')
-      + (net ? '（网易云加载失败）' : `（${k.codec || '未知格式'} 可能不被支持）`));
+    if (seq !== loadSeq) return;
+    if (!er) {
+      try {
+        er = await window.api.exclLoad({
+          path: exclPath,
+          deviceId: S.settings.exclusiveDeviceId || '',
+          volume: S.settings.volume,
+          muted: !!S.settings.muted,
+          autoplay,
+          seekTo: seekToVal
+        });
+      } catch (e) {
+        er = { ok: false, code: 'IPC_ERR', message: String((e && e.message) || e) };
+      }
+    }
+    if (seq !== loadSeq) return;
+    if (er && er.ok) {
+      usedExcl = true;
+      S.excl.active = true;
+      S.excl.playing = !!autoplay;
+      S.excl.resumeAt = 0;
+      S.excl.queuedKey = '';
+      S.excl.queuedIndex = -1;
+      S.excl.queuedCompatible = false;
+      S.excl.pos = Number.isFinite(Number(er.pos)) ? Number(er.pos) : seekToVal;
+      S.excl.dur = Number(er.duration) || Number(k.duration) || 0;
+      S.excl.info = er;
+      errStreak = 0;
+      clock.stalled = false;
+      prevPct = -1;
+      prevSec = -1;
+      prevDurSec = -1;
+      S.playing = !!autoplay;
+      syncPlayIcon();
+      syncClock();
+      renderFrameOnce();
+      if (autoplay) {
+        startFrame();
+        maybeQueueGaplessNext(false);
+      } else {
+        stopFrame();
+      }
+    } else {
+      deactivateExclusive(false);
+      toast(((er && er.message) || '独占模式启动失败') + '，已回退系统混音', 3200);
+    }
+  } else {
+    deactivateExclusive(true);
+  }
+
+  if (!usedExcl) {
+    const url = await window.api.mediaUrl(k.path);
+    if (seq !== loadSeq) return;
+
+    audio.src = url;
+    audio.load();
+    prevPct = -1;
+    prevSec = -1;
+    prevDurSec = -1;
+    renderFrameOnce();
+    audio.volume = S.settings.volume;
+    audio.muted = !!S.settings.muted;
+    if (!autoplay) {
+      /* 恢复上次进度：只把播放头摆好，不出声。seek 必须等元数据到位，
+       * 否则 currentTime 会被浏览器丢掉（duration 还是 NaN）。 */
+      S.playing = false;
+      syncPlayIcon();
+      const seekTo = opts && Number(opts.seekTo);
+      if (Number.isFinite(seekTo) && seekTo > 0) {
+        const apply = () => {
+          try { audio.currentTime = Math.min(seekTo, Math.max(0, (audio.duration || 0) - 0.5)); } catch {}
+          syncClock();
+          updateLyric();
+        };
+        if (audio.readyState >= 1) apply();
+        else audio.addEventListener('loadedmetadata', apply, { once: true });
+      }
+    } else try {
+      await playGuarded();
+      if (seq !== loadSeq) return;
+    } catch (e) {
+      if (seq !== loadSeq || e.name === 'AbortError') return;   // 被自己人打断，不是错误
+      if (e.name === 'TimeoutError') {
+        /* 卡住了：先停下这次加载（下面的 src 变更也会中止它），再按「跳过并提示」处理。
+         * 不这么做的话就一直停在「正在加载封面…」，用户只能重启软件。 */
+        audio.pause();
+        toast(`加载超时，已跳过：${k.title || '该曲目'}`);
+        if (S.q.length > 1 && errStreak < 3) {
+          errStreak++;
+          const ni = stepIndex(1, qi);
+          if (ni >= 0) return playAt(ni);
+        }
+        setCoverEmpty('暂无封面', '加载超时 · 换个音质或稍后重试');
+        paintMeta();
+        return;
+      }
+      toast('无法播放：' + (k.title || '该曲目')
+        + (net ? '（网易云加载失败）' : `（${k.codec || '未知格式'} 可能不被支持）`));
+    }
   }
 
   // 封面 + 主色（每步都要确认自己还是"当前"的那次请求）
@@ -3926,7 +4130,7 @@ async function playAt(qi, opts) {
     if (S.lyrics.length) setTimeout(() => { if (seq === loadSeq) centerLine(0); }, 60);
     renderFmtPopover();
     const qt = new URLSearchParams(location.search).get('t');
-    if (qt) setTimeout(() => { audio.currentTime = Number(qt); updateLyric(); }, 400);
+    if (qt) setTimeout(() => { pbSeek(Number(qt)); updateLyric(); }, 400);
   } catch {}
 
   if (seq !== loadSeq) return;
@@ -3949,8 +4153,9 @@ function prefetchNext(force = false) {
   const cur = curTrack();
   if (!cur || !cur.path) return false;
   if (!force) {
-    if (!Number.isFinite(audio.duration) || audio.duration < 10) return false;
-    if (audio.duration - audio.currentTime > 18) return false;
+    const dur = pbDuration();
+    if (!dur || dur < 10) return false;
+    if (dur - pbTime() > 18) return false;
   }
   if (S.prefetchedFor === cur.path) return false;
   S.prefetchedFor = cur.path;
@@ -3979,6 +4184,193 @@ function prefetchNext(force = false) {
     window.api.trackDetail(nxt.path).then(d => putPrefetch(detailPrefetch, nxt.path, d)).catch(() => {});
   }
   return true;
+}
+
+/* ---------------- Phase 3：原生双解码缓冲无缝播放（Gapless） ---------------- */
+function clearGaplessQueue() {
+  if (!S.excl) return;
+  S.excl.queuedKey = '';
+  S.excl.queuedIndex = -1;
+  S.excl.queuedCompatible = false;
+  if (window.api && window.api.exclClearNext) {
+    window.api.exclClearNext().catch(() => {});
+  }
+}
+
+async function maybeQueueGaplessNext(force = false) {
+  if (!S.excl || !S.excl.active || !S.settings || !S.settings.usbExclusive || !S.settings.gapless) return false;
+  if (!window.api || !window.api.exclQueueNext) return false;
+  if (window.P2 && window.P2.state && window.P2.state.sleepMode === 'track') {
+    if (S.excl.queuedKey) clearGaplessQueue();
+    return false;
+  }
+  const dur = pbDuration();
+  const remain = dur > 0 ? dur - pbTime() : Infinity;
+  if (!force && !(dur > 0 && (dur < 18 || remain <= 15))) return false;
+
+  let ni = -1;
+  if (S.settings.playMode === 'one') ni = S.i;
+  else if (S.settings.playMode === 'seq') ni = (S.i >= 0 && S.i + 1 < S.q.length) ? S.i + 1 : -1;
+  else return false; // shuffle 保持交由 ended 抽签，不提前改变洗牌池
+
+  const nxt = qTrack(ni);
+  if (!nxt || !nxt.path || !isExclEligible(nxt)) return false;
+
+  const qKey = ni + '|' + nxt.path;
+  if (S.excl.queuedKey === qKey) return true;
+  S.excl.queuedKey = qKey;
+  S.excl.queuedIndex = ni;
+  S.excl.queuedCompatible = false;
+
+  // 顺手提前预热下一首歌词、封面与本地详情，做到零间隙切歌时封面/歌词同步秒出
+  if (!lyricPrefetch.has(nxt.path) && !isBil(nxt) && window.api && window.api.trackLyric) {
+    window.api.trackLyric(nxt.path).then(ly => putPrefetch(lyricPrefetch, nxt.path, ly)).catch(() => {});
+  }
+  if (isLocalFile(nxt) && !detailPrefetch.has(nxt.path) && window.api && window.api.trackDetail) {
+    window.api.trackDetail(nxt.path).then(d => putPrefetch(detailPrefetch, nxt.path, d)).catch(() => {});
+  } else if ((isNet(nxt) || isBil(nxt)) && nxt.coverUrl) {
+    loadArt(nxt).catch(() => {});
+  }
+
+  let targetPath = nxt.path;
+  if (!isLocalFile(nxt)) {
+    if (!window.api.exclStreamUrl) {
+      if (S.excl.queuedKey === qKey) clearGaplessQueue();
+      return false;
+    }
+    const sr = await window.api.exclStreamUrl(nxt.path, nxt.codec || '').catch(() => null);
+    if (!sr || !sr.ok || !sr.url || S.excl.queuedKey !== qKey || !S.excl.active) return false;
+    targetPath = sr.url;
+  }
+
+  const qr = await window.api.exclQueueNext({ path: targetPath, trackId: qKey }).catch(() => null);
+  if (S.excl.queuedKey !== qKey || !S.excl.active) return false;
+  S.excl.queuedCompatible = !!(qr && qr.ok && qr.compatible);
+  if ($('#popFmt') && $('#popFmt').classList.contains('show')) renderFmtPopover();
+  return S.excl.queuedCompatible;
+}
+
+async function handleGaplessAdvanced(ev) {
+  if (!S.excl || !S.excl.active) return;
+  let ni = S.excl.queuedIndex;
+  const tid = String((ev && ev.trackId) || '');
+  const bar = tid.indexOf('|');
+  if (bar > 0) {
+    const parsed = Number(tid.slice(0, bar));
+    if (Number.isInteger(parsed) && parsed >= 0 && parsed < S.q.length) ni = parsed;
+  }
+  const k = qTrack(ni);
+  if (!k) return;
+
+  const seq = ++loadSeq;
+  S.i = ni;
+  S.prefetchedFor = '';
+  S.excl.queuedKey = '';
+  S.excl.queuedIndex = -1;
+  S.excl.queuedCompatible = false;
+  S.excl.active = true;
+  S.excl.playing = true;
+  S.excl.pos = 0;
+  S.excl.dur = Number(ev.duration) || Number(k.duration) || 0;
+  S.excl.info = ev;
+  errStreak = 0;
+  clock.stalled = false;
+  prevPct = -1;
+  prevSec = -1;
+  prevDurSec = -1;
+  S.playing = true;
+
+  S.lyrics = [];
+  S.lyricSrc = '';
+  renderLyrics();
+  setLyrHint(k, null);
+  paintMeta();
+  markCurrent();
+  syncPlayIcon();
+  syncClock(0);
+  renderFrameOnce();
+  startFrame();
+  renderFmtPopover();
+  persistPos(true);
+
+  // 立即检查是否继续预载下下一首（适合连续短轨 / 现场专辑）
+  maybeQueueGaplessNext(false);
+
+  // 异步刷新封面、主色与歌词（完整复用 playAt 的本地 / 网易云 / B站 / QQ / 酷狗封面逻辑）
+  try {
+    let art = null;
+    const net = isNet(k);
+    const bilT = isBil(k);
+    if (net || bilT) {
+      art = await loadArt(k);
+    } else if (/^(kg|qq):/.test(String(k.path || ''))) {
+      try {
+        const am = k.albumMid || albumMidOf(k, 'qq');
+        const m = await window.api.accMeta(k.path, am);
+        if (m && m.ok) {
+          art = m.cover || null;
+          if (m.codec) k.codec = m.codec;
+          if (m.bitrate) { k.bitrate = m.bitrate; S.libDirty = true; }
+        }
+      } catch {}
+    } else {
+      const cachedDetail = detailPrefetch.get(k.path);
+      if (cachedDetail) detailPrefetch.delete(k.path);
+      const detail = cachedDetail || await window.api.trackDetail(k.path);
+      if (seq !== loadSeq) return;
+      if (detail) {
+        k.error = detail.error;
+        if (detail.duration && detail.duration !== k.duration) {
+          k.duration = detail.duration;
+          S.libDirty = true;
+          updateRowDuration(k);
+        }
+        art = detail.cover || null;
+      }
+    }
+    if (seq !== loadSeq) return;
+    if (art) {
+      setCover(k.path, art);
+      const c = await accentFrom(art);
+      if (seq !== loadSeq) return;
+      setAccent(c || NEUTRAL);
+    } else {
+      setAccent(NEUTRAL);
+    }
+    if (S.i === ni && seq === loadSeq) paintMeta();
+    renderMediaSession();
+  } catch {}
+
+  try {
+    const cachedLy = lyricPrefetch.get(k.path);
+    if (cachedLy) lyricPrefetch.delete(k.path);
+    const ly = cachedLy || await window.api.trackLyric(k.path);
+    if (seq !== loadSeq) return;
+    S.lyrics = buildLyrics(ly);
+    S.lyricSrc = ly.source || '';
+    setLyrHint(k, ly);
+    renderLyrics();
+    if (S.lyrics.length) setTimeout(() => { if (seq === loadSeq) centerLine(0); }, 60);
+    renderFmtPopover();
+  } catch {}
+  if (seq === loadSeq) applyTheme();
+}
+
+function toggleGapless(want) {
+  const on = !!want;
+  S.settings.gapless = on;
+  syncToggles();
+  saveSettings();
+  if (on) {
+    if (S.excl && S.excl.active) maybeQueueGaplessNext(true);
+    toast(S.settings.usbExclusive
+      ? '已开启无缝播放（同采样率曲目零间隙衔接）'
+      : '已开启无缝播放（开启 USB 独占后生效）');
+  } else {
+    clearGaplessQueue();
+    toast('已关闭无缝播放');
+  }
+  renderFmtPopover();
 }
 
 /* ---------------- 播放/暂停平滑淡入淡出（约 110ms，消除扬声器爆音） ---------------- */
@@ -4032,6 +4424,38 @@ function syncPlayIcon() {
 function togglePlay() {
   if (!S.q.length) { toast(S.settings.playlist.length ? '播放列表里的歌都不在曲库了' : '播放列表是空的 · 先去「选择歌单」或「插入歌曲」'); return; }
   if (S.i < 0) { playAt(0); return; }
+  if (S.excl && S.excl.active) {
+    if (S.playing) {
+      S.excl.pos = clockNow(performance.now());
+      S.excl.playing = false;
+      S.playing = false;
+      syncPlayIcon();
+      stopFrame();
+      renderFrameOnce();
+      window.api.exclPause().catch(() => {});
+      persistPos(true);
+      return;
+    }
+    const dur = pbDuration();
+    if (dur > 0 && pbTime() >= dur - 0.05) S.excl.pos = 0;
+    window.api.exclPlay().then(r => {
+      if (r && r.ok) {
+        S.excl.playing = true;
+        S.playing = true;
+        syncPlayIcon();
+        syncClock();
+        startFrame();
+      } else {
+        toast((r && r.message) || '独占播放恢复失败');
+      }
+    }).catch(() => {});
+    return;
+  }
+  if (!audio.src && S.i >= 0) {
+    const resumeAt = S.excl && Number(S.excl.resumeAt) > 0 ? Number(S.excl.resumeAt) : 0;
+    playAt(S.i, { autoplay: true, seekTo: resumeAt });
+    return;
+  }
   const targetVol = clamp(Number(S.settings.volume), 0, 1);
   if (S.playing) {
     cancelAudioFade();
@@ -4139,7 +4563,7 @@ function next() {
 }
 function prev() {
   if (!S.q.length) { toast('播放列表是空的'); return; }
-  if (S.i >= 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
+  if (S.i >= 0 && pbTime() > 3) { pbSeek(0); return; }
   const i = stepIndex(-1);
   if (i >= 0) playAt(i);
   else if (S.settings.playMode === 'seq') toast('已经是第一首');
@@ -4153,6 +4577,8 @@ function cycleMode() {
   syncModeBtn();
   toast(MODE_META[S.settings.playMode].name);
   saveSettings();
+  clearGaplessQueue();
+  maybeQueueGaplessNext(false);
 }
 
 function syncModeBtn() {
@@ -4185,7 +4611,7 @@ function persistPos(force) {
   const now = performance.now();
   if (!force && now - posClock < 5000) return;
   posClock = now;
-  const pos = { id: k.path, t: audio.currentTime || 0, at: Date.now() };
+  const pos = { id: k.path, t: pbTime(), at: Date.now() };
   S.settings.playPos = pos;
   // 播放中每 5 秒只异步落盘极小的 playpos.json，不再重写整份 settings.json；
   // 暂停 / 播完 / 显式 force 时同步落进 settings.json，兼顾性能与既有契约。
@@ -4219,20 +4645,70 @@ function restorePos() {
 const FALLBACK_SETTINGS = {
   theme: 'auto', volume: 0.78, sinkId: '', muted: false,
   lat: 31.2304, lon: 121.4737, city: '上海', globalKeys: true, quality: 'exhigh',
-  lyricTrans: true, autoCheckUpdate: true, playlist: [], playMode: 'seq', playPos: null
+  lyricTrans: true, autoCheckUpdate: true, playlist: [], playMode: 'seq', playPos: null,
+  usbExclusive: false, exclusiveDeviceId: '', gapless: false
 };
 
 function seek(delta) {
-  const d = audio.duration;
+  const d = pbDuration();
   // 没有曲目时 duration 是 NaN：clamp(…, 0, NaN) 还是 NaN，写进 currentTime 会抛
   // InvalidStateError，方向键就变成「按一下就报错」。
   if (!Number.isFinite(d) || d <= 0) return;
-  const t = audio.currentTime || 0;
-  audio.currentTime = clamp(t + delta, 0, d);
+  const t = pbTime();
+  pbSeek(clamp(t + delta, 0, d));
 }
 
 /* ------------------------------------------------------------------ 输出设备 */
 async function loadDevices() {
+  if (S.settings && S.settings.usbExclusive && window.api && window.api.exclDevices) {
+    let res = null;
+    try { res = await window.api.exclDevices(); } catch { res = null; }
+    const devs = (res && res.ok && Array.isArray(res.devices)) ? res.devices : [];
+    S.excl.devices = devs;
+    const list = $('#devList');
+    let curId = S.settings.exclusiveDeviceId || '';
+    if (!curId && devs.length) {
+      const def = devs.find(d => d.isUsb) || devs.find(d => d.isDefault) || devs[0];
+      curId = def ? def.id : '';
+    }
+    if (!devs.length) {
+      list.innerHTML = '<div class="pop-row"><span>未发现 WASAPI 输出设备</span></div>';
+    } else {
+      list.innerHTML = devs.map((d) => {
+        const badges = (d.isUsb ? '<span class="dev-tag">USB</span>' : '')
+          + (d.isDefault ? '<span class="dev-tag">默认</span>' : '');
+        const on = d.id === curId;
+        return `<div class="pop-row" data-id="${esc(d.id)}" data-name="${esc(d.name)}"><span>${esc(d.name)}${badges}</span><span>${on ? '✓' : ''}</span></div>`;
+      }).join('');
+      $$('#devList .pop-row').forEach(el => {
+        el.onclick = async () => {
+          const id = el.dataset.id || '';
+          const name = el.dataset.name || '系统默认';
+          S.settings.exclusiveDeviceId = id;
+          S.excl.deviceName = name;
+          saveSettings();
+          $('#setDev').textContent = name;
+          toast('独占输出目标：' + name);
+          loadDevices();
+          closePops();
+          const cur = curTrack();
+          if (cur && S.i >= 0 && isExclEligible(cur)) {
+            const wasPlaying = !pbPaused();
+            const at = pbTime();
+            await playAt(S.i, { autoplay: wasPlaying, seekTo: at });
+          }
+        };
+      });
+    }
+    $('#devNote').textContent = devs.length
+      ? 'USB 独占模式直接枚举 Windows WASAPI 硬件端点，按曲目原生采样率直通；独占期间其他应用无法通过该设备发声。'
+      : '未发现可用的 WASAPI 音频端点。';
+    const curDev = devs.find(d => d.id === curId) || devs.find(d => d.isDefault);
+    S.excl.deviceName = curDev ? curDev.name : '默认音频端点';
+    $('#setDev').textContent = S.excl.deviceName;
+    return;
+  }
+
   try {
     const all = await navigator.mediaDevices.enumerateDevices();
     S.devices = all.filter(d => d.kind === 'audiooutput');
@@ -4260,10 +4736,44 @@ async function loadDevices() {
     });
   }
   $('#devNote').textContent = S.devices.length
-    ? '设备列表与切换由 Chromium 的 setSinkId 完成，是真实路由；采样率与独占模式无法在网页层查询或控制。'
+    ? '设备列表与切换由 Chromium 的 setSinkId 完成，是真实路由；采样率与独占模式可在设置中开启「USB 独占」接管。'
     : '系统未暴露输出设备。';
   const cur = S.devices.find(d => d.deviceId === S.settings.sinkId);
   $('#setDev').textContent = cur ? cur.label : '系统默认';
+}
+
+async function toggleUsbExclusive(want) {
+  const on = !!want;
+  if (on && window.api && window.api.exclStatus) {
+    const st = await window.api.exclStatus().catch(() => null);
+    if (!st || !st.available) {
+      toast('未找到 WASAPI 独占音频引擎，无法开启 USB 独占');
+      S.settings.usbExclusive = false;
+      syncToggles();
+      return;
+    }
+    if (!S.settings.exclusiveDeviceId && window.api.exclDevices) {
+      const dr = await window.api.exclDevices().catch(() => null);
+      const devs = (dr && dr.ok && Array.isArray(dr.devices)) ? dr.devices : [];
+      const pick = devs.find(d => d.isUsb) || devs.find(d => d.isDefault) || devs[0];
+      if (pick) S.settings.exclusiveDeviceId = pick.id;
+    }
+  }
+  S.settings.usbExclusive = on;
+  syncToggles();
+  saveSettings();
+  await loadDevices();
+
+  const cur = curTrack();
+  if (cur && S.i >= 0 && isExclEligible(cur)) {
+    const wasPlaying = !pbPaused();
+    const at = pbTime();
+    await playAt(S.i, { autoplay: wasPlaying, seekTo: at });
+  } else if (!on) {
+    deactivateExclusive(true);
+  }
+  renderFmtPopover();
+  toast(on ? '已开启 USB 独占（本地与在线音源直通）' : '已关闭 USB 独占，恢复系统混音');
 }
 
 /* ------------------------------------------------------------------ 弹层 */
@@ -4489,16 +4999,24 @@ async function addPaths(paths) {
  * 一秒只跳 4 次，看起来就是卡顿。这里用 performance.now 在两次锚点之间插值，
  * 偏离真实播放时间超过 0.3s 再由真实值拉回，既顺滑又不会累积漂移。
  */
-const clock = { base: 0, wall: 0, stalled: false };
-function syncClock() {
-  clock.base = audio.currentTime || 0;
+const clock = { base: 0, wall: 0, rate: 1, stalled: false };
+function syncClock(pos) {
+  clock.base = pos != null ? (Number(pos) || 0) : pbTime();
   clock.wall = performance.now();
+  clock.rate = 1;
 }
 function clockNow(now) {
-  if (audio.paused || audio.seeking || clock.stalled) return audio.currentTime || 0;
-  const real = audio.currentTime || 0;
-  const guess = clock.base + (now - clock.wall) / 1000;
-  if (Math.abs(guess - real) > 0.3) { clock.base = real; clock.wall = now; return real; }
+  if (pbPaused() || (!S.excl.active && audio.seeking) || clock.stalled) return pbTime();
+  const guess = clock.base + ((now - clock.wall) / 1000) * (clock.rate || 1);
+  if (S.excl && S.excl.active) {
+    // 独占模式：tick 为离散快照，绝不在 rAF 中拿旧快照硬拉回退，避免每 80ms 锯齿回跳闪烁；
+    // 仅由 tick 到达时刻通过软锁相微调 rate 平滑收敛（严格单调递增）。
+    const dur = pbDuration();
+    const clamped = dur > 0 ? Math.min(guess, dur) : guess;
+    return Math.max(0, clamped);
+  }
+  const real = pbTime();
+  if (Math.abs(guess - real) > 0.3) { clock.base = real; clock.wall = now; clock.rate = 1; return real; }
   return guess;
 }
 
@@ -4527,7 +5045,7 @@ function resetProgressUI() {
 }
 
 function renderFrameAt(t) {
-  const d = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+  const d = pbDuration();
   if (d) {
     const p = clamp(t / d, 0, 1);
     if (prevPct < 0 || Math.abs(p - prevPct) >= 0.0004) {   // 0.04% ≈ 半像素，够细但不浪费
@@ -4562,7 +5080,7 @@ function renderFrameAt(t) {
 }
 
 function renderFrameOnce() {
-  renderFrameAt(audio.currentTime || 0);
+  renderFrameAt(pbTime());
 }
 
 function startFrame() {
@@ -4577,7 +5095,7 @@ function stopFrame() {
 }
 
 function frame(now) {
-  if (document.hidden || (audio.paused && !S.seekDrag)) {
+  if (document.hidden || (pbPaused() && !S.seekDrag)) {
     rafId = 0;
     return;
   }
@@ -4760,6 +5278,16 @@ function bind() {
     audio.muted = false;
     $('#muteMark').classList.remove('on');
     saveSettings();
+    if (S.excl && S.excl.active && window.api && window.api.exclVolume) {
+      window.api.exclVolume(S.settings.volume, false).then(r => {
+        if (r && r.ok && S.excl.info) {
+          S.excl.info.bitPerfect = !!r.bitPerfect;
+          if (r.volumeMode) S.excl.info.volumeMode = r.volumeMode;
+          if (typeof r.hwVolumeAvailable === 'boolean') S.excl.info.hwVolumeAvailable = r.hwVolumeAvailable;
+          if ($('#popFmt').classList.contains('show')) renderFmtPopover();
+        }
+      }).catch(() => {});
+    }
   };
   $('#muteRow').onclick = () => {
     cancelAudioFade();
@@ -4767,6 +5295,16 @@ function bind() {
     audio.muted = S.settings.muted;
     $('#muteMark').classList.toggle('on', S.settings.muted);
     saveSettings();
+    if (S.excl && S.excl.active && window.api && window.api.exclVolume) {
+      window.api.exclVolume(S.settings.volume, !!S.settings.muted).then(r => {
+        if (r && r.ok && S.excl.info) {
+          S.excl.info.bitPerfect = !!r.bitPerfect;
+          if (r.volumeMode) S.excl.info.volumeMode = r.volumeMode;
+          if (typeof r.hwVolumeAvailable === 'boolean') S.excl.info.hwVolumeAvailable = r.hwVolumeAvailable;
+          if ($('#popFmt').classList.contains('show')) renderFmtPopover();
+        }
+      }).catch(() => {});
+    }
   };
 
   // 进度条
@@ -4775,7 +5313,8 @@ function bind() {
   const seekTo = e => {
     const r = scrub.getBoundingClientRect();
     const p = clamp((e.clientX - r.left) / r.width, 0, 1);
-    if (audio.duration) audio.currentTime = p * audio.duration;
+    const dur = pbDuration();
+    if (dur) pbSeek(p * dur);
   };
   const moveBub = e => {
     const r = scrub.getBoundingClientRect();
@@ -4783,7 +5322,7 @@ function bind() {
     const half = (bubW || 0) / 2;
     const x = clamp(p * r.width, half + 2, r.width - half - 2);
     $('#bub').style.left = x + 'px';
-    $('#bub').textContent = fmt((audio.duration || 0) * p);
+    $('#bub').textContent = fmt(pbDuration() * p);
   };
   /* 拖拽态用 .scrubbing 而不是 .drag——.drag 是标题栏拖拽区的样式
      （flex:1 / height:100% / -webkit-app-region:drag），一旦撞上就会
@@ -4794,7 +5333,7 @@ function bind() {
     scrub.classList.remove('scrubbing');
   };
   scrub.onpointerdown = e => {
-    if (!audio.duration) return;
+    if (!pbDuration()) return;
     S.seekDrag = true;
     bubW = $('#bub').offsetWidth;
     scrub.classList.add('scrubbing');
@@ -4835,9 +5374,113 @@ function bind() {
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) stopFrame();
-    else if (!audio.paused) { syncClock(); startFrame(); }
+    else if (!pbPaused()) { syncClock(); startFrame(); }
     else renderFrameOnce();
   });
+  if (window.api && window.api.onExclEvent) {
+    window.api.onExclEvent(ev => {
+      if (!ev || typeof ev !== 'object') return;
+      if (ev.ev === 'tick') {
+        if (!S.excl.active) return;
+        const nextPos = Number(ev.pos) || 0;
+        S.excl.pos = nextPos;
+        if (Number(ev.dur) > 0) S.excl.dur = Number(ev.dur);
+        if (!S.seekDrag && !pbPaused()) {
+          const now = performance.now();
+          const cur = clock.base + ((now - clock.wall) / 1000) * (clock.rate || 1);
+          const err = nextPos - cur;
+          if (Math.abs(err) >= 0.35) {
+            // 仅在大偏差（如跳转/硬件锁频）时硬对齐
+            clock.base = nextPos;
+            clock.wall = now;
+            clock.rate = 1;
+          } else {
+            // 软锁相（PLL）：锚定当前已渲染位置绝不回退，以 ±6% 无感速率差平滑追平误差
+            clock.base = Math.max(0, cur);
+            clock.wall = now;
+            clock.rate = Math.abs(err) < 0.012 ? 1 : clamp(1 + err * 0.65, 0.94, 1.06);
+          }
+        }
+        persistPos(false);
+        prefetchNext(false);
+        maybeQueueGaplessNext(false);
+      } else if (ev.ev === 'gapless_advanced') {
+        handleGaplessAdvanced(ev);
+      } else if (ev.ev === 'state') {
+        if (!S.excl.active) return;
+        S.excl.playing = !!ev.playing;
+        S.playing = !!ev.playing;
+        syncPlayIcon();
+        syncClock();
+        if (S.playing) startFrame();
+        else { stopFrame(); renderFrameOnce(); }
+      } else if (ev.ev === 'ended') {
+        if (!S.excl.active) return;
+        S.excl.playing = false;
+        S.excl.pos = S.excl.dur || S.excl.pos;
+        if (window.P2 && window.P2.onTrackEnded()) return;
+        if (S.settings.playMode === 'one') {
+          pbSeek(0);
+          window.api.exclPlay().then(r => {
+            if (r && r.ok) {
+              S.excl.playing = true;
+              S.playing = true;
+              syncPlayIcon();
+              syncClock();
+              startFrame();
+            }
+          }).catch(() => {});
+          return;
+        }
+        const ni = stepIndex(1);
+        if (ni >= 0) { playAt(ni); return; }
+        S.playing = false;
+        syncPlayIcon();
+        stopFrame();
+        renderFrameOnce();
+        persistPos(true);
+      } else if (ev.ev === 'device_lost') {
+        if (!S.excl.active) return;
+        const at = clockNow(performance.now());
+        deactivateExclusive(false);
+        S.excl.resumeAt = at;
+        S.excl.pos = at;
+        S.playing = false;
+        syncPlayIcon();
+        stopFrame();
+        renderFrameOnce();
+        persistPos(true);
+        toast(ev.message || 'USB 音频设备已断开，已暂停播放', 4000);
+      } else if (ev.ev === 'error') {
+        if (!S.excl.active) return;
+        const at = Number.isFinite(Number(ev.pos)) ? Number(ev.pos) : clockNow(performance.now());
+        const wasPlaying = S.playing;
+        deactivateExclusive(false);
+        S.excl.resumeAt = at;
+        S.playing = false;
+        syncPlayIcon();
+        stopFrame();
+        renderFrameOnce();
+        toast((ev.message || '独占音频流中断') + '，已自动回退系统混音', 3500);
+        if (wasPlaying && S.i >= 0) {
+          playAt(S.i, { autoplay: true, seekTo: at, forceShared: true });
+        }
+      } else if (ev.ev === 'devices_changed') {
+        if (S.settings && S.settings.usbExclusive && ($('#popDev').classList.contains('show') || $('#dSet').classList.contains('show'))) {
+          loadDevices();
+        }
+      } else if (ev.ev === 'crashed') {
+        if (S.excl.active) {
+          deactivateExclusive(false);
+          S.playing = false;
+          syncPlayIcon();
+          stopFrame();
+          renderFrameOnce();
+          toast('独占音频引擎已异常退出，已切换回待机状态', 3500);
+        }
+      }
+    });
+  }
   /* 播完自动续：睡眠定时「播完当前曲」优先停止；单曲循环重播当前；其余交给 stepIndex */
   audio.addEventListener('ended', () => {
     if (window.P2 && window.P2.onTrackEnded()) return;
@@ -4956,6 +5599,14 @@ function bind() {
       swAutoUpd.classList.toggle('on', S.settings.autoCheckUpdate);
       saveSettings();
     };
+  }
+  const swUsbExcl = $('#swUsbExcl');
+  if (swUsbExcl) {
+    swUsbExcl.onclick = () => toggleUsbExclusive(!S.settings.usbExclusive);
+  }
+  const swGapless = $('#swGapless');
+  if (swGapless) {
+    swGapless.onclick = () => toggleGapless(!S.settings.gapless);
   }
   const btnLyrMinus = $('#btnLyrMinus');
   const btnLyrPlus = $('#btnLyrPlus');
@@ -5106,8 +5757,9 @@ function bind() {
     ms.setActionHandler('nexttrack', next);
     ms.setActionHandler('previoustrack', prev);
     ms.setActionHandler('seekto', d => {
-      if (typeof d.seekTime === 'number' && Number.isFinite(audio.duration) && audio.duration > 0) {
-        audio.currentTime = clamp(d.seekTime, 0, audio.duration);
+      const dur = pbDuration();
+      if (typeof d.seekTime === 'number' && Number.isFinite(dur) && dur > 0) {
+        pbSeek(clamp(d.seekTime, 0, dur));
       }
     });
     ms.setActionHandler('seekbackward', d => seek(-(d.seekOffset || 10)));
@@ -5121,6 +5773,15 @@ function stepVolume(delta) {
   audio.volume = S.settings.volume;
   $('#volRange').value = Math.round(S.settings.volume * 100);
   saveSettings();
+  if (S.excl && S.excl.active && window.api && window.api.exclVolume) {
+    window.api.exclVolume(S.settings.volume, !!S.settings.muted).then(r => {
+      if (r && r.ok && S.excl.info) {
+        S.excl.info.bitPerfect = !!r.bitPerfect;
+        if (r.volumeMode) S.excl.info.volumeMode = r.volumeMode;
+        if (typeof r.hwVolumeAvailable === 'boolean') S.excl.info.hwVolumeAvailable = r.hwVolumeAvailable;
+      }
+    }).catch(() => {});
+  }
 }
 
 function syncToggles() {
@@ -5128,6 +5789,24 @@ function syncToggles() {
   $('#swTr').classList.toggle('on', S.settings.lyricTrans !== false);
   const swAutoUpd = $('#swAutoUpd');
   if (swAutoUpd) swAutoUpd.classList.toggle('on', S.settings.autoCheckUpdate !== false);
+  const swUsbExcl = $('#swUsbExcl');
+  if (swUsbExcl) swUsbExcl.classList.toggle('on', !!S.settings.usbExclusive);
+  const usbSub = $('#usbExclSub');
+  if (usbSub) {
+    usbSub.textContent = S.settings.usbExclusive
+      ? '已开启：本地与在线音源均通过 WASAPI 独占直通硬件 DAC（异常自动回退系统混音）'
+      : '绕过系统混音直通 USB DAC（WASAPI 独占，支持本地无损与在线音源自适应直通）';
+  }
+  const swGapless = $('#swGapless');
+  if (swGapless) swGapless.classList.toggle('on', !!S.settings.gapless);
+  const gapSub = $('#gaplessSub');
+  if (gapSub) {
+    gapSub.textContent = !S.settings.gapless
+      ? '开启后同采样率曲目在 USB 独占下零间隙衔接（适合现场与概念专辑）'
+      : (S.settings.usbExclusive
+          ? '已开启：同采样率曲目原生双缓冲零间隙衔接（跨采样率自动无爆音切频）'
+          : '已开启（待生效）：开启「USB 独占」后即可启用原生双缓冲零间隙衔接');
+  }
 }
 
 /* ---------------- 存储与缓存目录（设置页） ---------------- */
@@ -5710,6 +6389,8 @@ function idnInit() {
   if (typeof S.settings.lyricTrans !== 'boolean') S.settings.lyricTrans = true;
   if (!S.settings.lyricOffsets || typeof S.settings.lyricOffsets !== 'object' || Array.isArray(S.settings.lyricOffsets)) S.settings.lyricOffsets = {};
   if (typeof S.settings.autoCheckUpdate !== 'boolean') S.settings.autoCheckUpdate = true;
+  S.settings.usbExclusive = !!S.settings.usbExclusive;
+  if (typeof S.settings.exclusiveDeviceId !== 'string') S.settings.exclusiveDeviceId = '';
   S.settings.playlist = plNormalize(S.settings.playlist);
   if (!['auto', 'dark', 'light'].includes(S.settings.theme)) S.settings.theme = 'auto';
   S.settings.lat = Number.isFinite(Number(S.settings.lat)) ? clamp(Number(S.settings.lat), -89.9, 89.9) : 31.2304;

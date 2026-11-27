@@ -16,6 +16,8 @@ const { readJSON, writeJSON, writeJSONAsync, calcDirStats, cleanDirContents } = 
 const { createThumbar } = require('./thumbar');
 const { createAppTray } = require('./tray');
 const { createDesktopLyric } = require('./desktop-lyric');
+const { createAudioExclusive } = require('./audio-exclusive');
+const { createExclusiveStreamProxy } = require('./exclusive-proxy');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -386,6 +388,21 @@ function parseBilId(url) {
  */
 const UP_HEAD_TIMEOUT = 15000;
 const upCache = new Map();
+const VALID_QUALITIES = new Set(['standard', 'higher', 'exhigh', 'lossless']);
+let currentQuality = 'exhigh';
+function normalizeQuality(q) {
+  const s = String(q || '').toLowerCase();
+  return VALID_QUALITIES.has(s) ? s : 'exhigh';
+}
+function setGlobalQuality(q) {
+  const next = normalizeQuality(q);
+  if (next !== currentQuality) {
+    currentQuality = next;
+    upCache.clear();
+  }
+  ne.setQuality(next);
+  return next;
+}
 
 function parseUpId(url) {
   const m = /^upaudio:\/\/s\/([a-z]+)\/(.+)$/.exec(String(url || ''));
@@ -411,8 +428,9 @@ function upstreamOf(provider) {
   return String(saved || env || '').trim();
 }
 
-async function upResolve(provider, id) {
-  const key = provider + ':' + id;
+async function upResolve(provider, id, qualityOverride) {
+  const q = normalizeQuality(qualityOverride || currentQuality);
+  const key = provider + ':' + id + ':' + q;
   const now = Date.now();
   const hit = upCache.get(key);
   if (hit && now - hit.at < 90_000) return hit.info;
@@ -421,8 +439,8 @@ async function upResolve(provider, id) {
   if (!cred) throw Object.assign(new Error('还没有登录该音源'), { code: 'E_AUTH_REQUIRED' });
   const extra = cred.extra || {};
   const info = provider === 'kugou'
-    ? await streams.kgResolve(id, 'high', cred, upstreamOf('kugou'), upstreamCookieOf('kugou'))
-    : await streams.qqResolve(id, { uin: extra.uin, musickey: extra.musickey }, 'high');
+    ? await streams.kgResolve(id, q === 'standard' ? 'standard' : 'high', cred, upstreamOf('kugou'), upstreamCookieOf('kugou'))
+    : await streams.qqResolve(id, { uin: extra.uin, musickey: extra.musickey }, q);
   /* QQ 的 purl 只在部分 CDN 主机上有效：dl 常常 404，isure/ws 才是真正给播放器的。
    * 这里一次解析出候选主机列表，代理层按顺序试。 */
   if (provider === 'qqapp' && info.url) {
@@ -437,6 +455,81 @@ async function upResolve(provider, id) {
   upCache.set(key, { at: now, info });
   return info;
 }
+
+/* ---------------- 统一多音源音质注册表（预留扩展接口） ----------------
+ * 后续新增任意在线音源，只需调用 registerQualityProvider(...) 注册匹配与解析逻辑，
+ * 渲染层左下角音质切换按键、降级提示、独占直通与共享回退全部自动复用。 */
+const QUALITY_PROVIDERS = [];
+function registerQualityProvider(def) {
+  if (!def || !def.id || typeof def.match !== 'function' || typeof def.resolve !== 'function') return;
+  const idx = QUALITY_PROVIDERS.findIndex(p => p.id === def.id);
+  if (idx >= 0) QUALITY_PROVIDERS[idx] = def;
+  else QUALITY_PROVIDERS.push(def);
+}
+
+registerQualityProvider({
+  id: 'netease',
+  name: '网易云',
+  match: (key) => isNeKey(key),
+  resolve: async (key, quality) => {
+    const r = await ne.songUrl(Number(String(key).slice(3)), quality);
+    return {
+      ok: true,
+      source: 'netease',
+      sourceName: '网易云',
+      codec: r.codec || 'MP3',
+      bitrate: r.br || r.bitrate || 0,
+      lossless: !!r.lossless,
+      level: r.level || quality,
+      requested: r.requested || quality,
+      downgraded: !!r.downgraded
+    };
+  }
+});
+
+registerQualityProvider({
+  id: 'qqapp',
+  name: 'QQ 音乐',
+  match: (key) => /^qq:[0-9A-Za-z]{8,24}$/.test(String(key || '')),
+  resolve: async (key, quality) => {
+    const mid = String(key).slice(3);
+    const info = await upResolve('qqapp', mid, quality);
+    return {
+      ok: true,
+      source: 'qqapp',
+      sourceName: 'QQ 音乐',
+      codec: info.codec || (info.lossless ? 'FLAC' : 'MP3'),
+      bitrate: info.bitrate || (info.lossless ? 900000 : (info.quality === '320k' ? 320000 : 128000)),
+      lossless: !!info.lossless,
+      level: info.level || (info.lossless ? 'lossless' : (info.quality === '320k' ? 'exhigh' : 'standard')),
+      requested: info.requested || quality,
+      downgraded: !!info.downgraded
+    };
+  }
+});
+
+registerQualityProvider({
+  id: 'kugou',
+  name: '酷狗',
+  match: (key) => /^kg:[0-9A-Fa-f]{32}$/.test(String(key || '')),
+  resolve: async (key, quality) => {
+    const hash = String(key).slice(3).toUpperCase();
+    const info = await upResolve('kugou', hash, quality);
+    const br = info.bitrate || (info.quality === '320k' ? 320000 : 128000);
+    const lvl = br >= 300000 ? 'exhigh' : 'standard';
+    return {
+      ok: true,
+      source: 'kugou',
+      sourceName: '酷狗',
+      codec: info.codec || 'MP3',
+      bitrate: br,
+      lossless: !!info.lossless,
+      level: lvl,
+      requested: quality,
+      downgraded: quality === 'lossless' || ((quality === 'exhigh' || quality === 'higher') && lvl === 'standard')
+    };
+  }
+});
 
 function registerUpProtocol() {
   protocol.handle('upaudio', async (request) => {
@@ -474,7 +567,8 @@ function registerUpProtocol() {
     console.log('[up]', provider, res.status, String(res.headers.get('content-type') || ''), info.url.slice(0, 70));
     if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 410) {
       try { ctrl.abort(); } catch {}
-      upCache.delete(provider + ':' + id);
+      const prefix = provider + ':' + id + ':';
+      for (const ck of upCache.keys()) { if (ck.startsWith(prefix)) upCache.delete(ck); }
       return new Response('upstream ' + res.status, { status: 502, headers: { 'x-up-reason': 'UP_EXPIRED' } });
     }
 
@@ -484,8 +578,13 @@ function registerUpProtocol() {
       if (v) h.set(k, v);
     }
     if (!h.has('accept-ranges')) h.set('accept-ranges', 'bytes');
-    const ct = String(h.get('content-type') || '');
-    if (!/^audio\//i.test(ct) && !/^video\//i.test(ct)) h.set('content-type', 'audio/mpeg');
+    const ct = String(h.get('content-type') || '').toLowerCase();
+    if (!/^audio\//i.test(ct) && !/^video\//i.test(ct)) {
+      const isFlac = info.lossless || info.ext === '.flac' || /\.flac(?:$|\?)/i.test(String(info.url || ''));
+      h.set('content-type', isFlac ? 'audio/flac' : 'audio/mpeg');
+    } else if (ct.startsWith('audio/x-flac')) {
+      h.set('content-type', 'audio/flac');
+    }
     return new Response(proxyBody(res, ctrl, provider + ':' + id), { status: res.status, headers: h });
   });
 }
@@ -675,7 +774,10 @@ const DEFAULT_SETTINGS = {
   taskbarProgress: true,       // 任务栏图标播放进度条
   lowMotion: false,            // 省电 / 低动效模式（关闭非激活歌词模糊与大半径玻璃滤镜）
   dlyrLocked: false,           // 桌面悬浮歌词鼠标穿透锁定
-  dlyrBounds: null             // 桌面悬浮歌词上次位置与尺寸
+  dlyrBounds: null,            // 桌面悬浮歌词上次位置与尺寸
+  usbExclusive: false,         // WASAPI USB 独占输出开关（Phase 1+2：本地与在线直通）
+  exclusiveDeviceId: '',       // WASAPI 独占输出目标端点 ID（空串=默认输出端点）
+  gapless: false               // Phase 3：原生双解码缓冲无缝播放开关（同采样率零间隙衔接）
 };
 
 let isQuitting = false;
@@ -979,7 +1081,7 @@ function createWindow() {
     }
     desktopLyric.close();
   });
-  win.on('closed', () => { thumbar.onWindowClosed(); isMini = false; preMini = null; win = null; });
+  win.on('closed', () => { audioExclusive.dispose(); thumbar.onWindowClosed(); isMini = false; preMini = null; win = null; });
   thumbar.hookMessages(win);
   // 渲染进程崩溃时留证并给一次自动恢复，总比留个白窗口强
   win.webContents.on('render-process-gone', (_e, details) => {
@@ -1148,6 +1250,25 @@ ipcMain.handle('track:detail', async (_e, file) => {
 
 /* 上游曲目为什么播不了：给渲染层一个「人话」的理由（VIP/版权/超时），
  * 别让 <audio> 只能报「格式不支持」。解析结果在主进程有 90s 缓存，问了不亏。 */
+ipcMain.handle('quality:resolve', async (_e, arg) => {
+  const key = String((arg && arg.key) || '').trim();
+  const q = setGlobalQuality((arg && arg.quality) || currentQuality);
+  const prov = QUALITY_PROVIDERS.find(p => p.match(key));
+  if (!prov) return { ok: true, supported: false, requested: q };
+  try {
+    const res = await prov.resolve(key, q);
+    return { ...res, ok: true, supported: true };
+  } catch (e) {
+    return {
+      ok: false,
+      supported: true,
+      source: prov.id,
+      sourceName: prov.name,
+      error: { code: String((e && e.code) || 'E_QUALITY'), message: String((e && e.message) || '音质解析失败') }
+    };
+  }
+});
+
 ipcMain.handle('up:check', async (_e, key) => {
   const s = String(key || '');
   const m = /^(kg|qq):(.+)$/.exec(s);
@@ -1216,9 +1337,8 @@ ipcMain.handle('settings:get', () => {
 });
 ipcMain.handle('settings:set', async (_e, s) => {
   await writeJSONAsync(settingsPath, { ...DEFAULT_SETTINGS, ...s }, true);
-  // 音质档位不只是界面开关：neaudio 协议在解析地址时用的是主进程这一份，
-  // 只改渲染层的设置会让「本地曲目上选的档位」在下次播网易云时对不上。
-  if (s && s.quality) ne.setQuality(s.quality);
+  // 音质档位不只是界面开关：neaudio / upaudio / 回环微代理在解析地址时共用主进程这一份。
+  if (s && s.quality) setGlobalQuality(s.quality);
   if (s && (s.closeAction === 'tray' || s.closeAction === 'exit')) cachedCloseAction = s.closeAction;
   return true;
 });
@@ -1912,6 +2032,34 @@ ipcMain.on('player:state', (_e, st) => {
   });
 });
 
+/* ---------------- WASAPI USB 独占音频后端（nckik-audio.exe 懒启动） ---------------- */
+const audioExclusive = createAudioExclusive({
+  app,
+  baseDir: __dirname,
+  userDir,
+  send,
+  logCrash
+});
+const exclusiveProxy = createExclusiveStreamProxy({
+  net,
+  ne,
+  bil,
+  upResolve,
+  upCache,
+  log: (...a) => console.log('[excl-proxy]', ...a)
+});
+ipcMain.handle('excl:status', () => ({ ...audioExclusive.status(), proxy: exclusiveProxy.status() }));
+ipcMain.handle('excl:devices', () => audioExclusive.listDevices());
+ipcMain.handle('excl:stream-url', (_e, arg) => exclusiveProxy.createStreamUrl(arg && arg.key, arg && arg.codec));
+ipcMain.handle('excl:load', (_e, arg) => audioExclusive.load(arg || {}));
+ipcMain.handle('excl:play', () => audioExclusive.play());
+ipcMain.handle('excl:pause', () => audioExclusive.pause());
+ipcMain.handle('excl:stop', () => audioExclusive.stop());
+ipcMain.handle('excl:seek', (_e, time) => audioExclusive.seek(time));
+ipcMain.handle('excl:volume', (_e, arg) => audioExclusive.setVolume(arg && arg.volume, arg && arg.muted));
+ipcMain.handle('excl:queue-next', (_e, arg) => audioExclusive.queueNext(arg || {}));
+ipcMain.handle('excl:clear-next', () => audioExclusive.clearNext());
+
 /* ---------------- 检查更新与播放器内更新（GitHub Releases） ---------------- */
 const updater = createUpdater({
   app,
@@ -2119,7 +2267,7 @@ app.whenReady().then(() => {
     sessdata: bil.sessdataShape()
   });
   const initSt = readJSON(settingsPath, {}) || {};
-  ne.setQuality(initSt.quality);   // 上次选的音质同样在首屏就生效
+  setGlobalQuality(initSt.quality); // 上次选的音质同步给全部在线音源（网易云/QQ/酷狗等）
   cachedCloseAction = initSt.closeAction === 'tray' ? 'tray' : 'exit';
   setupAccounts();
   thumbar.detectDark();
@@ -2134,6 +2282,8 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  exclusiveProxy.dispose();
+  audioExclusive.dispose();
   desktopLyric.close();
   appTray.destroy();
 });

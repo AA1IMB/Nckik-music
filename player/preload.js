@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   neLink: (v) => ipcRenderer.invoke('ne:link', v),
   neCover: (url, size) => ipcRenderer.invoke('ne:cover', url, size),
   neUrl: (id, quality) => ipcRenderer.invoke('ne:url', id, quality),
+  resolveQuality: (key, quality) => ipcRenderer.invoke('quality:resolve', { key, quality }),
   /* 账号：扫码登录（二维码 SVG + 状态轮询），凭证不回传渲染层 */
   neStatus: () => ipcRenderer.invoke('ne:status'),
   neQr: () => ipcRenderer.invoke('ne:qr'),
@@ -108,6 +109,19 @@ contextBridge.exposeInMainWorld('api', {
   cacheReset: () => ipcRenderer.invoke('cache:reset'),
   cacheOpen: () => ipcRenderer.invoke('cache:open'),
   cacheClear: () => ipcRenderer.invoke('cache:clear'),
+  /* WASAPI USB 独占音频输出（nckik-audio.exe） */
+  exclStatus: () => ipcRenderer.invoke('excl:status'),
+  exclDevices: () => ipcRenderer.invoke('excl:devices'),
+  exclStreamUrl: (key, codec) => ipcRenderer.invoke('excl:stream-url', { key, codec }),
+  exclLoad: (opts) => ipcRenderer.invoke('excl:load', opts),
+  exclPlay: () => ipcRenderer.invoke('excl:play'),
+  exclPause: () => ipcRenderer.invoke('excl:pause'),
+  exclStop: () => ipcRenderer.invoke('excl:stop'),
+  exclSeek: (t) => ipcRenderer.invoke('excl:seek', t),
+  exclVolume: (volume, muted) => ipcRenderer.invoke('excl:volume', { volume, muted }),
+  exclQueueNext: (opts) => ipcRenderer.invoke('excl:queue-next', opts),
+  exclClearNext: () => ipcRenderer.invoke('excl:clear-next'),
+  onExclEvent: (cb) => ipcRenderer.on('excl:event', (_e, ev) => cb(ev)),
   /* 检查更新与播放器内下载安装（GitHub Releases） */
   updCheck: () => ipcRenderer.invoke('upd:check'),
   updDownload: (opt) => ipcRenderer.invoke('upd:download', opt),

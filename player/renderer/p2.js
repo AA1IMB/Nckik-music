@@ -41,7 +41,7 @@
   function syncTaskbarProgress(t, force = false) {
     if (!window.api || !window.api.setTaskbarProgress) return;
     const enabled = !S.settings || S.settings.taskbarProgress !== false;
-    const dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+    const dur = typeof pbDuration === 'function' ? pbDuration() : (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0);
     const hasTrack = !!curTrack() && dur > 0;
     if (!enabled || !hasTrack) {
       if (P2.lastTbMode !== 'none' || force) {
@@ -55,7 +55,7 @@
     if (!force && mode === P2.lastTbMode && (now - P2.lastTbAt) < 1200) return;
     P2.lastTbAt = now;
     P2.lastTbMode = mode;
-    const cur = t != null ? Number(t) : (audio.currentTime || 0);
+    const cur = t != null ? Number(t) : (typeof pbTime === 'function' ? pbTime() : (audio.currentTime || 0));
     window.api.setTaskbarProgress({ progress: clamp(cur / dur, 0, 1), mode });
   }
 
@@ -135,7 +135,7 @@
       P2.dlyrOpen = !!r.open;
       P2.dlyrLocked = !!r.locked;
       syncDlyrControls();
-      if (P2.dlyrOpen) pushDlyr(audio.currentTime || 0, true);
+      if (P2.dlyrOpen) pushDlyr(typeof pbTime === 'function' ? pbTime() : (audio.currentTime || 0), true);
     }
     return r;
   }
@@ -167,7 +167,7 @@
     const chars = line.chars;
     let pct = 0;
     if (chars && chars.length) {
-      const lt = (t != null ? Number(t) : (audio.currentTime || 0)) + curLyricOffset();
+      const lt = (t != null ? Number(t) : (typeof pbTime === 'function' ? pbTime() : (audio.currentTime || 0))) + curLyricOffset();
       const firstT = chars[0].t0;
       const lastT = chars[chars.length - 1].t1;
       if (lt >= lastT) pct = 100;
@@ -246,7 +246,14 @@
 
   function triggerSleepStop(msg) {
     clearSleepTimer();
-    if (!audio.paused) {
+    if (S.excl && S.excl.active) {
+      S.excl.playing = false;
+      S.playing = false;
+      syncPlayIcon();
+      stopFrame();
+      renderFrameOnce();
+      if (window.api && window.api.exclPause) window.api.exclPause().catch(() => {});
+    } else if (!audio.paused) {
       const targetVol = clamp(Number(S.settings.volume), 0, 1);
       if (audio.muted || document.hidden || targetVol <= 0.001) {
         audio.pause();
@@ -274,6 +281,7 @@
       P2.sleepMode = 'track';
       P2.sleepEndAt = 0;
       P2.sleepMins = 0;
+      if (typeof clearGaplessQueue === 'function') clearGaplessQueue();
       syncSleepUI();
       toast('将在当前曲目播完后停止播放');
       return;
@@ -297,7 +305,7 @@
 
   /* ---------------- 生命周期与事件接线 ---------------- */
   function onFrame(t) {
-    const dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+    const dur = typeof pbDuration === 'function' ? pbDuration() : (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0);
     if (P2.mini) {
       const mf = el('#miniFill');
       if (mf) mf.style.transform = 'scaleX(' + (dur ? clamp((t || 0) / dur, 0, 1).toFixed(4) : '0') + ')';
@@ -311,7 +319,10 @@
   function onTrackEnded() {
     if (P2.sleepMode === 'track') {
       clearSleepTimer();
-      if (!audio.paused) { try { audio.pause(); } catch {} }
+      if (S.excl && S.excl.active) {
+        S.excl.playing = false;
+        if (window.api && window.api.exclPause) window.api.exclPause().catch(() => {});
+      } else if (!audio.paused) { try { audio.pause(); } catch {} }
       S.playing = false;
       syncPlayIcon();
       stopFrame();
@@ -398,7 +409,7 @@
           saveSettings();
         }
         syncDlyrControls();
-        if (P2.dlyrOpen) pushDlyr(audio.currentTime || 0, true);
+        if (P2.dlyrOpen) pushDlyr(typeof pbTime === 'function' ? pbTime() : (audio.currentTime || 0), true);
       });
     }
   }
@@ -449,11 +460,11 @@
     onWinState,
     syncMeta: () => {
       if (P2.mini) syncMiniUI();
-      if (P2.dlyrOpen) pushDlyr(audio.currentTime || 0, true);
+      if (P2.dlyrOpen) pushDlyr(typeof pbTime === 'function' ? pbTime() : (audio.currentTime || 0), true);
     },
     syncPlay: () => {
       if (P2.mini) syncMiniUI();
-      if (P2.dlyrOpen) pushDlyr(audio.currentTime || 0, true);
+      if (P2.dlyrOpen) pushDlyr(typeof pbTime === 'function' ? pbTime() : (audio.currentTime || 0), true);
       syncTaskbarProgress(audio.currentTime || 0, true);
     },
     setMini,

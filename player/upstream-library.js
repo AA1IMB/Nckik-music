@@ -92,8 +92,10 @@ async function musicu(comm, module, method, param) {
   const code = (j.req_0 && j.req_0.code) || j.code || 0;
   if (code !== 0) {
     const msg = (j.req_0 && j.req_0.message) || j.message || '';
-    throw fail(code === 1000 || code === 104400 ? 'E_AUTH_REQUIRED' : 'E_UPSTREAM_CODE',
-      `QQ 音乐接口返回 ${code}${msg ? '：' + msg : ''}`);
+    if (code === 1000 || code === 104400) {
+      throw fail('E_AUTH_REQUIRED', `QQ 音乐登录已过期（${code}），请前往「设置 → 播放账号」重新扫码登录`);
+    }
+    throw fail('E_UPSTREAM_CODE', `QQ 音乐接口返回 ${code}${msg ? '：' + msg : ''}`);
   }
   return (j.req_0 && j.req_0.data) || {};
 }

@@ -298,8 +298,10 @@
     <div class="lbl">音频输出</div>
     <div class="group">
       <div class="line"><div class="k">输出设备</div><div class="v" id="setDev">默认设备</div></div>
-      <div class="line"><div class="k">USB 独占<small>位完美直通需要 WASAPI Exclusive，本版本走系统混音，未接入</small></div><div class="v dim">未接入</div></div>
-      <div class="line"><div class="k">无缝播放<small>HTML5 音频不支持双解码器预读，未接入</small></div><div class="v dim">未接入</div></div>
+      <div class="line"><div class="k">USB 独占<small id="usbExclSub">绕过系统混音直通 USB DAC（WASAPI 独占，支持本地无损与在线音源自适应直通）</small></div>
+        <div class="sw" id="swUsbExcl"><i></i></div></div>
+      <div class="line"><div class="k">无缝播放<small id="gaplessSub">开启后同采样率曲目在 USB 独占下零间隙衔接（适合现场与概念专辑）</small></div>
+        <div class="sw" id="swGapless"><i></i></div></div>
     </div>
 
     <div class="lbl" id="secPlay">播放</div>
