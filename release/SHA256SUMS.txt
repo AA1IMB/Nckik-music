@@ -1,2 +1,2 @@
-6e7f4fd1e33215a2e3d56f7b6144a4735423be2273a626c61870ca52ec4f8e54 release/NckiksMusic-Portable-1.0.1.exe
-10fca2a3233c7bf138fd4181255c029236873c0707e409b53d01e1b0fe9ea3f5 release/NckiksMusic-Setup-1.0.1.exe
+5e1594d60e0cb4ade429625760e359f0103c3050f13d35c4386c2209009924b1  NckiksMusic-Setup-1.3.0.exe
+043342edbf8e2f99f10aacd76b0f8fe8af2ec1e16dd999fff34771d1c99c8581  NckiksMusic-Portable-1.3.0.exe
